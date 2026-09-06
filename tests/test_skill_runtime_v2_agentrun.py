@@ -53,6 +53,14 @@ def runtime_env(tmp_path, monkeypatch):
 
 
 def _run(reader, *, message="xlsx", explicit="xlsx", permission="read", tools=None, request_id="", model_loading=False):
+    # Construct historical v6 under its explicit opt-out; the patch ends before
+    # recovery/mutation assertions run against the product's new default.
+    with mock.patch.object(server_mod, "_SKILL_MODEL_LOADING_ENABLED", model_loading):
+        return _create_run_fixture(reader, message=message, explicit=explicit, permission=permission,
+                                   tools=tools, request_id=request_id, model_loading=model_loading)
+
+
+def _create_run_fixture(reader, *, message, explicit, permission, tools, request_id, model_loading):
     names = tools or [
         "read_file", "write_file", "run_command", "use_skill",
         "check_skill_dependencies", "read_skill_resource",

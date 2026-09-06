@@ -125,6 +125,8 @@ def _serve(root, repo_root, enabled, sync_failed, delay_ready, ui=False):
         "CODE_ROUTING_V2": "0",
         "CODE_SKILL_ACTIVATION_V1": "0",
         "CODE_SKILL_IMMUTABLE_ADMISSION_V1": "1" if enabled else "0",
+        # C3 exercises v6 startup/rollback, independently of the v7 default.
+        "CODE_SKILL_MODEL_LOADING_V1": "0",
         "PYTHONDONTWRITEBYTECODE": "1",
         "NO_PROXY": "127.0.0.1,localhost,::1",
     })

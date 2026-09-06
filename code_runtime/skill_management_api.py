@@ -151,49 +151,58 @@ class SkillManagementService:
         try:
             if not self.has_store():
                 return result
-            registry = self._registry()
-            state = self.store.inspect_startup_state()
-            managed = registry["schema"] == metadata.REGISTRY_SCHEMA
-            writable = bool(self.admission_enabled and self.owner is not None and not self.owner.released)
-            result.update(mode="managed-v2" if managed else "immutable-v1", registry=_base(registry),
-                          bindings=copy.deepcopy(registry["bindings"]), transactionState=state["state"],
-                          capabilities={"read": True, "write": writable and managed and state["state"] == "committed",
-                                        "convert": writable and not managed and state["state"] == "committed"})
-            for item in registry["installations"]:
-                entry = copy.deepcopy(item)
-                binding = next((b for b in registry["bindings"]
-                                if any(c["installationId"] == item["installationId"] for c in b["candidates"])), None)
-                entry.update(enabled=item.get("enabled", True), uninstalled=item.get("uninstalled", False),
-                             retainedRevisionIds=item.get("retainedRevisionIds", [item["revisionId"]]),
-                             routingAlias=binding["routingAlias"] if binding else item["displayName"],
-                             selected=bool(binding and (binding.get("selectedInstallationId") or
-                                           (binding.get("activeCandidate") or {}).get("installationId")) == item["installationId"]))
-                result["installations"].append(entry)
+            with self.reader.management_view() as (registry, state, read_revision):
+                managed = registry["schema"] == metadata.REGISTRY_SCHEMA
+                writable = bool(self.admission_enabled and self.owner is not None and not self.owner.released)
+                result.update(mode="managed-v2" if managed else "immutable-v1", registry=_base(registry),
+                              bindings=copy.deepcopy(registry["bindings"]), transactionState=state["state"],
+                              capabilities={"read": True, "write": writable and managed,
+                                            "convert": writable and not managed})
+                for item in registry["installations"]:
+                    entry = copy.deepcopy(item)
+                    binding = next((b for b in registry["bindings"]
+                                    if any(c["installationId"] == item["installationId"] for c in b["candidates"])), None)
+                    pinned = read_revision(item["revisionId"], paths={"SKILL.md"})
+                    descriptor, _ = admission._descriptor({"routingAlias": item["displayName"], "object": pinned})
+                    entry.update(description=descriptor["description"],
+                                 enabled=item.get("enabled", True), uninstalled=item.get("uninstalled", False),
+                                 retainedRevisionIds=item.get("retainedRevisionIds", [item["revisionId"]]),
+                                 routingAlias=binding["routingAlias"] if binding else item["displayName"],
+                                 selected=bool(binding and (binding.get("selectedInstallationId") or
+                                               (binding.get("activeCandidate") or {}).get("installationId")) == item["installationId"]))
+                    result["installations"].append(entry)
             return result
         except (store_api.SkillStoreError, revisions.SkillRevisionError, SkillManagementError, OSError) as exc:
             result.update(mode="unavailable", errorCode=getattr(exc, "code", "management_store_unavailable"),
+                          registry=None, installations=[], bindings=[],
                           capabilities={"read": False, "write": False, "convert": False})
             return result
 
     @_public_errors
-    def detail(self, iid, revision_id=None):
-        registry = self._registry()
-        item, pinned = self._object(registry, iid, revision_id)
-        files = {entry["path"]: entry for entry in pinned["files"]}
-        document = files["SKILL.md"]["content"].decode("utf-8")
-        name = _document_name(document)
-        selection = {"routingAlias": name, "object": pinned}
-        descriptor, body = admission._descriptor(selection)
-        dependency = admission._dependency(selection, name)
-        if self._registry() != registry:
-            _fail("registry_changed")
-        return {"protocol": PROTOCOL, "dataRootId": registry["dataRootId"], **copy.deepcopy(item),
-                "revisionId": pinned["revisionId"], "name": name, "document": document, "body": body,
-                "description": descriptor["description"], "keywords": descriptor["routingKeywords"],
-                "tools": descriptor["allowedTools"], "diagnostics": descriptor["diagnostics"],
-                "dependency": dependency,
-                "dependencyDocument": files["dependencies.json"]["content"].decode("utf-8") if "dependencies.json" in files else None,
-                "files": pinned["manifest"]["files"]}
+    def detail(self, iid, revision_id=None, *, data_root_id=None):
+        if not self.has_store():
+            _fail("management_store_required")
+        with self.reader.management_view() as (registry, _, read_revision):
+            if data_root_id is not None and data_root_id != registry["dataRootId"]:
+                _fail("management_identity_required", 400)
+            item = self._installation(registry, iid)
+            revision_id = item["revisionId"] if revision_id is None else revision_id
+            if revision_id not in item.get("retainedRevisionIds", [item["revisionId"]]):
+                _fail("management_revision_not_retained", 404)
+            pinned = read_revision(revision_id)
+            files = {entry["path"]: entry for entry in pinned["files"]}
+            document = files["SKILL.md"]["content"].decode("utf-8")
+            name = _document_name(document)
+            selection = {"routingAlias": name, "object": pinned}
+            descriptor, body = admission._descriptor(selection)
+            dependency = admission._dependency(selection, name)
+            return {"protocol": PROTOCOL, "dataRootId": registry["dataRootId"], **copy.deepcopy(item),
+                    "revisionId": pinned["revisionId"], "name": name, "document": document, "body": body,
+                    "description": descriptor["description"], "keywords": descriptor["routingKeywords"],
+                    "tools": descriptor["allowedTools"], "diagnostics": descriptor["diagnostics"],
+                    "dependency": dependency,
+                    "dependencyDocument": files["dependencies.json"]["content"].decode("utf-8") if "dependencies.json" in files else None,
+                    "files": pinned["manifest"]["files"]}
 
     @_public_errors
     def resource(self, iid, revision_id, relative):

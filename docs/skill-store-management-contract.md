@@ -18,6 +18,8 @@
 
 物理目录仍为 `skill-store-v1`，对象仍使用 `code-skill-revision/v1` 和原来的 `objects/sha256/<prefix>/<digest>/content` 路径。转换不重写 `root.json`、旧 bootstrap journal、旧 Skill 目录或对象字节，`dataRootId`、既有 `skillId`、`installationId` 和 `revisionId` 保持。
 
+事务日志规范化在同一次纯计算中复用已经验证的 base/request，并用它们重建、完整验证和比对 target；不重复验证同一份独立副本。返回值复用本次已生成的独立嵌套副本，旧 v1 base 仍显式深拷贝，调用方修改输入或结果不会影响另一份值。公开 target 构造入口继续验证不可信输入；没有跨调用缓存，文件读取、对象完整性、原始JSON规范编码、lineage、锁和提交前后复验保持原合同。
+
 管理后的 registry 使用 `code-skill-install-registry/v2`：
 
 - 每个 installation 保留原有身份字段，增加 `enabled`、`uninstalled` 和有界的 `retainedRevisionIds`。当前修订必须属于保留集合；编辑、升级或回退不会移除已保留的修订。

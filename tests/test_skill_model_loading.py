@@ -56,7 +56,7 @@ def loading_env(tmp_path, monkeypatch, request):
         server_mod._agent_runs.clear()
 
 
-def make_run(env, *, explicit="", permission="bypass", message="Process ledger.csv", tools=None):
+def make_run(env, *, explicit="", permission="bypass", message="Process ledger.csv", tools=None, disabled_names=None):
     _data, _bundle, workspace, reader = env
     delegation = f"\n\n{DELEGATION_BEGIN_MARKER}\nDelegate work when authorized.\n{DELEGATION_END_MARKER}" if "task" in (tools or []) else ""
     return server_mod._create_agent_run(
@@ -65,7 +65,7 @@ def make_run(env, *, explicit="", permission="bypass", message="Process ledger.c
             {"role": "user", "content": message},
         ]}, "http://127.0.0.1:9", [], {"schemaVersion": 1, "names": tools or TOOLS},
         8, permission, start_worker=False, run_kind="foreground", cwd=str(workspace),
-        skill_activation_request={"schemaVersion": 2, "explicitSkill": explicit, "disabledNames": []},
+        skill_activation_request={"schemaVersion": 2, "explicitSkill": explicit, "disabledNames": disabled_names or []},
         _immutable_skill_reader=reader,
     )
 
@@ -88,6 +88,18 @@ def test_catalog_has_real_descriptions_without_semantic_preselection(loading_env
     assert "Pinned instructions for ledger" not in run["messages"][0]["content"]
     assert {item["name"] for item in run["skill_loading"]["catalog"]} == {"ledger", "refine", "other"}
     assert server_mod._agent_run_record(run)["version"] == 7
+
+
+def test_default_loading_preserves_browser_disabled_selection(loading_env, monkeypatch):
+    monkeypatch.setattr(server_mod, "_SKILL_MODEL_LOADING_ENABLED", server_mod._resolve_skill_model_loading_enabled({}))
+    before = loading_env[-1].read_registry()
+    run = make_run(loading_env, disabled_names=["ledger"])
+    assert {item["name"] for item in run["skill_loading"]["catalog"]} == {"refine", "other"}
+    assert run["active_skill_names"] == []
+    assert loading_env[-1].read_registry() == before
+    result = call(run, "use_skill", {"name": "ledger", "role": "owner"})
+    assert result["result"]["errorCode"] == "skill_loading_not_available_in_catalog"
+    assert not run["skill_loading"]["loads"]
 
 
 def test_mid_task_first_load_and_modifier_keep_old_execution_unattributed(loading_env):
@@ -158,6 +170,7 @@ def test_off_restores_exact_v7_without_migrating_older_runs(loading_env, monkeyp
     run = make_run(loading_env, explicit=explicit)
     assert server_mod._ensure_explicit_skill_load(run) is (explicit != "missing")
     monkeypatch.setattr(server_mod, "_SKILL_MODEL_LOADING_ENABLED", False)
+    monkeypatch.setattr(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", False)
     record = server_mod._agent_run_record(run)
     restored = server_mod._agent_run_from_record(record, immutable_skill_reader=loading_env[-1])
     assert snapshot(restored) == snapshot(run)

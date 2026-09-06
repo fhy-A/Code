@@ -409,6 +409,8 @@ class TestCanonicalAgentRunAdmission(unittest.TestCase):
         self.patchers = [
             mock.patch.object(server_mod, "DATA_DIR", self.data_dir),
             mock.patch.object(server_mod, "SKILLS_DIR", self.skills_dir),
+            # This class exercises the explicitly selected mutable v5 protocol.
+            mock.patch.object(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", False),
             mock.patch.object(server_mod, "_SKILL_ACTIVATION_ENABLED", True),
             mock.patch.object(server_mod, "_MODEL_ROUTE_REGISTRY_ENABLED", False),
         ]

@@ -846,6 +846,41 @@ class SkillStoreReader:
                 _fail("store_object_unknown")
             return json.loads(_canonical(registry))
 
+    @contextmanager
+    def management_view(self):
+        """One locked, read-only display query; never an execution authorization.
+
+        Validate lineage once, verify every returned revision with the existing
+        pinned reader, and discard all per-query reuse on exit. Runtime and
+        mutation readers retain their independent verification contracts.
+        """
+        with self._store._read_lock():
+            state = self._store.inspect_startup_state()
+            if state["state"] != "committed":
+                _fail("store_busy")
+            root = self._store._load_root()
+            registry = self._store._load_registry(verify_objects=False)
+            if root is None or registry is None:
+                _fail("registry_missing")
+            if any(state[key] != registry[key] for key in ("dataRootId", "generation", "registryHash")):
+                _fail("registry_changed")
+            from .skill_store_v2 import retained_ids
+            retained = retained_ids(registry)
+            pinned = {}
+
+            def read_revision(revision_id, *, paths=None):
+                if revision_id not in retained:
+                    _fail("object_revision_invalid")
+                key = (revision_id, None if paths is None else frozenset(paths))
+                if key not in pinned:
+                    pinned[key] = self._read_pinned_from_root(root, revision_id, paths=paths)
+                return pinned[key]
+
+            yield registry, state, read_revision
+            if (self._store._load_root() != root
+                    or self._store._load_registry(verify_objects=False) != registry):
+                _fail("registry_changed")
+
     def verify_root(self, data_root_id):
         """Verify only immutable root identity, including no-match recovery."""
         with self._store._read_lock():

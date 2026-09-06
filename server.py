@@ -233,11 +233,11 @@ def _resolve_skill_activation_enabled(environ=None):
 
 
 def _resolve_skill_immutable_admission_enabled(environ=None):
-    """Keep immutable Skill admission off until startup explicitly enables it."""
+    """Use immutable Skill admission by default; preserve explicit opt-out."""
     source = os.environ if environ is None else environ
     raw = source.get("CODE_SKILL_IMMUTABLE_ADMISSION_V1")
     if raw is None or str(raw).strip() == "":
-        return False
+        return True
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
@@ -251,8 +251,12 @@ def _resolve_skill_completion_enforcement_enabled(environ=None):
 
 
 def _resolve_skill_model_loading_enabled(environ=None):
+    """Use main-model Skill loading by default, independently of completion."""
     source = os.environ if environ is None else environ
-    return str(source.get("CODE_SKILL_MODEL_LOADING_V1") or "").strip().lower() in {"1", "true", "yes", "on"}
+    raw = source.get("CODE_SKILL_MODEL_LOADING_V1")
+    if raw is None or str(raw).strip() == "":
+        return True
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 class _DeferredRuntimeService:
@@ -25846,11 +25850,13 @@ class CodeHandler(BaseHTTPRequestHandler):
                     raise skill_management_api.SkillManagementError("management_identity_required", 400)
                 iid, revision = parse.unquote(parts[1]), (query.get("revision") or [None])[0]
                 root_id = (query.get("dataRootId") or [None])[0]
-                if root_id != service._registry()["dataRootId"] or not revision:
+                if not root_id or not revision:
                     raise skill_management_api.SkillManagementError("management_identity_required", 400)
                 if len(parts) == 2:
-                    result = service.detail(iid, revision)
+                    result = service.detail(iid, revision, data_root_id=root_id)
                 elif parts[2] == "files":
+                    if root_id != service._registry()["dataRootId"]:
+                        raise skill_management_api.SkillManagementError("management_identity_required", 400)
                     result = service.resource(iid, revision, (query.get("path") or [""])[0])
                 else:
                     raise skill_management_api.SkillManagementError("management_endpoint_missing", 404)

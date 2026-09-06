@@ -1006,7 +1006,9 @@ raise SystemExit(2)
         start_worker=True, keys=None, completion_enabled=True,
     ):
         allowed = list(allowed_tools or ["read_file"])
+        # This helper constructs the legacy v5 completion contract only.
         with mock.patch.object(server_mod, "_SKILL_ACTIVATION_ENABLED", True), \
+             mock.patch.object(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", False), \
              mock.patch.object(
                  server_mod, "_SKILL_COMPLETION_ENFORCEMENT_ENABLED",
                  completion_enabled,

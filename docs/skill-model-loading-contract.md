@@ -1,6 +1,10 @@
 # 主模型按需加载 Skill 合同
 
-本合同描述 CODE-074 的 `model-driven-v1`。入口为默认关闭的 `CODE_SKILL_MODEL_LOADING_V1`，同时要求既有 immutable admission profile 可用。启用真实 profile、进程启停与旧二进制回退仍需独立操作授权。
+本合同描述 CODE-074 的 `model-driven-v1`。`CODE_SKILL_IMMUTABLE_ADMISSION_V1` 与 `CODE_SKILL_MODEL_LOADING_V1` 在未配置或空值时默认开启；`0`、`false`、`no`、`off` 可显式关闭，非空未知值仍按关闭处理。主模型按需加载仍要求 immutable admission profile 可用。直接 server、Code Dev 与打包 launcher 复用同一解析和启动入口；`CODE_SKILL_COMPLETION_ENFORCEMENT_V1` 独立且继续默认关闭，其它实验开关不随之开启。
+
+默认开启沿用既有 DataDirOwner、首次 immutable 初始化与事务恢复，不自动转换为 managed-v2、不确认冲突来源，也不重置启用、选中、修订或浏览器旧停用选择。已有本地 Skill 和旧记录保持原兼容边界；来源未确认、损坏或未完成事务继续按原流程阻断或要求处理，不静默修复。真实服务启停、旧数据显式转换及旧二进制回退仍需相应操作授权。
+
+打包入口的新安装沿用原内置 Skill 同步再初始化；直接 server / Code Dev 指向没有旧 Skill 目录的空数据根时，仍保留 `legacy-root-missing` 来源阻断，共享开发目录仍保留来源确认要求。默认开关不能代替这些来源决定。
 
 ## 发现与加载
 
@@ -40,6 +44,7 @@
 
 ## 可复验边界
 
+- `tests/test_skill_default_enablement.py` 验证新进程未设/空值/显式开关、import 零初始化、三个真实入口的 owner/Skill 启动段以及合成新旧数据根；监听、托盘与后续无关后台工作在夹具中隔离。启动恢复矩阵和 HTTP 测试继续验证事务、损坏、独立 OFF、协议拒绝与固定对象保留；旧 v5/v6 样本仅在其显式旧模式下构造，不把整个测试环境切成旧默认。
 - `tests/test_skill_model_loading.py` 覆盖真实对象捕获、目录/普通与中途加载、角色边界、显式与四个新资格、证据/completion、单调 task 权限、混批、取消、重复、失败持久化和恢复。
 - `tests/test_skill_dependency_operation.py` 包含 v7 的离线真实 pip 安装、安装后复检、绑定失败后的只复检恢复、继续执行、原权限与 late-install/未结清写者边界。包与数据均为新合成样本。
 - `tests/e2e/h4/code074-skill-model-loading-selfcheck.cjs` 使用真实 HTTP、前端、AgentRun 和 Skill 操作；上游的模型选择是明确标注的模拟结果。覆盖实时、真实 UI 终态、失败、刷新、OFF 展示、旧 v6 无伪造事件，以及中文深色/英文浅色。

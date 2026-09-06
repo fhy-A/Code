@@ -475,16 +475,25 @@ def test_owner_identity_and_hot_reinitialization_are_rejected(tmp_path):
     assert inactive.value.code == "skill_runtime_owner_required"
 
 
-def test_server_immutable_admission_flag_is_explicit_and_default_off():
+@pytest.mark.parametrize("value,expected", [
+    (None, True), ("", True), ("  ", True),
+    ("1", True), ("true", True), (" YES ", True), ("on", True),
+    ("0", False), ("false", False), (" OFF ", False), ("no", False),
+    ("unexpected", False),
+])
+def test_server_new_skill_defaults_preserve_explicit_opt_out(value, expected):
     import server
 
-    assert server._resolve_skill_immutable_admission_enabled({}) is False
-    assert server._resolve_skill_immutable_admission_enabled({
-        "CODE_SKILL_IMMUTABLE_ADMISSION_V1": "true",
-    }) is True
-    assert server._resolve_skill_immutable_admission_enabled({
-        "CODE_SKILL_IMMUTABLE_ADMISSION_V1": "off",
-    }) is False
+    for key, resolve in (
+        ("CODE_SKILL_IMMUTABLE_ADMISSION_V1", server._resolve_skill_immutable_admission_enabled),
+        ("CODE_SKILL_MODEL_LOADING_V1", server._resolve_skill_model_loading_enabled),
+    ):
+        assert resolve({} if value is None else {key: value}) is expected
+    # The two new defaults do not opt in to either independent legacy flag.
+    env = {"CODE_SKILL_IMMUTABLE_ADMISSION_V1": value,
+           "CODE_SKILL_MODEL_LOADING_V1": value}
+    assert server._resolve_skill_completion_enforcement_enabled(env) is False
+    assert server._resolve_skill_activation_enabled(env) is False
 
 
 def test_startup_io_failure_is_stable_and_not_retried(tmp_path):

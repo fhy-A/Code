@@ -266,6 +266,11 @@ def make_target(base, request, op_id):
     """Compute a new generation, including its immutable historical receipt."""
     base = legacy.normalize_registry(base)
     request = normalize_request(request)
+    return _make_target_from_validated(base, request, op_id)
+
+
+def _make_target_from_validated(base, request, op_id):
+    """Use this call's validated copies; never retain trust across calls."""
     kind = request["kind"]
     if not OP_ID.fullmatch(str(op_id)):
         legacy._fail("management_identity_invalid")
@@ -357,12 +362,14 @@ def normalize_journal(value):
             or value["phase"] != "aborted" and value["journalGeneration"] != PHASES.index(value["phase"])):
         legacy._fail("journal_invalid")
     base = legacy.normalize_registry(value["baseRegistry"])
+    if base["schema"] != REGISTRY_SCHEMA:
+        base = copy.deepcopy(base)  # The legacy v1 normalizer retains nested references.
     request = normalize_request(value["request"])
     if (value["dataRootId"] != base["dataRootId"]
             or value["operationId"] != operation_id(base["dataRootId"], value["operationKeyHash"])
             or value["requestHash"] != legacy._digest(legacy._canonical(request))):
         legacy._fail("journal_invalid")
-    target = make_target(base, request, value["operationId"])
+    target = _make_target_from_validated(base, request, value["operationId"])
     if target != value["targetRegistry"]:
         legacy._fail("journal_target_invalid")
     manifests = legacy._bounded_list(value["objectManifests"], 1, "journal_invalid")
@@ -373,4 +380,8 @@ def normalize_journal(value):
         raise legacy.SkillStoreError("journal_invalid") from exc
     if normalized != manifests or [item["revisionId"] for item in manifests] != expected:
         legacy._fail("journal_invalid")
-    return copy.deepcopy(value)
+    # These four nested values already have independent validated copies.
+    # All remaining fields are schema-checked scalars. Reusing the copies
+    # avoids cloning both registries again without sharing caller mutations.
+    return {**value, "baseRegistry": base, "targetRegistry": target,
+            "request": request, "objectManifests": normalized}

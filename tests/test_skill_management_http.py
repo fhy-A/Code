@@ -111,6 +111,57 @@ def test_off_heartbeat_does_not_advertise_mutable_activation(http, service, monk
     assert "skillActivationProtocol" not in result
 
 
+@pytest.mark.parametrize("admission,loading", [(None, None), ("off", None), (None, "off"), ("off", "off")])
+def test_default_protocol_and_independent_opt_out(http, service, monkeypatch, admission, loading):
+    from code_runtime.skill_runtime_startup import ImmutableSkillStartupRuntime
+    from code_runtime.skill_activation import SKILL_PROMPT_MARKER
+
+    admission_on = server._resolve_skill_immutable_admission_enabled(
+        {} if admission is None else {"CODE_SKILL_IMMUTABLE_ADMISSION_V1": admission})
+    loading_on = server._resolve_skill_model_loading_enabled(
+        {} if loading is None else {"CODE_SKILL_MODEL_LOADING_V1": loading})
+    monkeypatch.setattr(server, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", admission_on)
+    monkeypatch.setattr(server, "_SKILL_MODEL_LOADING_ENABLED", loading_on)
+    monkeypatch.setattr(service, "admission_enabled", admission_on)
+    runtime = ImmutableSkillStartupRuntime()
+    runtime.initialize(owner=service.owner, data_root=service.data_root,
+                       bundled_root=service.bundled_root, admission_enabled=admission_on)
+    monkeypatch.setattr(server, "_immutable_skill_startup_runtime", runtime)
+    before = service.snapshot()["registry"]
+    heartbeat = http("GET", "/api/browser-heartbeat").json()
+    assert (heartbeat.get("skillActivationProtocol") == "canonical-v1") is admission_on
+    assert (heartbeat.get("skillLoadingProtocol") == "model-driven-v1") is (admission_on and loading_on)
+    assert runtime.recovery_reader() is not None
+
+    def create(schema):
+        return server._create_agent_run("", {"model": "synthetic", "messages": [
+            {"role": "system", "content": f"base\n\n{SKILL_PROMPT_MARKER}\n\npermission"},
+            {"role": "user", "content": "plain task"},
+        ]}, "http://127.0.0.1:9", [], {"schemaVersion": 1, "names": ["use_skill", "read_file"]},
+            permission_profile="read", start_worker=False, run_kind="foreground", cwd=str(service.data_root),
+            skill_activation_request={"schemaVersion": schema, "explicitSkill": "", "disabledNames": []})
+
+    try:
+        for schema in (1, 2):
+            expected_error = ("immutable_skill_admission_disabled" if not admission_on else
+                              "skill_loading_protocol_required" if loading_on and schema == 1 else
+                              "skill_loading_disabled" if not loading_on and schema == 2 else None)
+            if expected_error:
+                with pytest.raises(server.SkillActivationError) as error:
+                    create(schema)
+                assert error.value.code == expected_error
+            else:
+                run = create(schema)
+                assert server._agent_run_record(run)["version"] == (7 if schema == 2 else 6)
+                assert not run["active_skill_names"]
+                if schema == 2:
+                    assert run["skill_loading"]["catalog"]
+        assert service.snapshot()["registry"] == before
+    finally:
+        with server._agent_run_lock:
+            server._agent_runs.clear()
+
+
 def test_dependency_ui_uses_exact_server_plan_and_confirmation(http, service, monkeypatch):
     _convert(service)
     dependency = {"schemaVersion": 1, "skill": "ui-demo", "capabilities": {

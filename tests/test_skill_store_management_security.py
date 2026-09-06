@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+from unittest import mock
 
 import pytest
 
@@ -12,6 +13,50 @@ from code_runtime import skill_store_management as management
 from code_runtime import skill_store_v2 as metadata
 from tests.test_skill_store import _snapshot
 from tests.test_skill_store_management import apply, convert, installation, managed, package_request
+
+
+@pytest.mark.parametrize("kind", ["convert-v2", "set-enabled", "create-local"])
+def test_journal_validation_reuses_only_its_independent_validated_values(managed, kind):
+    manager, _, tmp_path = managed
+    receipt = convert(manager)
+    if kind == "set-enabled":
+        receipt = apply(manager, "toggle", {"kind": kind,
+            "installationId": installation(manager, "custom")["installationId"], "enabled": False})
+    elif kind == "create-local":
+        request, package = package_request(tmp_path / "added", kind, "added", "independent bytes")
+        receipt = apply(manager, "create", request, package=package)
+    journal = next(item for item in manager.store._journals() if item["operationId"] == receipt["operationId"])
+    original = copy.deepcopy(journal)
+    with mock.patch.object(metadata, "normalize_registry", wraps=metadata.normalize_registry) as normalize:
+        result = metadata.normalize_journal(journal)
+        # Each v2 input/output is fully checked once; conversion's base is v1.
+        assert normalize.call_count == (1 if kind == "convert-v2" else 2)
+    assert result == original and journal == original
+    result["baseRegistry"]["installations"][0]["displayName"] = "changed-copy"
+    result["targetRegistry"]["bindings"][0]["candidates"].clear()
+    result["request"]["kind"] = "not-an-operation"
+    if result["objectManifests"]:
+        result["objectManifests"][0]["files"][0]["digest"] = "sha256:" + "0" * 64
+    assert journal == original
+    assert metadata.normalize_journal(journal) == original
+    journal["baseRegistry"]["installations"][0]["displayName"] = "tampered-source"
+    with pytest.raises(legacy.SkillStoreError):
+        metadata.normalize_journal(journal)  # no identity/mtime-based reuse across calls
+
+
+def test_target_builder_still_validates_untrusted_base_and_journal_target(managed):
+    manager, _, _ = managed
+    receipt = convert(manager)
+    journal = next(item for item in manager.store._journals() if item["operationId"] == receipt["operationId"])
+    invalid = copy.deepcopy(journal["baseRegistry"])
+    invalid["generation"] = True
+    with pytest.raises(legacy.SkillStoreError):
+        metadata.make_target(invalid, journal["request"], journal["operationId"])
+    journal["targetRegistry"]["installations"][0]["enabled"] = False
+    journal["targetRegistry"]["registryHash"] = legacy._registry_hash(journal["targetRegistry"])
+    with pytest.raises(legacy.SkillStoreError) as caught:
+        metadata.normalize_journal(journal)
+    assert caught.value.code == "journal_target_invalid"
 
 
 @pytest.mark.parametrize("mutate", [

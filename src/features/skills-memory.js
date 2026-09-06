@@ -629,6 +629,8 @@
     let editingSkillDependencySource = "";
     let settingsSelectedSkillName = null;
     let settingsSkillQuery = "";
+    let settingsSkillsOverview = true;
+    let managedInFlight = null;
     let settingsMemoryRequestId = 0;
     let skillDependencySnapshot = null;
     let skillDependencyByName = new Map();
@@ -649,6 +651,7 @@
     let managedDraft = null;
     let managedPending = null;
     let managedDependencyPoll = null;
+    let managedDescriptionsFor = null;
     const managementPath = "/api/skill-management/v1";
     const managedMode = () => Boolean(state.skillManagement && state.skillManagement.mode !== "legacy");
     const managementIdentity = (skill) => ({
@@ -666,25 +669,42 @@
 
     const byId = (id) => documentRef.getElementById(id);
 
+    function applyManagementSnapshot(snapshot) {
+      if (snapshot?.protocol !== "skill-management/v1") throw new Error(t("skillManagementUnavailable"));
+      const rootKey = `${snapshot.serverInstanceId}:${snapshot.registry?.dataRootId || snapshot.mode}`;
+      const sameRoot = rootKey === state.skillManagementRootKey;
+      const previousSkills = sameRoot ? state.managedSkills || [] : [];
+      if (!sameRoot) {
+        managementEpoch += 1;
+        managementDetailId += 1;
+        managedPending = null;
+        state.skillManagementRootKey = rootKey;
+      }
+      state.skillManagement = snapshot;
+      if (snapshot.mode !== "legacy") {
+        state.managedSkills = (snapshot.installations || []).map((skill) => {
+          const previous = previousSkills.find((item) => item.installationId === skill.installationId
+            && item.revisionId === skill.revisionId);
+          const hasDescription = typeof skill.description === "string";
+          const descriptionLoaded = hasDescription || Boolean(previous?._settingsDescriptionLoaded || previous?.body != null);
+          return { ...skill, name: skill.displayName,
+            description: hasDescription ? skill.description : descriptionLoaded ? previous.description || "" : "",
+            _settingsDetail: previous?._settingsDetail,
+            _settingsDescriptionLoaded: descriptionLoaded };
+        });
+        state.skills = snapshot.admissionEnabled
+          ? state.managedSkills.filter((skill) => skill.selected && skill.enabled && !skill.uninstalled)
+          : [];
+      }
+    }
+
     async function loadSkills() {
       const requestId = ++managementLoadId;
       try {
         const snapshot = await apiJson(managementPath);
         if (requestId !== managementLoadId) return state.skills;
-        if (snapshot?.protocol !== "skill-management/v1") throw new Error(t("skillManagementUnavailable"));
-        const rootKey = `${snapshot.serverInstanceId}:${snapshot.registry?.dataRootId || snapshot.mode}`;
-        if (rootKey !== state.skillManagementRootKey) {
-          managementEpoch += 1;
-          managementDetailId += 1;
-          managedPending = null;
-          state.skillManagementRootKey = rootKey;
-        }
-        state.skillManagement = snapshot;
+        applyManagementSnapshot(snapshot);
         if (snapshot.mode !== "legacy") {
-          state.managedSkills = (snapshot.installations || []).map((skill) => ({ ...skill, name: skill.displayName, description: skill.kind }));
-          state.skills = snapshot.admissionEnabled
-            ? state.managedSkills.filter((skill) => skill.selected && skill.enabled && !skill.uninstalled)
-            : [];
           return state.skills;
         }
         const data = await apiJson("/api/skills?brief=1");
@@ -1438,6 +1458,8 @@
     }
 
     function renderSkillsInSettings(container) {
+      settingsSkillsOverview = true;
+      settingsSkillQuery = "";
       container.innerHTML = `<section class="skills-settings-page">
         <header class="skills-panel-heading">
           <div class="skills-panel-heading-copy">
@@ -1448,8 +1470,10 @@
               <div id="settingsSkillDependencyOverview" class="skill-dependency-overview" aria-live="polite"></div>
             </div>
           </div>
-          <button id="settingsSkillDependencyRefresh" class="mini-btn skill-dependency-refresh" type="button" data-i18n="skillDependencyCheck">${uiIcon("refresh", 15, "skill-refresh-icon")}<span data-ui-label>${t("skillDependencyCheck")}</span></button>
+          <div class="skills-panel-actions"><button id="settingsSkillsOverviewBtn" class="mini-btn" type="button" data-i18n="skillsBackToAll" hidden>${t("skillsBackToAll")}</button>
+          <button id="settingsSkillDependencyRefresh" class="mini-btn skill-dependency-refresh" type="button" data-i18n="skillDependencyCheck">${uiIcon("refresh", 15, "skill-refresh-icon")}<span data-ui-label>${t("skillDependencyCheck")}</span></button></div>
         </header>
+        <div id="settingsManagedActions" class="skill-library-actions" hidden></div>
         <div class="skills-layout-inner">
           <nav class="skills-sidebar-inner" data-i18n-aria-label="skillsNavigatorLabel" aria-label="${escapeHtml(t("skillsNavigatorLabel"))}">
             <div class="skills-sidebar-toolbar">
@@ -1462,11 +1486,19 @@
             </div>
             <div id="settingsSkillsSidebar" class="skill-list-scroll"></div>
           </nav>
-          <section class="skills-detail-inner" id="settingsSkillsDetail" data-i18n-aria-label="skillDetailRegionLabel" aria-label="${escapeHtml(t("skillDetailRegionLabel"))}"></section>
+          <section class="skills-detail-inner" id="settingsSkillsDetail" tabindex="-1" data-i18n-aria-label="skillDetailRegionLabel" aria-label="${escapeHtml(t("skillDetailRegionLabel"))}"></section>
         </div>
       </section>`;
       renderSkillDependencyOverview();
+      setSettingsSkillsOverview(true);
       renderSettingsSkillsSidebar();
+      byId("settingsSkillsOverviewBtn").addEventListener("click", () => {
+        settingsSkillQuery = "";
+        byId("settingsSkillSearch").value = "";
+        setSettingsSkillsOverview(true);
+        renderSettingsSkillsSidebar();
+        byId("settingsSkillSearch").focus();
+      });
       byId("settingsSkillAddBtn").addEventListener("click", () => openSkillEditor(null));
       const search = byId("settingsSkillSearch");
       search?.addEventListener("input", () => {
@@ -1478,6 +1510,18 @@
       });
       if (!skillDependencySnapshot && !skillDependencyLoading) loadSkillDependencyStatus();
       loadSkillDependencyOperations();
+    }
+
+    function setSettingsSkillsOverview(overview) {
+      settingsSkillsOverview = overview;
+      byId("settingsSkillsSidebar")?.closest(".skills-layout-inner").classList.toggle("is-overview", overview);
+      const back = byId("settingsSkillsOverviewBtn");
+      if (back) back.hidden = overview;
+      if (overview) {
+        managementDetailId += 1;
+        if (managedDependencyPoll !== null) global.clearTimeout(managedDependencyPoll);
+        managedDependencyPoll = null;
+      }
     }
 
     function refreshSettingsLanguage(panel) {
@@ -2026,6 +2070,44 @@
       });
     }
 
+    function updateManagedOperationFeedback() {
+      const busy = managedInFlight?.epoch === managementEpoch ? managedInFlight : null;
+      byId("settingsSkillsSidebar")?.querySelectorAll("[data-toggle-installation]").forEach((button) => {
+        const skill = (state.managedSkills || []).find((item) => item.installationId === button.dataset.toggleInstallation);
+        const applying = busy?.kind === "set-enabled" && busy.installationId === skill?.installationId;
+        button.disabled = Boolean(busy || !state.skillManagement?.capabilities?.write || skill?.uninstalled);
+        button.setAttribute("aria-busy", String(Boolean(applying)));
+        const label = button.querySelector("[data-toggle-label]");
+        if (label && skill) label.textContent = t(applying ? "skillManagementApplying" : skill.uninstalled ? "skillManagementUninstalled"
+          : !skill.selected ? "skillManagementUnselected" : skill.enabled ? "enabledStatus" : "disabledStatus");
+      });
+      const panel = byId("settingsSkillsDetail"), toggle = byId("managedToggle");
+      const skill = (state.managedSkills || []).find((item) => item.installationId === panel?.dataset.renderedInstallation);
+      if (toggle && skill) {
+        const applying = busy?.kind === "set-enabled" && busy.installationId === skill.installationId;
+        toggle.disabled = Boolean(busy || !state.skillManagement?.capabilities?.write || skill.uninstalled);
+        toggle.setAttribute("aria-busy", String(Boolean(applying)));
+        toggle.textContent = t(applying ? "skillManagementApplying" : skill.enabled ? "skillDisableAction" : "skillEnableAction");
+      }
+      const retry = byId("managedRetry");
+      if (retry) retry.disabled = Boolean(busy);
+    }
+
+    function runManagedOperation(intent, epoch, kind, installationId, action) {
+      if (managedInFlight) {
+        return managedInFlight.intent === intent && managedInFlight.epoch === epoch
+          ? managedInFlight.promise : Promise.reject(new Error(t("skillManagementPending")));
+      }
+      const flight = { intent, epoch, kind, installationId, promise: null };
+      managedInFlight = flight;
+      updateManagedOperationFeedback();
+      flight.promise = action().finally(() => {
+        if (managedInFlight === flight) managedInFlight = null;
+        if (managedMode()) renderManagedSkillsSidebar();
+      });
+      return flight.promise;
+    }
+
     async function managedOperation(kind, fields = {}, options = {}) {
       const epoch = options.epoch ?? managementEpoch;
       const base = options.base || state.skillManagement?.registry;
@@ -2034,28 +2116,84 @@
       }
       const intent = JSON.stringify({ kind, fields, base });
       if (managedPending && managedPending.intent !== intent) throw new Error(t("skillManagementPending"));
-      if (!managedPending) {
-        const preview = await managedPost("preview", { kind, base, ...fields });
-        if (epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
-        if (preview.confirmationRequired && !global.confirm(t(
-          kind === "convert-v2" ? "skillManagementConfirmConvert" : "skillManagementConfirmPreferences",
-          { count: preview.request.disabledNames?.length || 0 },
-        ))) return null;
-        managedPending = { intent, epoch, payload: {
-          base: preview.base, request: preview.request, material: preview.material,
-          confirmed: true, operationKey: global.crypto.randomUUID(),
-        } };
-      }
-      return finishManagedOperation(managedPending);
+      return runManagedOperation(intent, epoch, kind, fields.installationId, async () => {
+        if (!managedPending) {
+          const preview = await managedPost("preview", { kind, base, ...fields });
+          if (epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+          if (preview.confirmationRequired && !global.confirm(t(
+            kind === "convert-v2" ? "skillManagementConfirmConvert" : "skillManagementConfirmPreferences",
+            { count: preview.request.disabledNames?.length || 0 },
+          ))) return null;
+          managedPending = { intent, epoch, serverInstanceId: state.skillManagement.serverInstanceId, payload: {
+            base: preview.base, request: preview.request, material: preview.material,
+            confirmed: true, operationKey: global.crypto.randomUUID(),
+          } };
+        }
+        return submitManagedOperation(managedPending);
+      });
     }
 
-    async function finishManagedOperation(pending) {
+    function finishManagedOperation(pending) {
+      if (!pending) return Promise.resolve(null);
+      return runManagedOperation(pending.intent, pending.epoch, pending.payload.request.kind,
+        pending.payload.request.installationId, () => submitManagedOperation(pending));
+    }
+
+    async function useToggleResponseSnapshot(result, pending, loadId) {
+      const snapshot = result?.snapshot, receipt = result?.receipt, request = pending.payload.request;
+      const base = pending.payload.base, registry = snapshot?.registry;
+      if (request.kind !== "set-enabled" || result?.protocol !== "skill-management/v1"
+        || snapshot?.protocol !== "skill-management/v1" || snapshot.mode !== "managed-v2"
+        || snapshot.serverInstanceId !== pending.serverInstanceId || snapshot.transactionState !== "committed"
+        || registry?.schema !== "code-skill-install-registry/v2" || registry.dataRootId !== base.dataRootId
+        || !Number.isSafeInteger(registry.generation) || !/^sha256:[0-9a-f]{64}$/.test(registry.registryHash)
+        || receipt?.kind !== request.kind || receipt.appliedGeneration !== base.generation + 1
+        || registry.generation < receipt.appliedGeneration || receipt.result?.installationId !== request.installationId
+        || typeof snapshot.admissionEnabled !== "boolean" || typeof snapshot.capabilities?.write !== "boolean"
+        || !Array.isArray(snapshot.installations) || !Array.isArray(snapshot.bindings)
+        || snapshot.installations.some((item) => !item || typeof item.installationId !== "string"
+          || typeof item.revisionId !== "string" || typeof item.displayName !== "string"
+          || typeof item.enabled !== "boolean" || typeof item.selected !== "boolean" || typeof item.uninstalled !== "boolean")
+        || new Set(snapshot.installations.map((item) => item.installationId)).size !== snapshot.installations.length) return false;
+      const item = snapshot.installations.find((entry) => entry.installationId === request.installationId);
+      if (registry.generation === receipt.appliedGeneration
+        && (!item || item.enabled !== request.enabled || item.revisionId !== receipt.result.revisionId)) return false;
+      // Bind this read projection to the exact acknowledged request, not just
+      // a compatible-looking root or generation. No content is trusted for execution.
+      try {
+        const hash = async (text) => Array.from(new Uint8Array(await global.crypto.subtle.digest(
+          "SHA-256", new TextEncoder().encode(text))), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const keyHash = "sha256:" + await hash(pending.payload.operationKey);
+        const operationId = "op2_" + await hash(JSON.stringify(["management-v2", base.dataRootId, keyHash]));
+        const requestHash = "sha256:" + await hash(JSON.stringify({enabled: request.enabled,
+          installationId: request.installationId, kind: request.kind}));
+        if (receipt.operationId !== operationId || receipt.requestHash !== requestHash) return false;
+      } catch { return false; }
+      const current = state.skillManagement;
+      if (pending.epoch !== managementEpoch || loadId !== managementLoadId
+        || current?.serverInstanceId !== pending.serverInstanceId || current.registry?.dataRootId !== registry.dataRootId
+        || current.registry.generation > registry.generation
+        || (current.registry.generation === registry.generation && current.registry.registryHash !== registry.registryHash)) return false;
+      managementLoadId += 1; // A pre-commit GET must not overwrite the acknowledged projection.
+      applyManagementSnapshot(snapshot);
+      return true;
+    }
+
+    async function submitManagedOperation(pending) {
       if (pending.epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+      const loadId = managementLoadId;
       const result = await managedPost("operations", pending.payload);
       if (pending.epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
+      const reused = await useToggleResponseSnapshot(result, pending, loadId);
+      if (pending.epoch !== managementEpoch) throw new Error(t("skillManagementChanged"));
       managedPending = null;
-      await loadSkills();
-      renderManagedSkillsSidebar(result.receipt?.result?.installationId || settingsSelectedSkillName);
+      if (!reused) {
+        await loadSkills();
+        if (state.skillManagement?.mode === "unavailable") showToast(t("skillManagementRefreshFailed"), "error");
+      }
+      if (pending.payload.request.kind !== "set-enabled" && result.receipt?.result?.installationId) {
+        settingsSelectedSkillName = result.receipt.result.installationId;
+      }
       onPromptChanged();
       return result;
     }
@@ -2142,30 +2280,94 @@
       finally { byId("saveSkillEdit").disabled = false; }
     }
 
+    function managedDescription(skill) {
+      return skill.description || t(skill._settingsDescriptionError || skill._settingsDescriptionLoaded
+        ? "skillDescriptionUnavailable" : "skillManagementDescriptionLoading");
+    }
+
+    function updateManagedDescription(skill) {
+      const sidebar = byId("settingsSkillsSidebar");
+      sidebar?.querySelectorAll("[data-installation]").forEach((button) => {
+        if (button.dataset.installation !== skill.installationId) return;
+        const description = button.querySelector(".skill-list-description");
+        if (description) description.textContent = managedDescription(skill);
+        button.title = `${skill.name}\n${managedDescription(skill)}`;
+      });
+    }
+
+    async function ensureManagedSettingsDetail(skill) {
+      if (skill._settingsDetail) return skill._settingsDetail;
+      if (skill._settingsDetailPromise) return skill._settingsDetailPromise;
+      const epoch = managementEpoch;
+      const identity = managementIdentity(skill);
+      const query = new URLSearchParams({ dataRootId: identity.dataRootId, revision: identity.revisionId });
+      skill._settingsDetailPromise = (async () => {
+        const detail = await apiJson(`${managementPath}/installations/${encodeURIComponent(identity.installationId)}?${query}`);
+        if (epoch !== managementEpoch || detail.dataRootId !== identity.dataRootId || detail.revisionId !== identity.revisionId) {
+          throw new Error(t("skillManagementChanged"));
+        }
+        skill._settingsDetail = detail;
+        return detail;
+      })();
+      try { return await skill._settingsDetailPromise; }
+      finally { delete skill._settingsDetailPromise; }
+    }
+
+    async function loadManagedDescriptions(skills) {
+      if (!settingsSkillsOverview) return;
+      if (managedDescriptionsFor === skills) return;
+      const queue = skills.filter((skill) => !skill._settingsDescriptionLoaded && !skill._settingsDescriptionError
+        && (settingsSkillsOverview || skill.installationId !== settingsSelectedSkillName));
+      if (!queue.length) return;
+      managedDescriptionsFor = skills;
+      const epoch = managementEpoch;
+      const current = () => epoch === managementEpoch && state.managedSkills === skills;
+      const load = async () => {
+        while (queue.length && current() && settingsSkillsOverview && byId("settingsSkillsSidebar")) {
+          const skill = queue.shift();
+          try {
+            const detail = await ensureManagedSettingsDetail(skill);
+            if (!current()) return;
+            skill.description = detail.description || "";
+            skill._settingsDescriptionLoaded = true;
+          } catch {
+            if (!current()) return;
+            skill._settingsDescriptionError = true;
+          }
+          updateManagedDescription(skill);
+        }
+      };
+      await load();
+      if (managedDescriptionsFor === skills) managedDescriptionsFor = null;
+      if (current() && settingsSkillQuery) renderManagedSkillsSidebar();
+    }
+
     function renderManagedSkillsSidebar(preferred = settingsSelectedSkillName) {
       const sidebar = byId("settingsSkillsSidebar");
       if (!sidebar) return;
       const snapshot = state.skillManagement || {};
-      const skills = filterSettingsSkills(state.managedSkills || [], settingsSkillQuery);
-      const selected = skills.find((skill) => skill.installationId === preferred) || skills[0] || null;
+      const allSkills = state.managedSkills || [];
+      const skills = filterSettingsSkills(allSkills, settingsSkillQuery);
+      const selected = allSkills.find((skill) => skill.installationId === preferred) || skills[0] || allSkills[0] || null;
       settingsSelectedSkillName = selected?.installationId || null;
       const summary = byId("settingsSkillsSummary");
-      if (summary) summary.textContent = t(snapshot.capabilities?.write ? "skillManagementReady" : "skillManagementReadOnly");
+      if (summary) summary.textContent = snapshot.capabilities?.write
+        ? `${t("skillsInstalledSummary", { count: allSkills.length })} · ${t("skillsEnabledSummary", { count: allSkills.filter((skill) => skill.enabled && skill.selected && !skill.uninstalled).length })}`
+        : t("skillManagementReadOnly");
       const overview = byId("settingsSkillDependencyOverview");
       if (overview) overview.textContent = snapshot.errorCode || "";
       byId("settingsSkillAddBtn").disabled = !snapshot.capabilities?.write;
-      let actions = byId("settingsManagedActions");
-      if (!actions) {
-        actions = documentRef.createElement("div");
-        actions.id = "settingsManagedActions";
-        actions.className = "skill-detail-actions skill-management-actions";
-        sidebar.parentElement.querySelector(".skills-sidebar-toolbar").after(actions);
-      }
+      const actions = byId("settingsManagedActions");
+      const showRetry = Boolean(managedPending && !managedInFlight);
+      actions.hidden = !(snapshot.capabilities?.convert || showRetry
+        || (snapshot.capabilities?.write && settingsSkillsOverview));
       actions.innerHTML = `
         ${snapshot.capabilities?.convert ? `<button class="mini-btn" id="managedConvert">${escapeHtml(t("skillManagementConvert"))}</button>` : ""}
-        ${snapshot.capabilities?.write ? `<button class="mini-btn" id="managedImport">${escapeHtml(t("skillManagementImport"))}</button>
-        <button class="mini-btn" id="managedPreferences">${escapeHtml(t("skillManagementPreferences"))}</button>` : ""}
-        ${managedPending ? `<button class="mini-btn" id="managedRetry">${escapeHtml(t("skillManagementRetry"))}</button>` : ""}`;
+        ${snapshot.capabilities?.write && settingsSkillsOverview ? `<details class="skill-library-management"><summary>${escapeHtml(t("skillManagementLibrary"))}</summary>
+        <p class="skill-library-description">${escapeHtml(t("skillManagementLibraryHint"))}</p>
+        <div class="skill-detail-actions"><button class="mini-btn" id="managedImport">${escapeHtml(t("skillManagementImport"))}</button>
+        <button class="mini-btn" id="managedPreferences">${escapeHtml(t("skillManagementPreferences"))}</button></div></details>` : ""}
+        ${showRetry ? `<button class="mini-btn" id="managedRetry">${escapeHtml(t("skillManagementRetry"))}</button>` : ""}`;
       byId("managedConvert")?.addEventListener("click", () => { void managedOperation("convert-v2").catch(managedError); });
       byId("managedImport")?.addEventListener("click", () => {
         const sourceRoot = global.prompt(t("skillManagementImportPath"));
@@ -2178,15 +2380,27 @@
         }).catch(managedError);
       });
       byId("managedRetry")?.addEventListener("click", () => { void finishManagedOperation(managedPending).catch(managedError); });
-      sidebar.innerHTML = skills.map((skill) => `<button class="skill-list-item${skill === selected ? " active" : ""}"
-        type="button" data-installation="${escapeHtml(skill.installationId)}" aria-current="${skill === selected}">
+      sidebar.innerHTML = skills.length ? skills.map((skill) => `${settingsSkillsOverview ? '<article class="skill-overview-card">' : ""}<button class="skill-list-item${skill === selected && !settingsSkillsOverview ? " active" : ""}"
+        type="button" data-installation="${escapeHtml(skill.installationId)}" aria-current="${skill === selected}" title="${escapeHtml(`${skill.name}\n${managedDescription(skill)}`)}">
         <span class="skill-list-copy"><span class="skill-list-name">${escapeHtml(skill.name)}</span>
-        <span class="skill-list-description">${escapeHtml(t(skill.kind === "bundled" ? "skillManagementBundled" : "skillManagementLocal"))} · ${escapeHtml(skill.revisionId.slice(7, 19))}</span></span>
-        <span class="skill-list-status-badge">${escapeHtml(t(skill.uninstalled ? "skillManagementUninstalled" : skill.enabled ? "enabledStatus" : "disabledStatus"))}</span></button>`).join("");
+        <span class="skill-list-description">${escapeHtml(managedDescription(skill))}</span></span>
+        <span class="skill-list-status-row"><span class="skill-list-status-badge ${skill.enabled && skill.selected && !skill.uninstalled ? "is-enabled" : "is-disabled"}">${escapeHtml(t(skill.uninstalled ? "skillManagementUninstalled" : !skill.selected ? "skillManagementUnselected" : skill.enabled ? "enabledStatus" : "disabledStatus"))}</span></span></button>
+        ${settingsSkillsOverview ? `<div class="skill-overview-card-actions"><button class="skill-overview-toggle" type="button" role="switch" aria-checked="${Boolean(skill.enabled)}" aria-label="${escapeHtml(`${t(skill.enabled ? "skillDisableAction" : "skillEnableAction")} ${skill.name}`)}" data-toggle-installation="${escapeHtml(skill.installationId)}" ${!snapshot.capabilities?.write || skill.uninstalled ? "disabled" : ""}><span data-toggle-label role="status">${escapeHtml(t(skill.uninstalled ? "skillManagementUninstalled" : !skill.selected ? "skillManagementUnselected" : skill.enabled ? "enabledStatus" : "disabledStatus"))}</span><span class="skill-toggle-track" aria-hidden="true"></span></button></div></article>` : ""}`).join("")
+        : `<div class="skills-list-empty" role="status">${escapeHtml(t(allSkills.length ? "skillsSearchNoResults" : "noSkills"))}</div>`;
       sidebar.querySelectorAll("[data-installation]").forEach((button) => button.addEventListener("click", () => {
+        setSettingsSkillsOverview(false);
         renderManagedSkillsSidebar(button.dataset.installation);
+        byId("settingsSkillsDetail").focus({ preventScroll: true });
       }));
-      void showManagedSkillDetail(selected).catch(managedError);
+      sidebar.querySelectorAll("[data-toggle-installation]").forEach((button) => button.addEventListener("click", async () => {
+        const skill = allSkills.find((item) => item.installationId === button.dataset.toggleInstallation);
+        try {
+          await managedOperation("set-enabled", { installationId: skill.installationId, enabled: !skill.enabled });
+        } catch (error) { managedError(error); }
+      }));
+      updateManagedOperationFeedback();
+      if (!settingsSkillsOverview) void showManagedSkillDetail(selected).catch(managedError);
+      void loadManagedDescriptions(allSkills).catch(managedError);
     }
 
     async function showManagedSkillDetail(skill) {
@@ -2199,35 +2413,56 @@
       delete panel.dataset.renderedInstallation;
       if (!skill) { panel.textContent = t(state.skillManagement?.errorCode ? "skillManagementUnavailable" : "noSkills"); return; }
       panel.textContent = t("skillManagementLoading");
-      await ensureSkillBody(skill);
+      try {
+        const detail = await ensureManagedSettingsDetail(skill);
+        // Only immutable revision content is cached. Selection and enabled state
+        // continue to come from the latest management snapshot.
+        for (const key of ["description", "document", "dependency", "dependencyDocument", "files"]) {
+          skill[key] = detail[key];
+        }
+      } catch (error) {
+        if (requestId === managementDetailId && epoch === managementEpoch) {
+          panel.innerHTML = `<div class="skills-detail-empty" role="alert"><strong>${escapeHtml(t("skillManagementUnavailable"))}</strong><span>${escapeHtml(error.message)}</span></div>`;
+        }
+        throw error;
+      }
       if (requestId !== managementDetailId || epoch !== managementEpoch) return;
+      skill._settingsDescriptionLoaded = true;
+      updateManagedDescription(skill);
       panel.dataset.renderedInstallation = skill.installationId;
       const writable = Boolean(state.skillManagement?.capabilities?.write);
       const disabled = writable ? "" : "disabled";
       const button = (id, key) => `<button type="button" class="mini-btn" id="${id}" ${disabled}>${escapeHtml(t(key))}</button>`;
-      panel.innerHTML = `<article class="skill-detail-article">
-        <header class="skill-detail-head"><div class="skill-detail-heading-copy"><h3 class="skill-detail-name">${escapeHtml(skill.name)}</h3><p class="skill-detail-description">${escapeHtml(skill.description || "")}</p></div></header>
-        <div class="skill-detail-meta-row"><span class="skill-detail-meta-chip">${escapeHtml(t(skill.kind === "bundled" ? "skillManagementBundled" : "skillManagementLocal"))}</span>
-        <span class="skill-detail-meta-chip">${escapeHtml(t(skill.selected ? "skillManagementSelected" : "skillManagementUnselected"))}</span></div>
-        <div class="skill-detail-actions skill-management-actions">${button("managedEdit", skill.kind === "bundled" ? "skillManagementFork" : "edit")}
-        ${button("managedToggle", skill.enabled ? "skillDisableAction" : "skillEnableAction")}
-        ${button("managedRemove", skill.uninstalled ? "skillManagementRestore" : "skillManagementUninstall")}
-        ${button("managedSelect", "skillManagementSelect")}
-        ${skill.kind === "bundled" ? button("managedUpdate", "skillManagementUpdate") : ""}</div>
-        <label class="field"><span>${escapeHtml(t("skillManagementRevision"))}</span><select id="managedRevision">
-        ${(skill.retainedRevisionIds || [skill.revisionId]).map((revision) => `<option ${revision === skill.revisionId ? "selected" : ""} value="${escapeHtml(revision)}">${escapeHtml(revision.slice(7, 23))}</option>`).join("")}</select></label>
-        <div class="skill-detail-actions">${button("managedRollback", "skillManagementRollback")}</div>
-        <details class="skill-detail-section"><summary>${escapeHtml(t("skillManagementDocument"))}</summary><pre class="skill-detail-value">${escapeHtml(skill.document)}</pre></details>
-        <section class="skill-detail-section" id="managedDependencies"><h4>${escapeHtml(t("skillDependencyTitle"))}</h4>
-        <div id="managedDependencyStatus" role="status"></div>
-        <label class="field"><span>${escapeHtml(t("skillManagementCapability"))}</span><select id="managedCapability">${(skill.dependency?.capabilities || []).map((capability) => `<option value="${escapeHtml(capability)}">${escapeHtml(dependencyCapabilityLabel(capability))}</option>`).join("")}</select></label>
+      const hasDependencies = Boolean(skill.dependency?.capabilities?.length);
+      panel.innerHTML = `<article class="skill-detail-surface skill-managed-detail">
+        <header class="skill-detail-head"><div class="skill-detail-heading-copy"><h3 class="skill-detail-name">${escapeHtml(skill.name)}</h3><p class="skill-detail-description">${escapeHtml(skill.description || t("skillDescriptionUnavailable"))}</p>
+        <div class="skill-detail-meta"><span class="skill-detail-meta-chip ${skill.enabled && skill.selected && !skill.uninstalled ? "is-enabled" : "is-disabled"}">${escapeHtml(t(skill.uninstalled ? "skillManagementUninstalled" : !skill.selected ? "skillManagementUnselected" : skill.enabled ? "enabledStatus" : "disabledStatus"))}</span></div></div></header>
+        <div class="skill-detail-actions skill-primary-actions">${button("managedToggle", skill.enabled ? "skillDisableAction" : "skillEnableAction")}
+        ${button("managedEdit", skill.kind === "bundled" ? "skillManagementFork" : "edit")}</div>
+        <section class="skill-dependency-section" id="managedDependencies"><h4>${escapeHtml(t("skillDependencyTitle"))}</h4>
+        ${hasDependencies ? `<label class="field"><span>${escapeHtml(t("skillManagementCapability"))}</span><select id="managedCapability">${skill.dependency.capabilities.map((capability) => `<option value="${escapeHtml(capability)}">${escapeHtml(dependencyCapabilityLabel(capability))}</option>`).join("")}</select></label>
         <div class="skill-detail-actions"><button class="mini-btn" id="managedCheck">${escapeHtml(t("skillDependencyCheck"))}</button>
         ${button("managedInstall", "skillDependencyInstall")}${button("managedRepair", "skillDependencyRepair")}
-        ${button("managedRecheck", "skillManagementRecheck")}</div><div id="managedDependencyOperation" role="status"></div><div id="managedDependencyPlan"></div></section></article>`;
+        ${button("managedRecheck", "skillManagementRecheck")}</div>` : `<p class="skill-no-dependencies">${escapeHtml(t("skillManagementNoDependencies"))}</p>`}
+        <div id="managedDependencyStatus" role="status"></div><div id="managedDependencyOperation" role="status"></div><div id="managedDependencyPlan"></div></section>
+        <details class="skill-management-advanced"><summary>${escapeHtml(t("skillManagementAdvanced"))}<span>${escapeHtml(t("skillManagementAdvancedHint"))}</span></summary>
+        <div class="skill-management-advanced-body"><div class="skill-detail-meta"><span class="skill-detail-meta-chip">${escapeHtml(t(skill.kind === "bundled" ? "skillManagementBundled" : "skillManagementLocal"))}</span>
+        <span class="skill-detail-meta-chip">${escapeHtml(t(skill.selected ? "skillManagementSelected" : "skillManagementUnselected"))}</span></div>
+        <label class="field"><span>${escapeHtml(t("skillManagementRevision"))}</span><select id="managedRevision">
+        ${(skill.retainedRevisionIds || [skill.revisionId]).map((revision) => `<option ${revision === skill.revisionId ? "selected" : ""} value="${escapeHtml(revision)}">${escapeHtml(revision.slice(7, 23))}</option>`).join("")}</select></label>
+        <div class="skill-detail-actions skill-management-actions">${button("managedSelect", "skillManagementSelect")}
+        ${skill.kind === "bundled" ? button("managedUpdate", "skillManagementUpdate") : ""}
+        ${button("managedRollback", "skillManagementRollback")}
+        ${button("managedRemove", skill.uninstalled ? "skillManagementRestore" : "skillManagementUninstall")}</div>
+        <details class="skill-detail-section"><summary>${escapeHtml(t("skillManagementDocument"))}</summary><pre class="skill-detail-value">${escapeHtml(skill.document)}</pre></details>
+        </div></details></article>`;
       const perform = (kind, fields) => { void managedOperation(kind, { installationId: skill.installationId, ...fields }).catch(managedError); };
       byId("managedEdit").addEventListener("click", () => { void openManagedEditor(skill).catch(managedError); });
       byId("managedToggle").disabled = !writable || skill.uninstalled;
-      byId("managedToggle").addEventListener("click", () => perform("set-enabled", { enabled: !skill.enabled }));
+      byId("managedToggle").addEventListener("click", () => managedOperation("set-enabled", {
+        installationId: skill.installationId, enabled: !skill.enabled,
+      }).catch(managedError));
+      updateManagedOperationFeedback();
       byId("managedRemove").addEventListener("click", () => perform(skill.uninstalled ? "restore" : "uninstall", {}));
       byId("managedSelect").addEventListener("click", () => perform("select-candidate", { routingAlias: skill.routingAlias }));
       byId("managedUpdate")?.addEventListener("click", () => perform("update-bundled", {}));
@@ -2259,8 +2494,8 @@
         const result = await managedPost(`dependencies/${recheck ? "recheck" : "check"}`, { identity, capability: byId("managedCapability").value });
         if (current()) byId("managedDependencyStatus").textContent = result.errorCode || dependencyStatusLabel((result.dependency || result).status);
       };
-      byId("managedCheck").addEventListener("click", () => { void check().catch(managedError); });
-      byId("managedRecheck").addEventListener("click", () => { void check(true).catch(managedError); });
+      byId("managedCheck")?.addEventListener("click", () => { void check().catch(managedError); });
+      byId("managedRecheck")?.addEventListener("click", () => { void check(true).catch(managedError); });
       const preview = async (action) => {
         const plan = await managedPost("dependencies/plan", { identity, capability: byId("managedCapability").value, action });
         if (!current()) return;
@@ -2279,9 +2514,8 @@
           finally { if (current()) void refreshOperation().catch(managedError); }
         });
       };
-      byId("managedInstall").addEventListener("click", () => { void preview("install").catch(managedError); });
-      byId("managedRepair").addEventListener("click", () => { void preview("repair").catch(managedError); });
-      if (!skill.dependency?.capabilities?.length) byId("managedDependencies").classList.add("hidden");
+      byId("managedInstall")?.addEventListener("click", () => { void preview("install").catch(managedError); });
+      byId("managedRepair")?.addEventListener("click", () => { void preview("repair").catch(managedError); });
     }
 
     function renderSettingsSkillsSidebar(preferredName = settingsSelectedSkillName) {
@@ -2300,7 +2534,7 @@
       sidebar.innerHTML = sorted.length ? sorted.map((skill) => {
         const enabled = !state.disabledSkills.has(skill.name);
         const dependency = skillDependencyByName.get(skill.name);
-        return `<button class="skill-list-item${skill.name === settingsSelectedSkillName ? " active" : ""}" type="button" data-skill-name="${escapeHtml(skill.name)}" aria-current="${skill.name === settingsSelectedSkillName ? "true" : "false"}">
+        return `${settingsSkillsOverview ? '<article class="skill-overview-card">' : ""}<button class="skill-list-item${skill.name === settingsSelectedSkillName && !settingsSkillsOverview ? " active" : ""}" type="button" data-skill-name="${escapeHtml(skill.name)}" aria-current="${skill.name === settingsSelectedSkillName ? "true" : "false"}">
           <span class="skill-list-copy">
             <span class="skill-list-name">${escapeHtml(skill.name)}</span>
             <span class="skill-list-description">${escapeHtml(skill.description || t("skillDescriptionUnavailable"))}</span>
@@ -2309,10 +2543,16 @@
             <span class="skill-list-status-badge ${enabled ? "is-enabled" : "is-disabled"}">${escapeHtml(t(enabled ? "enabledStatus" : "disabledStatus"))}</span>
             ${dependency ? `<span class="skill-dependency-sidebar-status is-${escapeHtml(dependency.status)}" title="${escapeHtml(`${t("skillDependencyTitle")} · ${dependencyStatusLabel(dependency.status)}`)}">${escapeHtml(dependencyStatusLabel(dependency.status))}</span>` : ""}
           </span>
-        </button>`;
+        </button>${settingsSkillsOverview ? `<div class="skill-overview-card-actions"><button class="skill-overview-toggle" type="button" role="switch" aria-checked="${enabled}" aria-label="${escapeHtml(`${t(enabled ? "skillDisableAction" : "skillEnableAction")} ${skill.name}`)}" data-toggle-skill="${escapeHtml(skill.name)}"><span>${escapeHtml(t(enabled ? "enabledStatus" : "disabledStatus"))}</span><span class="skill-toggle-track" aria-hidden="true"></span></button></div></article>` : ""}`;
       }).join("") : `<div class="skills-list-empty" role="status">${escapeHtml(t(allSkills.length ? "skillsSearchNoResults" : "noSkills"))}</div>`;
       sidebar.querySelectorAll(".skill-list-item").forEach((item) => {
         item.addEventListener("click", () => {
+          if (settingsSkillsOverview) {
+            setSettingsSkillsOverview(false);
+            renderSettingsSkillsSidebar(item.dataset.skillName);
+            byId("settingsSkillsDetail").focus({ preventScroll: true });
+            return;
+          }
           settingsSelectedSkillName = item.dataset.skillName;
           sidebar.querySelectorAll(".skill-list-item").forEach((element) => {
             element.classList.remove("active");
@@ -2323,7 +2563,11 @@
           showSkillDetailInSettings(state.skills.find((skill) => skill.name === item.dataset.skillName));
         });
       });
-      showSkillDetailInSettings(selectedSkill);
+      sidebar.querySelectorAll("[data-toggle-skill]").forEach((button) => button.addEventListener("click", () => {
+        toggleSkill(button.dataset.toggleSkill);
+        renderSettingsSkillsSidebar();
+      }));
+      if (!settingsSkillsOverview) showSkillDetailInSettings(selectedSkill);
     }
 
     async function showSkillDetailInSettings(skill) {
@@ -2341,7 +2585,7 @@
         return;
       }
       await ensureSkillBody(skill);
-      if (skill.name !== settingsSelectedSkillName) return;
+      if (settingsSkillsOverview || skill.name !== settingsSelectedSkillName) return;
       const enabled = !state.disabledSkills.has(skill.name);
       const dependency = skillDependencyByName.get(skill.name);
       const keywordHtml = (skill.keywords || []).length
