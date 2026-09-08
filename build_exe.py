@@ -2,12 +2,16 @@
 Build code into a standalone .exe with PyInstaller.
 Run: python build_exe.py
 """
+import argparse
+import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
 from pathlib import Path
+
+from devtools.release_inputs import verify_frontend
 
 APP_DIR = Path(__file__).resolve().parent
 FRONTEND_BUILD_SCRIPT = APP_DIR / "scripts" / "build-frontend.mjs"
@@ -75,111 +79,125 @@ def build_frontend_assets():
         subprocess.run(command, cwd=str(APP_DIR), check=True)
 
 
-build_frontend_assets()
-PACKAGED_SKILLS_DIR = prepare_bundled_skills_for_packaging()
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--frontend-proof", type=Path)
+    args = parser.parse_args(argv)
+    if args.frontend_proof:
+        expected = json.loads(args.frontend_proof.read_text(encoding="utf-8"))
+        verify_frontend(APP_DIR, expected)
+    else:
+        build_frontend_assets()
+    PACKAGED_SKILLS_DIR = prepare_bundled_skills_for_packaging()
 
-# Ensure data subdirs exist
-for d in ["data", "data/sessions", "data/memory", "data/skills", "data/attachments", "data/file-backups"]:
-    (APP_DIR / d).mkdir(exist_ok=True)
+    # Ensure data subdirs exist
+    for d in ["data", "data/sessions", "data/memory", "data/skills", "data/attachments", "data/file-backups"]:
+        (APP_DIR / d).mkdir(exist_ok=True)
 
-version = (APP_DIR / "VERSION").read_text().strip()
-name = f"Code-v{version}"
+    version = (APP_DIR / "VERSION").read_text().strip()
+    name = f"Code-v{version}"
 
-cmd = [
-    sys.executable, "-m", "PyInstaller",
-    "--onefile",
-    "--name", name,
-    "--specpath", str(APP_DIR / "build"),
-    "--icon", str(APP_DIR / "code-icon.ico"),
-    "--version-file", str(APP_DIR / "file_version_info.txt"),
-    "--add-data", f"{APP_DIR / 'VERSION'}{';'}.",
-    "--add-data", f"{APP_DIR / 'app.js'}{';'}.",
-    "--add-data", f"{APP_DIR / 'agent-runtime.js'}{';'}.",
-    "--add-data", f"{APP_DIR / 'src'}{';'}src",
-    "--add-data", f"{APP_DIR / 'index.html'}{';'}.",
-    "--add-data", f"{FRONTEND_BUNDLE}{';'}dist/frontend",
-    "--add-data", f"{FRONTEND_CLASSIC_FALLBACK}{';'}dist/frontend",
-    "--add-data", f"{APP_DIR / 'styles.css'}{';'}.",
-    "--add-data", f"{APP_DIR / 'code-icon.ico'}{';'}.",
-    "--add-data", f"{APP_DIR / 'code-icon.png'}{';'}.",
-    "--add-data", f"{APP_DIR / 'assets'}{';'}assets",
-    "--add-data", f"{PACKAGED_SKILLS_DIR}{';'}data/skills",
-    "--add-data", f"{APP_DIR / 'data' / 'memory'}{';'}data/memory",
-    # The gated dependency worker uses a real local Python, including when the
-    # application itself is a windowed executable. Package only its imports.
-    *[argument for filename in (
-        "__init__.py", "skill_dependency_operation.py", "skill_dependencies.py",
-        "skill_resources.py", "bundled_skills.py",
-    ) for argument in ("--add-data", f"{APP_DIR / 'code_runtime' / filename};dependency-worker/code_runtime")],
-    "--hidden-import", "json",
-    "--hidden-import", "mimetypes",
-    "--hidden-import", "pystray",
-    "--hidden-import", "PIL.Image",
-    "--hidden-import", "PIL.BmpImagePlugin",
-    "--hidden-import", "PIL.IcoImagePlugin",
-    "--hidden-import", "PIL.PngImagePlugin",
-    "--exclude-module", "PIL.ImageQt",
-    "--exclude-module", "PIL.ImageDraw2",
-    "--exclude-module", "PIL.ImageFont",
-    "--exclude-module", "PIL.ImageFilter",
-    "--exclude-module", "PIL.ImageEnhance",
-    "--exclude-module", "PIL.ImageMath",
-    "--exclude-module", "PIL.ImageMorph",
-    "--exclude-module", "PIL.ImageOps",
-    "--exclude-module", "PIL.ImagePath",
-    "--exclude-module", "PIL.ImageStat",
-    "--exclude-module", "PIL.ImageTransform",
-    "--exclude-module", "PIL.ImageWin",
-    "--exclude-module", "PIL.ImImagePlugin",
-    "--exclude-module", "PIL.BlpImagePlugin",
-    "--exclude-module", "PIL.BufrStubImagePlugin",
-    "--exclude-module", "PIL.CurImagePlugin",
-    "--exclude-module", "PIL.DcxImagePlugin",
-    "--exclude-module", "PIL.DdsImagePlugin",
-    "--exclude-module", "PIL.EpsImagePlugin",
-    "--exclude-module", "PIL.FitsImagePlugin",
-    "--exclude-module", "PIL.FliImagePlugin",
-    "--exclude-module", "PIL.FpxImagePlugin",
-    "--exclude-module", "PIL.FtexImagePlugin",
-    "--exclude-module", "PIL.GbrImagePlugin",
-    "--exclude-module", "PIL.GdImageFile",
-    "--exclude-module", "PIL.GifImagePlugin",
-    "--exclude-module", "PIL.GribStubImagePlugin",
-    "--exclude-module", "PIL.Hdf5StubImagePlugin",
-    "--exclude-module", "PIL.IcnsImagePlugin",
-    "--exclude-module", "PIL.ImImagePlugin",
-    "--exclude-module", "PIL.ImtImagePlugin",
-    "--exclude-module", "PIL.IptcImagePlugin",
-    "--exclude-module", "PIL.Jpeg2KImagePlugin",
-    "--exclude-module", "PIL.JpegImagePlugin",
-    "--exclude-module", "PIL.McIdasImagePlugin",
-    "--exclude-module", "PIL.MicImagePlugin",
-    "--exclude-module", "PIL.MpegImagePlugin",
-    "--exclude-module", "PIL.MpoImagePlugin",
-    "--exclude-module", "PIL.MspImagePlugin",
-    "--exclude-module", "PIL.PalmImagePlugin",
-    "--exclude-module", "PIL.PcdImagePlugin",
-    "--exclude-module", "PIL.PcxImagePlugin",
-    "--exclude-module", "PIL.PdfImagePlugin",
-    "--exclude-module", "PIL.PixarImagePlugin",
-    "--exclude-module", "PIL.PpmImagePlugin",
-    "--exclude-module", "PIL.PsdImagePlugin",
-    "--exclude-module", "PIL.SgiImagePlugin",
-    "--exclude-module", "PIL.SpiderImagePlugin",
-    "--exclude-module", "PIL.SunImagePlugin",
-    "--exclude-module", "PIL.TgaImagePlugin",
-    "--exclude-module", "PIL.TiffImagePlugin",
-    "--exclude-module", "PIL.WebPImagePlugin",
-    "--exclude-module", "PIL.WmfImagePlugin",
-    "--exclude-module", "PIL.XbmImagePlugin",
-    "--exclude-module", "PIL.XpmImagePlugin",
-    "--exclude-module", "PIL.XVThumbImagePlugin",
-    "--clean",
-    "--noconsole",
-    str(APP_DIR / "launcher.py"),
-]
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--onefile",
+        "--name", name,
+        "--specpath", str(APP_DIR / "build"),
+        "--icon", str(APP_DIR / "code-icon.ico"),
+        "--version-file", str(APP_DIR / "file_version_info.txt"),
+        "--add-data", f"{APP_DIR / 'VERSION'}{';'}.",
+        "--add-data", f"{APP_DIR / 'app.js'}{';'}.",
+        "--add-data", f"{APP_DIR / 'agent-runtime.js'}{';'}.",
+        "--add-data", f"{APP_DIR / 'src'}{';'}src",
+        "--add-data", f"{APP_DIR / 'index.html'}{';'}.",
+        "--add-data", f"{FRONTEND_BUNDLE}{';'}dist/frontend",
+        "--add-data", f"{FRONTEND_CLASSIC_FALLBACK}{';'}dist/frontend",
+        "--add-data", f"{APP_DIR / 'styles.css'}{';'}.",
+        "--add-data", f"{APP_DIR / 'code-icon.ico'}{';'}.",
+        "--add-data", f"{APP_DIR / 'code-icon.png'}{';'}.",
+        "--add-data", f"{APP_DIR / 'assets'}{';'}assets",
+        "--add-data", f"{PACKAGED_SKILLS_DIR}{';'}data/skills",
+        "--add-data", f"{APP_DIR / 'data' / 'memory'}{';'}data/memory",
+        # The gated dependency worker uses a real local Python, including when the
+        # application itself is a windowed executable. Package only its imports.
+        *[argument for filename in (
+            "__init__.py", "skill_dependency_operation.py", "skill_dependencies.py",
+            "skill_resources.py", "bundled_skills.py",
+        ) for argument in ("--add-data", f"{APP_DIR / 'code_runtime' / filename};dependency-worker/code_runtime")],
+        "--hidden-import", "json",
+        "--hidden-import", "mimetypes",
+        "--hidden-import", "pystray",
+        "--hidden-import", "PIL.Image",
+        "--hidden-import", "PIL.BmpImagePlugin",
+        "--hidden-import", "PIL.IcoImagePlugin",
+        "--hidden-import", "PIL.PngImagePlugin",
+        "--exclude-module", "PIL.ImageQt",
+        "--exclude-module", "PIL.ImageDraw2",
+        "--exclude-module", "PIL.ImageFont",
+        "--exclude-module", "PIL.ImageFilter",
+        "--exclude-module", "PIL.ImageEnhance",
+        "--exclude-module", "PIL.ImageMath",
+        "--exclude-module", "PIL.ImageMorph",
+        "--exclude-module", "PIL.ImageOps",
+        "--exclude-module", "PIL.ImagePath",
+        "--exclude-module", "PIL.ImageStat",
+        "--exclude-module", "PIL.ImageTransform",
+        "--exclude-module", "PIL.ImageWin",
+        "--exclude-module", "PIL.ImImagePlugin",
+        "--exclude-module", "PIL.BlpImagePlugin",
+        "--exclude-module", "PIL.BufrStubImagePlugin",
+        "--exclude-module", "PIL.CurImagePlugin",
+        "--exclude-module", "PIL.DcxImagePlugin",
+        "--exclude-module", "PIL.DdsImagePlugin",
+        "--exclude-module", "PIL.EpsImagePlugin",
+        "--exclude-module", "PIL.FitsImagePlugin",
+        "--exclude-module", "PIL.FliImagePlugin",
+        "--exclude-module", "PIL.FpxImagePlugin",
+        "--exclude-module", "PIL.FtexImagePlugin",
+        "--exclude-module", "PIL.GbrImagePlugin",
+        "--exclude-module", "PIL.GdImageFile",
+        "--exclude-module", "PIL.GifImagePlugin",
+        "--exclude-module", "PIL.GribStubImagePlugin",
+        "--exclude-module", "PIL.Hdf5StubImagePlugin",
+        "--exclude-module", "PIL.IcnsImagePlugin",
+        "--exclude-module", "PIL.ImImagePlugin",
+        "--exclude-module", "PIL.ImtImagePlugin",
+        "--exclude-module", "PIL.IptcImagePlugin",
+        "--exclude-module", "PIL.Jpeg2KImagePlugin",
+        "--exclude-module", "PIL.JpegImagePlugin",
+        "--exclude-module", "PIL.McIdasImagePlugin",
+        "--exclude-module", "PIL.MicImagePlugin",
+        "--exclude-module", "PIL.MpegImagePlugin",
+        "--exclude-module", "PIL.MpoImagePlugin",
+        "--exclude-module", "PIL.MspImagePlugin",
+        "--exclude-module", "PIL.PalmImagePlugin",
+        "--exclude-module", "PIL.PcdImagePlugin",
+        "--exclude-module", "PIL.PcxImagePlugin",
+        "--exclude-module", "PIL.PdfImagePlugin",
+        "--exclude-module", "PIL.PixarImagePlugin",
+        "--exclude-module", "PIL.PpmImagePlugin",
+        "--exclude-module", "PIL.PsdImagePlugin",
+        "--exclude-module", "PIL.SgiImagePlugin",
+        "--exclude-module", "PIL.SpiderImagePlugin",
+        "--exclude-module", "PIL.SunImagePlugin",
+        "--exclude-module", "PIL.TgaImagePlugin",
+        "--exclude-module", "PIL.TiffImagePlugin",
+        "--exclude-module", "PIL.WebPImagePlugin",
+        "--exclude-module", "PIL.WmfImagePlugin",
+        "--exclude-module", "PIL.XbmImagePlugin",
+        "--exclude-module", "PIL.XpmImagePlugin",
+        "--exclude-module", "PIL.XVThumbImagePlugin",
+        "--clean",
+        "--noconsole",
+        str(APP_DIR / "launcher.py"),
+    ]
 
-output_path = APP_DIR / "dist" / f"{name}.exe"
-print(f"Building {name}.exe...")
-subprocess.run(cmd, cwd=str(APP_DIR), check=True)
-print(f"\nDone! Output: {output_path}")
+    output_path = APP_DIR / "dist" / f"{name}.exe"
+    print(f"Building {name}.exe...")
+    if args.frontend_proof:
+        verify_frontend(APP_DIR, expected)
+    subprocess.run(cmd, cwd=str(APP_DIR), check=True)
+    print(f"\nDone! Output: {output_path}")
+
+
+if __name__ == "__main__":
+    main()

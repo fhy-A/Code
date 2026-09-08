@@ -24,7 +24,9 @@ Code 自动发版脚本
   python release.py 0.5.8 --proxy 127.0.0.1:18081  指定代理
 """
 
+import copy
 import hashlib
+import uuid
 import json
 import os
 import platform
@@ -40,7 +42,7 @@ from pathlib import Path
 
 from devtools.release_state import (
     CredentialError,
-    SCHEMA as RELEASE_CREDENTIAL_SCHEMA,
+    CURRENT_SCHEMA as RELEASE_CREDENTIAL_SCHEMA,
     invalidate_credential,
     load_credential,
     record_files,
@@ -50,6 +52,7 @@ from devtools.release_state import (
     sha256_file,
     validate_recorded_files,
 )
+from devtools.release_inputs import source_digest, build_environment, frontend_proof
 from devtools.verification import (
     CHECKS,
     SYNTAX_CHECK_IDS,
@@ -67,7 +70,7 @@ BUILD_SCRIPT = ROOT / "build_exe.py"
 FRONTEND_BUILD_SCRIPT = ROOT / "scripts" / "build-frontend.mjs"
 FRONTEND_BUNDLE = ROOT / "dist" / "frontend" / "code.bundle.js"
 DEFAULT_BRANCH = "master"
-RELEASE_ACTIONS = ("prepare", "publish-prepared", "resume")
+RELEASE_ACTIONS = ("prepare", "publish-prepared", "resume", "refresh-prepared", "reprepare")
 GH_COMMAND = ("gh",)
 RELEASE_NOTES_PLACEHOLDER = "[发布说明待补充 -- 请在此描述本版本的主要改动]"
 RELEASE_NOTES_BODY_START = "<!-- code-release-notes:body:start -->"
@@ -363,7 +366,7 @@ def _read_remote_release(tag, repository):
             "--repo",
             repository,
             "--json",
-            "tagName,name,body,targetCommitish,assets",
+            "tagName,name,body,targetCommitish,assets,isDraft,isPrerelease,publishedAt",
         ),
     )
     if result.returncode != 0:
@@ -737,11 +740,14 @@ def build_exe(new_version):
     print("  这可能需要几分钟...")
 
     start = time.time()
-    rc, stdout, stderr = run(
-        [sys.executable, str(BUILD_SCRIPT)],
-        description="python build_exe.py",
-        timeout=600,
-    )
+    proof = frontend_proof(ROOT)
+    with tempfile.TemporaryDirectory(prefix="code-frontend-proof-") as directory:
+        path = Path(directory) / "proof.json"
+        path.write_text(json.dumps(proof), encoding="utf-8")
+        rc, stdout, stderr = run(
+            [sys.executable, str(BUILD_SCRIPT), "--frontend-proof", str(path)],
+            description="python build_exe.py", timeout=600,
+        )
 
     elapsed = time.time() - start
     exe_path = ROOT / "dist" / f"Code-v{new_version}.exe"
@@ -1014,6 +1020,9 @@ def _load_prepared_credential(version):
 
 
 def _validate_static_credential(credential, version):
+    if credential.get("schema") == RELEASE_CREDENTIAL_SCHEMA:
+        if credential.get("state") == "reprepare_pending" or _reuse_binding(version) != credential.get("reuseBinding"):
+            die("v2输入绑定失效或重新准备未完成；使用 --reprepare")
     recorded_paths = tuple(record.get("path") for record in credential["releaseFiles"])
     if recorded_paths != _release_paths(version):
         die("prepared 凭证的发布白名单不完整或顺序异常")
@@ -1099,31 +1108,164 @@ def require_prepare_inputs(version):
         die("当前 Python 缺少 PyInstaller；未安装依赖或启动耗时验证")
 
 
-def prepare_release(version):
+def _notes_frame(version):
+    content = (ROOT / f"docs/releases/v{version}.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+    if content.count(RELEASE_NOTES_BODY_START) != 1 or content.count(RELEASE_NOTES_BODY_END) != 1:
+        die("受控刷新要求唯一的发布正文边界")
+    prefix, rest = content.split(RELEASE_NOTES_BODY_START)
+    body, suffix = rest.split(RELEASE_NOTES_BODY_END)
+    return sha256_bytes((prefix + RELEASE_NOTES_BODY_START + RELEASE_NOTES_BODY_END + suffix).encode()), body
+
+
+def _ensure_source_committed(version):
+    paths = _release_paths(version)
+    changed = _git_name_lines("diff", "--name-only", "HEAD", "--", ".", *(f":(exclude){path}" for path in paths))
+    if changed:
+        die("发布候选含未提交的非发布文件；先提交产品/测试改动，不能让EXE与tag不同")
+    try:
+        return source_digest(ROOT, paths)
+    except CredentialError as error:
+        die(str(error))
+
+
+def _input_binding(version):
+    return {"sourceSha256": source_digest(ROOT, _release_paths(version)),
+            "buildEnvironment": build_environment(ROOT), "frontend": frontend_proof(ROOT)}
+
+
+def _reuse_binding(version):
+    return {**_input_binding(version), "notesFrameSha256": _notes_frame(version)[0]}
+
+
+def _archive_candidate(path, credential, action):
+    destination = path.parent / "audit" / f"v{credential['version']}-{action}-{uuid.uuid4().hex}.json"
+    save_credential(destination, credential)
+    return credential["credentialSha256"]
+
+
+def _require_unpublished(credential, *, recovery=False):
+    states = {"prepared", "reprepare_pending"} if recovery else {"prepared"}
+    publication = credential.get("publication", {})
+    if credential.get("state") not in states or publication.get("startedAt") or publication.get("commit"):
+        die("发布已开始或状态不支持；只能按原候选resume，不能刷新或重新准备")
+    baseline = credential.get("baseline", {})
+    if not all(baseline.get(key) for key in ("head", "indexTree", "oldVersion", "originHead")):
+        die("prepared来源不完整，禁止自动恢复")
+    if baseline.get("branch") != DEFAULT_BRANCH or _git_branch() != DEFAULT_BRANCH:
+        die("prepared分支不匹配")
+    records = credential.get("releaseFiles", [])
+    if tuple(record.get("path") for record in records) != _release_paths(credential["version"]):
+        die("prepared来源缺少完整四文件绑定")
+    if any(not re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", ""))) or
+           not record.get("gitBlob") for record in records):
+        die("prepared来源文件摘要不完整")
+    verification = credential.get("verification", {})
+    artifact = credential.get("artifact", {})
+    if (not verification.get("completedAt") or not verification.get("checkIds") or
+        not re.fullmatch(r"[0-9a-f]{64}", str(verification.get("definitionSha256", ""))) or
+        artifact.get("path") != f"dist/Code-v{credential['version']}.exe" or
+        not re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("sha256", ""))) or
+        artifact.get("peMetadata") != _expected_exe_metadata(credential["version"]) or
+        publication.get("lastCompleted") != "prepared"):
+        die("prepared来源的验证/产物/发布状态不完整")
+    _ensure_cached_empty()
+
+
+def refresh_prepared(version):
+    path, original = _load_prepared_credential(version)
+    _require_unpublished(original)
+    _ensure_source_committed(version)
+    if original.get("schema") != RELEASE_CREDENTIAL_SCHEMA or not original.get("reuseBinding"):
+        die("旧v1没有细粒度复用证据；保持原严格校验或显式--reprepare")
+    binding = _reuse_binding(version)
+    if binding != original["reuseBinding"]:
+        die("正文允许区域之外的输入/产物/工具链变化；需要--reprepare")
+    if not re.search(r"[\u4e00-\u9fff]", _notes_frame(version)[1]):
+        die("发布正文须包含中文说明")
+    environment = _environment_fingerprint(original["environment"]["repository"])
+    stable_env = lambda value: {key: item for key, item in value.items() if key not in {"git", "gh"}}
+    if stable_env(environment) != stable_env(original["environment"]):
+        die("非Git/gh环境变化，禁止刷新复用")
+    # Only this version's body may differ; all other release metadata stays exact.
+    records = record_files(ROOT, _release_paths(version))
+    for record, old in zip(records, original["releaseFiles"]):
+        record["gitBlob"] = _git_blob_hash(record["path"])
+        if record["path"] != f"docs/releases/v{version}.md" and record != old:
+            die("发布正文之外的版本元数据变化")
+    updated = copy.deepcopy(original)
+    updated.update(environment=environment, releaseFiles=records)
+    prepare_frontend_assets(build=False)
+    verify_version_consistency(version, original["baseline"]["oldVersion"])
+    _validate_prepared_candidate(updated, version)
+    if _reuse_binding(version) != binding:
+        die("刷新期间输入发生变化")
+    previous = _archive_candidate(path, original, "refresh")
+    updated["refresh"] = {"at": _utc_now(), "previousCredentialSha256": previous,
+                          "checks": ["notes-boundary", "version", "frontend", "artifact", "candidate", "remote"],
+                          "fullSuiteRerun": False}
+    save_credential(path, updated)
+    ok("已仅刷新发布正文/Git/gh绑定；原全量验证时间保留，未发布")
+
+
+def reprepare_release(version):
+    path, source = _load_prepared_credential(version)
+    _require_unpublished(source, recovery=True)
+    _ensure_source_committed(version)
+    old_version = source["baseline"]["oldVersion"]
+    head_version = _required_quiet(["git", "show", "HEAD:VERSION"], "核对已提交旧版本 ")
+    if head_version != old_version or parse_version(version) <= parse_version(old_version):
+        die("旧版本与HEAD关系不可追溯，禁止同版本恢复")
+    if get_current_version() != version:
+        die("显式重新准备只处理已同步目标版本的候选")
+    ancestry = run_quiet(["git", "merge-base", "--is-ancestor", source["baseline"]["head"], _git_head()])
+    if ancestry.returncode != 0:
+        die("原prepared基线不是当前候选祖先")
+    remote = remote_read_only_preflight(version, _git_head())
+    if remote != {"repository": source["environment"].get("repository"), "originHead": source["baseline"]["originHead"]}:
+        die("重新准备的仓库或远端基线已改变")
+    previous = _archive_candidate(path, source, "reprepare")
+    pending = copy.deepcopy(source)
+    pending.update(schema=RELEASE_CREDENTIAL_SCHEMA, state="reprepare_pending",
+                   reuseBinding=source.get("reuseBinding", {}),
+                   recovery={"previousCredentialSha256": previous, "startedAt": _utc_now()})
+    save_credential(path, pending)  # Crash/failure never revives the old publishable state.
+    try:
+        prepare_release(version, _source=pending)
+    except BaseException:
+        print("重新准备未完成；元数据保留进入时状态。修复原因后使用 --reprepare 重试；不能publish。")
+        raise
+
+
+def prepare_release(version, *, _source=None):
     """Create a fully verified local candidate and sealed credential."""
     version_tuple = parse_version(version)
-    old_version = get_current_version()
+    old_version = _source["baseline"]["oldVersion"] if _source else get_current_version()
     if version_tuple <= parse_version(old_version):
-        die(f"prepare 目标版本必须高于当前版本 {old_version}")
+        die(f"prepare 目标版本必须高于当前版本 {old_version}；已有失效prepared请审计后使用 --reprepare")
     if _git_branch() != DEFAULT_BRANCH:
         die(f"prepare 必须在 {DEFAULT_BRANCH} 分支运行")
     _ensure_cached_empty()
 
     base_head = _git_head()
+    _ensure_source_committed(version)
     credential_path = _credential_path(version)
     try:
         require_prepare_inputs(version)
         remote = remote_read_only_preflight(version, base_head)
         environment = _environment_fingerprint(remote["repository"])
     except BaseException:
-        invalidate_credential(credential_path)
+        if _source is None:
+            invalidate_credential(credential_path)
         raise
 
-    invalidate_credential(credential_path)
+    if _source is None:
+        invalidate_credential(credential_path)
     release_paths = _release_paths(version)
     snapshot = _snapshot_release_files(release_paths)
     index_tree = _git_index_tree()
     outside_before = _tracked_state_digest(base_head, release_paths)
+    inputs_before = source_digest(ROOT, release_paths)
+    build_environment_before = build_environment(ROOT)
 
     try:
         update_version_file(version)
@@ -1132,6 +1274,8 @@ def prepare_release(version):
         verify_version_consistency(version, old_version, dry_run=False)
 
         run_release_quality_checks(dry_run=False, skip_tests=False)
+        if build_environment(ROOT) != build_environment_before:
+            die("验证期间构建环境变化，禁止构建或封印")
         build_exe(version)
         pe_metadata = require_exe_metadata(version)
         exe_path = ROOT / "dist" / f"Code-v{version}.exe"
@@ -1154,7 +1298,13 @@ def prepare_release(version):
         if not changed_release_files:
             die("prepare 未产生任何发布元数据差量")
 
+        binding = _reuse_binding(version)
+        if binding["buildEnvironment"] != build_environment_before:
+            die("构建期间工具链变化，禁止封印")
+        if binding["sourceSha256"] != inputs_before:
+            die("prepare期间源码/测试/打包输入变化")
         credential = {
+            "reuseBinding": binding,
             "schema": RELEASE_CREDENTIAL_SCHEMA,
             "version": version,
             "tag": f"v{version}",
@@ -1189,12 +1339,15 @@ def prepare_release(version):
                 "completedAt": None,
             },
         }
+        if _source is not None:
+            credential["repreparedFrom"] = _source["recovery"]
         save_credential(credential_path, credential)
         ok(f"prepared 凭证已写入 Git 内部路径: code-release/v{version}.json")
         print(f"  下一步: python release.py {version} --publish-prepared")
     except BaseException:
         _restore_release_files(snapshot)
-        invalidate_credential(credential_path)
+        if _source is None:
+            invalidate_credential(credential_path)
         raise
 
 
@@ -1331,6 +1484,20 @@ def _audit_release_metadata(info, credential):
     if str(info.get("body", "")).replace("\r\n", "\n") != expected_body.replace("\r\n", "\n"):
         die("GitHub Release 正文与凭证不一致")
 
+    published_at = info.get("publishedAt")
+    try:
+        published = datetime.fromisoformat(published_at.replace("Z", "+00:00")) if isinstance(published_at, str) else None
+    except ValueError:
+        published = None
+    if info.get("isDraft") is not False or info.get("isPrerelease") is not False or published is None or published.tzinfo is None:
+        die("GitHub Release发布状态缺失或不是正式已发布状态")
+    target = info.get("targetCommitish")
+    targets = {credential["publication"].get("commit")}
+    if credential.get("schema") != RELEASE_CREDENTIAL_SCHEMA:
+        targets.add(DEFAULT_BRANCH)
+    if target not in targets:
+        die("GitHub Release目标与发布提交不一致")
+
 
 def _ensure_github_release(path, credential):
     repository = credential["environment"]["repository"]
@@ -1343,6 +1510,7 @@ def _ensure_github_release(path, credential):
                 "release", "create", tag,
                 "--repo", repository,
                 "--title", f"Code v{credential['version']}",
+                "--verify-tag", "--target", credential["publication"]["commit"],
                 "--notes-file", str(notes),
             ),
             timeout=120,
@@ -1391,6 +1559,8 @@ def _audit_release_asset(info, credential):
     asset = matches[0]
     if asset.get("size") != artifact["size"]:
         die("GitHub Release 资产大小与凭证不一致")
+    if asset.get("state") != "uploaded":
+        die("Release资产状态不是uploaded")
     digest = str(asset.get("digest") or "")
     if digest.lower().startswith("sha256:"):
         remote_sha = digest.split(":", 1)[1].lower()
@@ -1495,170 +1665,22 @@ def resume_release(version, *, auto_yes=False):
 # ═══════════════════════════════════════════════════════════════
 
 def git_commit_and_tag(new_version, dry_run=False):
-    print("\n-- Git 提交 & 标签 --")
+    if not dry_run:
+        die("旧发布helper不允许直接执行；请使用sealed发布入口")
+    print("  [DRY RUN] git_commit_and_tag v" + new_version)
 
-    files_to_add = [
-        "VERSION",
-        "file_version_info.txt",
-        "README.md",
-        f"docs/releases/v{new_version}.md",
-    ]
-
-    if dry_run:
-        print(f"  [DRY RUN] 将暂存: {', '.join(files_to_add)}")
-        print(f"  [DRY RUN] 将提交: chore: prepare v{new_version} release metadata")
-        print(f"  [DRY RUN] 将打标签: v{new_version}")
-        return
-
-    for f in files_to_add:
-        filepath = ROOT / f
-        if filepath.exists():
-            rc, _, stderr = run(["git", "add", str(filepath)], description=f"git add {f}")
-            if rc != 0:
-                die(f"git add 失败: {f}\n{stderr}")
-    ok("文件已暂存")
-
-    msg = f"chore: prepare v{new_version} release metadata"
-    rc, stdout, stderr = run(["git", "commit", "-m", msg], description="git commit")
-    if rc != 0:
-        if "nothing to commit" in (stdout + stderr):
-            ok("没有需要提交的变更（可能已提交）")
-        else:
-            die(f"git commit 失败:\n{stdout}{stderr}")
-    else:
-        ok("提交成功")
-
-    tag = f"v{new_version}"
-    rc, stdout, stderr = run(["git", "tag", tag], description=f"git tag {tag}")
-    if rc != 0:
-        if "already exists" in stderr:
-            if not ask(f"标签 {tag} 已存在，是否删除并重新创建？"):
-                die(f"用户取消: 标签 {tag} 已存在")
-            run(["git", "tag", "-d", tag], description=f"git tag -d {tag}")
-            run(["git", "tag", tag], description=f"git tag {tag}")
-    ok(f"标签 {tag} 已创建")
-
-
-# ═══════════════════════════════════════════════════════════════
-# Step 9: 推送到 GitHub
-# ═══════════════════════════════════════════════════════════════
 
 def push_to_github(new_version, dry_run=False):
-    print("\n-- 推送代码 & 标签 --")
+    if not dry_run:
+        die("旧发布helper不允许直接执行；请使用sealed发布入口")
+    print("  [DRY RUN] push_to_github v" + new_version)
 
-    tag = f"v{new_version}"
-
-    if dry_run:
-        print(f"  [DRY RUN] git push origin {DEFAULT_BRANCH}")
-        print(f"  [DRY RUN] git push origin {tag}")
-        return
-
-    # 先获取远程
-    rc, _, stderr = run(["git", "fetch", "origin"], description="git fetch origin")
-    if rc != 0:
-        warn(f"git fetch 失败，将尝试直接推送:\n{stderr}")
-
-    # 推送分支
-    rc, stdout, stderr = run(
-        ["git", "push", "origin", DEFAULT_BRANCH],
-        description=f"git push origin {DEFAULT_BRANCH}",
-        timeout=60,
-    )
-    if rc != 0:
-        print(f"\n  {'='*50}")
-        print(f"  X 推送分支失败！")
-        print(f"  {'='*50}")
-        print(f"  可能原因：网络问题 / 权限不足 / 远程有新提交")
-        print(f"\n  请手动处理：")
-        print(f"    git push origin {DEFAULT_BRANCH}")
-        print(f"\n  STDERR:\n{stderr[-500:]}")
-        die("推送分支失败，请人工处理")
-
-    ok(f"分支 {DEFAULT_BRANCH} 推送成功")
-
-    # 推送标签
-    rc, stdout, stderr = run(
-        ["git", "push", "origin", tag],
-        description=f"git push origin {tag}",
-        timeout=60,
-    )
-    if rc != 0:
-        print(f"\n  {'='*50}")
-        print(f"  X 推送标签失败！")
-        print(f"  {'='*50}")
-        print(f"  分支已推送成功，但标签 {tag} 推送失败。")
-        print(f"\n  请手动处理：")
-        print(f"    git push origin {tag}")
-        print(f"\n  STDERR:\n{stderr[-500:]}")
-        die("推送标签失败，请人工处理")
-
-    ok(f"标签 {tag} 推送成功")
-
-
-# ═══════════════════════════════════════════════════════════════
-# Step 10: 创建 GitHub Release
-# ═══════════════════════════════════════════════════════════════
 
 def create_github_release(new_version, sha256, dry_run=False):
-    print("\n-- 创建 GitHub Release --")
+    if not dry_run:
+        die("旧发布helper不允许直接执行；请使用sealed发布入口")
+    print("  [DRY RUN] create_github_release v" + new_version)
 
-    tag = f"v{new_version}"
-    exe_path = ROOT / "dist" / f"Code-v{new_version}.exe"
-    release_notes = ROOT / "docs" / "releases" / f"v{new_version}.md"
-
-    # 检查 gh 是否可用
-    if shutil.which("gh") is None:
-        print(f"\n  {'='*50}")
-        print(f"  X 未找到 GitHub CLI (gh)")
-        print(f"  {'='*50}")
-        print(f"  安装: winget install GitHub.cli")
-        print(f"  登录: gh auth login")
-        print(f"\n  代码和标签已推送。请手动创建 Release:")
-        print(f"    https://github.com/fhy-A/Code/releases/new?tag={tag}")
-        return
-
-    # 检查 gh 登录状态
-    rc, stdout, _ = run(["gh", "auth", "status"], description="gh auth status")
-    if rc != 0:
-        print(f"\n  {'='*50}")
-        print(f"  X GitHub CLI 未登录")
-        print(f"  {'='*50}")
-        print(f"  请运行: gh auth login")
-        print(f"\n  代码和标签已推送。请手动创建 Release:")
-        print(f"    https://github.com/fhy-A/Code/releases/new?tag={tag}")
-        return
-
-    if dry_run:
-        print(f"  [DRY RUN] gh release create {tag} {exe_path.name} --notes-file {release_notes.name}")
-        return
-
-    cmd = [
-        "gh", "release", "create", tag,
-        str(exe_path),
-        "--title", f"Code v{new_version}",
-        "--notes-file", str(release_notes),
-    ]
-
-    rc, stdout, stderr = run(cmd, description="gh release create", timeout=120)
-
-    if rc != 0:
-        print(f"\n  {'='*50}")
-        print(f"  X 创建 GitHub Release 失败！")
-        print(f"  {'='*50}")
-        print(f"  代码和标签已推送成功。")
-        print(f"\n  请手动创建 Release:")
-        print(f"    https://github.com/fhy-A/Code/releases/new?tag={tag}")
-        print(f"\n  需要上传的文件: {exe_path}")
-        print(f"\n  gh 输出:\n{stdout}\n{stderr[-500:]}")
-        die("GitHub Release 创建失败，请人工处理")
-
-    ok(f"GitHub Release {tag} 创建成功")
-    print(f"  {stdout.strip()}")
-
-
-# ═══════════════════════════════════════════════════════════════
-# 主流程
-# ═══════════════════════════════════════════════════════════════
 
 def full_release(version, *, auto_yes=False):
     """One sealed path for fresh preparation, reuse, and interrupted publication."""
@@ -1669,7 +1691,7 @@ def full_release(version, *, auto_yes=False):
             return publish_prepared(version, auto_yes=auto_yes)
         if credential["state"] in {"publishing", "published"}:
             return resume_release(version, auto_yes=auto_yes)
-        die("未知发布凭证状态；禁止覆盖或重新发布")
+        die("发布凭证状态不允许自动继续；reprepare_pending须显式 --reprepare，禁止覆盖或发布")
     if not auto_yes:
         rc, status, _stderr = run(["git", "status", "--short"], description="git status")
         if rc != 0:
@@ -1727,6 +1749,9 @@ def main():
         const="resume",
         help="审计并续接同一凭证已经开始的外部发布",
     )
+    for extra_action in ("refresh-prepared", "reprepare"):
+        action_group.add_argument("--" + extra_action, dest="release_action", action="store_const",
+                                  const=extra_action, help="受控刷新或重新准备尚未发布的候选")
     parser.add_argument(
         "--skip-tests",
         action="store_true",
@@ -1770,6 +1795,12 @@ def main():
 
     parse_version(new_version)
 
+    if action == "refresh-prepared":
+        refresh_prepared(new_version)
+        return
+    if action == "reprepare":
+        reprepare_release(new_version)
+        return
     if action == "prepare":
         prepare_release(new_version)
         return

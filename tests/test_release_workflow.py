@@ -107,6 +107,10 @@ class TestPrepareAtomicFailure(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(release, "_git_index_tree", return_value="index-tree"))
         self.stack.enter_context(mock.patch.object(release, "_credential_path", return_value=self.credential_path))
         self.stack.enter_context(mock.patch.object(release, "_tracked_state_digest", return_value="outside"))
+        self.stack.enter_context(mock.patch.object(release, "source_digest", return_value="a" * 64))
+        self.stack.enter_context(mock.patch.object(release, "_ensure_source_committed"))
+        self.stack.enter_context(mock.patch.object(release, "build_environment", return_value={"synthetic": True}))
+        self.stack.enter_context(mock.patch.object(release, "_reuse_binding", return_value={"sourceSha256": "a" * 64, "buildEnvironment": {"synthetic": True}}))
         self.stack.enter_context(mock.patch.object(release, "require_prepare_inputs"))
         self.stack.enter_context(mock.patch.object(release, "_environment_fingerprint", return_value={"repository": "owner/repo", "platform": "test"}))
 
@@ -360,7 +364,8 @@ class FakeGh:
                 "tagName": tag,
                 "name": title,
                 "body": notes,
-                "targetCommitish": "master",
+                "targetCommitish": cmd[cmd.index("--target") + 1],
+                "isDraft": False, "isPrerelease": False, "publishedAt": "2026-09-08T00:00:00Z",
                 "assets": [],
             }
             return self.completed(cmd, stdout="created")
@@ -374,6 +379,7 @@ class FakeGh:
                 {
                     "name": artifact.name,
                     "size": artifact.stat().st_size,
+                    "state": "uploaded",
                     "digest": f"sha256:{release_state.sha256_file(artifact)}",
                 },
             ]

@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 
 SCHEMA = "code-release-prepared/v1"
+CURRENT_SCHEMA = "code-release-prepared/v2"
 SEAL_FIELD = "credentialSha256"
 
 
@@ -53,7 +54,7 @@ def seal_credential(payload: dict[str, Any]) -> dict[str, Any]:
 def validate_credential(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise CredentialError("凭证根节点必须是对象")
-    if payload.get("schema") != SCHEMA:
+    if payload.get("schema") not in {SCHEMA, CURRENT_SCHEMA}:
         raise CredentialError("凭证 schema 不受支持")
     expected = payload.get(SEAL_FIELD)
     if not isinstance(expected, str) or len(expected) != 64:
@@ -81,7 +82,12 @@ def validate_credential(payload: Any) -> dict[str, Any]:
         raise CredentialError("凭证版本号格式无效")
     if payload.get("tag") != f"v{payload['version']}":
         raise CredentialError("凭证 tag 与版本号不匹配")
-    if payload.get("state") not in {"prepared", "publishing", "published"}:
+    states = {"prepared", "publishing", "published"}
+    if payload.get("schema") == CURRENT_SCHEMA:
+        states.add("reprepare_pending")
+        if not isinstance(payload.get("reuseBinding"), dict):
+            raise CredentialError("v2凭证缺少输入绑定")
+    if payload.get("state") not in states:
         raise CredentialError("凭证状态无效")
     if not isinstance(payload.get("releaseFiles"), list):
         raise CredentialError("凭证 releaseFiles 必须是数组")
