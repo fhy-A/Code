@@ -17,6 +17,8 @@ import secrets
 import threading
 from typing import Callable, Iterable
 
+from . import reasoning_capabilities
+
 
 CATALOG_SCHEMA = "code-model-route-registry/v1"
 ROUTE_REF_PREFIX = "mr1_"
@@ -199,6 +201,10 @@ class ModelRouteRegistry:
                     "modelId": route["modelId"],
                     "label": route["label"],
                     "enabled": route.get("enabled") is not False,
+                    "reasoning": reasoning_capabilities.projection(
+                        route["modelId"], route["routeRef"],
+                        self._base_urls.get(route["connectionId"], ""),
+                    ),
                     "credentialsAvailable": bool(
                         route.get("enabled") and self._credentials.get(route["routeRef"])
                     ),

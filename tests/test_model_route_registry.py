@@ -44,7 +44,7 @@ class ModelRouteRegistryTests(unittest.TestCase):
             set(snapshot["routes"][0]),
             {
                 "routeRef", "connectionId", "source", "modelId", "label",
-                "enabled", "credentialsAvailable",
+                "enabled", "credentialsAvailable", "reasoning",
             },
         )
 

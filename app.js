@@ -101,10 +101,22 @@ const {
 } = window.Code.agent.systemPrompt;
 const {
   assembleModelRequestPayload,
+  initialReasoningPreference,
+  snapshotReasoningSelection,
   hasImageContent,
   mapMessageForApi,
   projectMessagesWithoutImages,
 } = window.Code.agent.modelRequest;
+const REASONING_STORAGE_KEY = "code-reasoning-v2";
+let reasoningPreference = initialReasoningPreference({
+  rawV2: localStorage.getItem(REASONING_STORAGE_KEY),
+  rawLegacy: localStorage.getItem("code-thinking"),
+  hasLegacyInstall: ["code-model", "code-key-config", "code-permission-profile"]
+    .some((key) => localStorage.getItem(key) !== null),
+});
+if (reasoningPreference.mode === "v2" && localStorage.getItem(REASONING_STORAGE_KEY) === null) {
+  localStorage.setItem(REASONING_STORAGE_KEY, JSON.stringify({ schemaVersion: 2, intent: reasoningPreference.intent }));
+}
 const {
   nativeTools,
   normalizeNativeToolCall,
@@ -610,6 +622,7 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     toolPreset: ctx.toolPreset || "default",
     permissionProfile: ctx.permissionProfile || "accept",
     thinkingLevel: ctx.thinkingLevel || getThinkingLevel(),
+    reasoningSelection: ctx.reasoningSelection ?? null,
     taskPrompt: ctx._taskPrompt || previous.taskPrompt || "",
     recoveryCount: Number(extra.recoveryCount ?? previous.recoveryCount ?? 0),
     runtimeRunId: String(extra.runtimeRunId ?? ctx.runtimeRunId ?? previous.runtimeRunId ?? ""),
@@ -1162,6 +1175,8 @@ function buildRunContext(sessionId, options = {}) {
     tools: getNativeTools(toolPreset, allowedToolNames),
     explicitSkill: null,
     thinkingLevel: String(options.thinkingLevel || getThinkingLevel()),
+    reasoningSelection: Object.prototype.hasOwnProperty.call(options, "reasoningSelection")
+      ? structuredClone(options.reasoningSelection) : getReasoningSelectionForModel(model),
   };
 }
 
@@ -7721,6 +7736,7 @@ function normalizePublicModelRoute(route) {
     source: String(route.source || "manual").trim() || "manual",
     enabled: route.enabled !== false,
     credentialsAvailable: route.credentialsAvailable === true,
+    ...(route.reasoning?.schemaVersion === 2 ? { reasoning: structuredClone(route.reasoning) } : {}),
   };
 }
 
@@ -9978,6 +9994,7 @@ function buildRecoveredRunContext(session, runState) {
   setSessionStats(sessionId, session.stats || { input: 0, output: 0, cache: 0, cost: 0 });
 
   const ctx = buildRunContext(sessionId, {
+    reasoningSelection: structuredClone(runState.reasoningSelection ?? null),
     imageRoute: normalizeImageRouteDispatch(runState.imageRoute),
   });
   ctx.messages = messages;
@@ -9991,6 +10008,7 @@ function buildRecoveredRunContext(session, runState) {
   ctx.permissionProfile = runState.permissionProfile || ctx.permissionProfile || "accept";
   ctx.executionOwner = runState.executionOwner || executionOwnerForPermissionProfile(ctx.permissionProfile);
   ctx.thinkingLevel = runState.thinkingLevel || ctx.thinkingLevel || "auto";
+  ctx.reasoningSelection = structuredClone(runState.reasoningSelection ?? null);
   ctx.allowedToolNames = getAllowedToolNamesForProfile(ctx.permissionProfile, ctx.toolPreset);
   ctx.tools = getNativeTools(ctx.toolPreset, ctx.allowedToolNames);
   ctx.taskUsage = { input: 0, output: 0, cache: 0 };
@@ -11082,6 +11100,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     temperature: ctx?.temperature ?? Number(els.temperature.value || 0.2),
     maxTokens: ctx?.maxTokens || getEffectiveMaxTokens(model),
     thinkingLevel: ctx?.thinkingLevel || getThinkingLevel(),
+    reasoningSelection: ctx ? (ctx.reasoningSelection ?? null) : getReasoningSelectionForModel(model),
   });
 
   return { payload, tools, model, sessionId, streamMessages };
@@ -11151,6 +11170,7 @@ async function _callModelOnceAttempt(assistantIndex, useNativeTools = true, ctx 
       runId: ctx.runtimeRunId || run.runtimeRunId || "",
       sessionId,
       payload,
+      reasoningSelection: ctx.reasoningSelection ?? null,
       baseUrl,
       keys: fallbackKeys,
       routeRef: dispatch?.routeRef || ctx?.routeRef || "",
@@ -11798,6 +11818,7 @@ function queuedMessageCheckpoint(item) {
     permissionProfile: String(item.permissionProfile || "accept"),
     toolPreset: String(item.toolPreset || "default"),
     thinkingLevel: String(item.thinkingLevel || "auto"),
+    reasoningSelection: structuredClone(item.reasoningSelection ?? null),
     temperature: Number(item.temperature ?? 0.2),
     maxTokens: Number(item.maxTokens || 0),
     contextLimit: Number(item.contextLimit || 0),
@@ -11900,8 +11921,12 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
   const existingMessage = options.existingMessage || null;
   const model = String(existingMessage?._model || getSelectedModel());
   if (!model) throw new Error(t("selectModelFirst"));
+  const reasoningSelection = existingMessage
+    ? structuredClone(existingMessage.meta?.queuedDispatch?.reasoningSelection ?? null)
+    : getReasoningSelectionForModel(model, options.routeRef || "");
+  const thinkingLevel = existingMessage?.meta?.queuedDispatch?.thinkingLevel || getThinkingLevel();
   const dispatchRoute = await getModelDispatchCredentials(model, {
-    routeRef: options.routeRef || existingMessage?.meta?.queuedDispatch?.routeRef || "",
+    routeRef: reasoningSelection?.routeRef || options.routeRef || existingMessage?.meta?.queuedDispatch?.routeRef || "",
     catalogRevision: options.catalogRevision || existingMessage?.meta?.queuedDispatch?.catalogRevision || 0,
   });
   const imageRoute = normalizeImageRouteDispatch(getSelectedImageRoute?.());
@@ -11910,7 +11935,6 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
   const id = `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
   const permissionProfile = getPermissionProfile();
   const toolPreset = els.toolPreset.value || "default";
-  const thinkingLevel = getThinkingLevel();
   const temperature = Number(els.temperature.value || 0.2);
   const maxTokens = getEffectiveMaxTokens(model);
   const contextResolution = getModelContextResolution(model, maxTokens);
@@ -11938,6 +11962,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
     permissionProfile,
     toolPreset,
     thinkingLevel,
+    reasoningSelection,
     temperature,
     maxTokens,
     ...contextResolution,
@@ -11959,6 +11984,8 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
       id,
       status: "pending",
       queuedAt,
+      thinkingLevel,
+      reasoningSelection: structuredClone(reasoningSelection),
       ...(dispatchRoute.routeRef ? {
         routeRef: dispatchRoute.routeRef,
         catalogRevision: dispatchRoute.catalogRevision,
@@ -12161,6 +12188,7 @@ async function runQueuedSessionMessage(sessionId, item) {
       permissionProfile: item.permissionProfile,
       toolPreset: item.toolPreset,
       thinkingLevel: item.thinkingLevel,
+      reasoningSelection: structuredClone(item.reasoningSelection ?? null),
       temperature: item.temperature,
       maxTokens: item.maxTokens,
       contextResolution: {
@@ -12309,6 +12337,7 @@ function syncBackgroundJobCheckpoint(job) {
   } else {
     setBackgroundRunCheckpoint(job.sessionId, {
       ...buildBackgroundJobCheckpoint(job, Date.now()),
+      reasoningSelection: structuredClone(job.reasoningSelection ?? null),
       contextLimit: Number(job.contextLimit || 0),
       contextWindowTokens: Number(job.contextWindowTokens || 0),
       contextBudgetTokens: job.contextBudgetTokens == null ? null : Number(job.contextBudgetTokens),
@@ -12466,6 +12495,7 @@ function createBackgroundServerContext(job) {
     permissionProfile: job.permissionProfile,
     toolPreset: job.toolPreset,
     thinkingLevel: job.thinkingLevel,
+    reasoningSelection: structuredClone(job.reasoningSelection ?? null),
     stats: getSessionStats(job.sessionId),
     taskUsage: { input: 0, output: 0, cache: 0 },
     depth: 0,
@@ -12489,6 +12519,7 @@ function createBackgroundServerContext(job) {
   subCtx.permissionProfile = job.permissionProfile;
   subCtx.toolPreset = job.toolPreset;
   subCtx.thinkingLevel = job.thinkingLevel;
+  subCtx.reasoningSelection = structuredClone(job.reasoningSelection ?? null);
   subCtx.authorizationLabel = job.userText.slice(0, 24) || "后台任务";
   subCtx.isDetachedBackground = true;
   subCtx.backgroundJobId = job.id;
@@ -12558,6 +12589,7 @@ async function runBackgroundSubAgentJob(job) {
         clientRequestId: job.clientRequestId || job.id,
         activeSkillNames: subCtx.activeSkillNames || [],
         payload: prepared.payload,
+        reasoningSelection: subCtx.reasoningSelection ?? null,
         baseUrl: dispatch.baseUrl,
         keys: dispatch.keys,
         routeRef: dispatch.routeRef,
@@ -12800,6 +12832,7 @@ async function dispatchBackgroundSubAgent(sessionId, userText, images = []) {
     permissionProfile: parentCtx.permissionProfile || "read",
     toolPreset: parentCtx.toolPreset || "default",
     thinkingLevel: parentCtx.thinkingLevel || getThinkingLevel(),
+    reasoningSelection: structuredClone(parentCtx.reasoningSelection ?? null),
     temperature: Number(parentCtx.temperature ?? els.temperature.value ?? 0.2),
     maxTokens: Number(parentCtx.maxTokens || getEffectiveMaxTokens(parentCtx.model || getSelectedModel())),
     ...getModelContextResolution(
@@ -12900,6 +12933,7 @@ async function restoreBackgroundJobsForSession(summary) {
     }
     state._backgroundDispatcher.jobs.push({
       ...restoredJobData,
+      reasoningSelection: structuredClone(checkpoint.reasoningSelection ?? null),
       parentCtx: null,
       userMessage,
       completion,
@@ -14370,6 +14404,7 @@ async function runServerAgentLoop(ctx) {
         activeSkillNames: ctx.activeSkillNames || [],
       }),
       payload: prepared.payload,
+      reasoningSelection: ctx.reasoningSelection ?? null,
       baseUrl: dispatch.baseUrl,
       keys: dispatch.keys,
       routeRef: dispatch.routeRef,
@@ -15448,6 +15483,11 @@ async function sendMessage(userText, options = {}) {
   const submittedAt = Date.now();
   const existingMessage = options.existingMessage || null;
   const retryMessage = !existingMessage ? options.retryMessage || null : null;
+  const hasFrozenReasoning = Object.prototype.hasOwnProperty.call(options, "reasoningSelection");
+  const frozenReasoning = hasFrozenReasoning ? options.reasoningSelection
+    : retryMessage ? (retryMessage.meta?.pendingDispatch?.reasoningSelection ?? null)
+    : getReasoningSelectionForModel(model, options.routeRef || "");
+  options = { ...options, reasoningSelection: structuredClone(frozenReasoning) };
   const createsSession = !options.sessionId && !state.sessionId;
   const optimisticMessage = !existingMessage
     ? projectOptimisticFirstMessage(userText, model, submittedAt, state.attachedImages, {
@@ -15455,6 +15495,9 @@ async function sendMessage(userText, options = {}) {
         pendingSessionCreation: createsSession,
       })
     : null;
+  if (optimisticMessage?.meta?.pendingDispatch) {
+    optimisticMessage.meta.pendingDispatch.reasoningSelection = structuredClone(frozenReasoning);
+  }
   if (createsSession) {
     try {
       await createSession(
@@ -15948,6 +15991,7 @@ function applySelectedModelPresentation(modelId, route = null) {
     );
 
   });
+  updateReasoningPicker();
   if (els.contextBudgetStatus) updateContextBudgetStatus();
   updateSendButtonState();
 
@@ -15965,18 +16009,91 @@ function getThinkingLevel() {
 
 function setThinkingLevel(value) {
 
-  const labels = { auto: t("thinkingAuto"), off: t("thinkingOff"), high: t("thinkingHigh"), max: t("thinkingMax") };
-
   els.thinkingPillBtn.dataset.value = value;
+  updateReasoningPicker();
+}
 
-  els.thinkingPillLabel.textContent = labels[value] || value;
+function getReasoningSelectionForModel(model, routeRef = "") {
+  const route = routeRef
+    ? state.modelRoutes.find((candidate) => candidate.routeRef === routeRef)
+    : selectedModelRoute()?.modelId === model ? selectedModelRoute() : routeForModel(model, { unique: true });
+  try { return snapshotReasoningSelection(reasoningPreference, route); }
+  catch (error) {
+    error.message = t(error.code === "reasoning_protocol_unsupported" ? "reasoningProtocolUnsupported" : "reasoningSelectRequired");
+    throw error;
+  }
+}
 
-  els.thinkingPillDropdown.querySelectorAll(".model-pill-option").forEach((opt) => {
+function reasoningIntentLabel(intent) {
+  return t({ default: "reasoningDefault", low: "reasoningLow", medium: "reasoningMedium", high: "thinkingHigh" }[intent] || "reasoningSelectRequired");
+}
 
-    opt.classList.toggle("selected", opt.dataset.value === value);
-
+function updateReasoningPicker() {
+  const menu = document.getElementById("modelReasoningDropdown");
+  if (!menu) return;
+  const model = getSelectedModel(), cap = selectedModelRoute()?.reasoning;
+  const intent = reasoningPreference?.mode === "v2" ? reasoningPreference.intent : "";
+  const selectable = cap?.schemaVersion === 2 ? (cap.intents || []) : [];
+  const invalid = reasoningPreference?.mode === "invalid"
+    || (intent && !selectable.includes(intent))
+    || (reasoningPreference?.mode === "legacy" && !["auto", "off", "high", "max"].includes(reasoningPreference.value));
+  const label = invalid ? t("reasoningPending") : intent ? reasoningIntentLabel(intent) : t("reasoningLegacy");
+  els.thinkingPillLabel.textContent = label;
+  document.getElementById("modelReasoningLabel").textContent = label;
+  document.getElementById("modelPickerCurrent").textContent = model || t("selectModel");
+  els.modelPillBtn.setAttribute("aria-label", `${model || t("selectModel")} · ${label}`);
+  menu.setAttribute("aria-label", t("reasoningEffort"));
+  els.thinkingPillDropdown.querySelectorAll("[data-value]").forEach((option) => {
+    option.disabled = !selectable.includes(option.dataset.value);
+    option.setAttribute("role", "radio");
+    const selected = !invalid && option.dataset.value === intent;
+    option.setAttribute("aria-checked", String(selected));
+    option.classList.toggle("selected", selected);
   });
+  els.thinkingPillDropdown.setAttribute("role", "radiogroup");
+  els.modelPillDropdown.querySelectorAll(".model-pill-option").forEach((option) => {
+    option.setAttribute("aria-pressed", String(option.classList.contains("selected")));
+    option.setAttribute("aria-label", option.dataset.model || "");
+  });
+  const status = document.getElementById("reasoningPickerStatus");
+  status.textContent = cap?.reason === "reasoning_protocol_unsupported" ? t("reasoningProtocolUnsupported")
+    : invalid ? t("reasoningSelectRequired")
+    : !intent ? t("reasoningLegacy")
+    : !selectable.includes("low") ? t("reasoningDefaultOnly") : "";
+}
 
+function closeModelPicker(restoreFocus = false) {
+  const menu = document.getElementById("modelReasoningDropdown");
+  menu.classList.add("hidden");
+  menu.dataset.pane = "root";
+  els.modelPillWrap.classList.remove("open");
+  els.modelPillBtn.setAttribute("aria-expanded", "false");
+  if (restoreFocus) els.modelPillBtn.focus();
+}
+
+function showModelPickerPane(pane = "root", restorePane = "model") {
+  const menu = document.getElementById("modelReasoningDropdown");
+  menu.classList.remove("hidden");
+  menu.dataset.pane = pane;
+  els.modelPillWrap.classList.add("open");
+  els.modelPillBtn.setAttribute("aria-expanded", "true");
+  document.getElementById("modelPickerRoot").classList.toggle("hidden", pane !== "root");
+  document.getElementById("modelPickerBack").classList.toggle("hidden", pane === "root");
+  els.modelPillDropdown.classList.toggle("hidden", pane !== "model");
+  els.thinkingPillDropdown.classList.toggle("hidden", pane !== "effort");
+  updateReasoningPicker();
+  const rect = els.modelPillBtn.getBoundingClientRect();
+  const containerLeft = Math.max(12, els.chatForm.getBoundingClientRect().left);
+  const availableWidth = Math.max(0, Math.min(420, rect.right - containerLeft));
+  menu.style.setProperty("--picker-available-width", `${availableWidth}px`);
+  const above = rect.top - 12, below = innerHeight - rect.bottom - 12;
+  const up = below < Math.min(menu.scrollHeight + 8, 360) && above > below;
+  menu.classList.toggle("up", up);
+  menu.style.maxHeight = `${Math.max(40, (up ? above : below) - 8)}px`;
+  const focus = pane === "root" ? menu.querySelector(`[data-picker-pane="${restorePane}"]`)
+    : pane === "model" ? els.modelPillDropdown.querySelector(".selected") || els.modelPillDropdown.querySelector("button")
+    : els.thinkingPillDropdown.querySelector(".selected:not(:disabled)") || els.thinkingPillDropdown.querySelector("button:not(:disabled)");
+  (focus || document.getElementById("modelPickerBack")).focus();
 }
 
 
@@ -16329,7 +16446,7 @@ function saveLocalSettings(options = {}) {
     reportFormatAdjustment: options.contextBudgetReportAdjustment === true,
   });
 
-  localStorage.setItem("code-thinking", getThinkingLevel());
+  if (reasoningPreference.mode === "legacy") localStorage.setItem("code-thinking", String(reasoningPreference.value));
 
   localStorage.setItem("code-tool-preset", els.toolPreset.value);
 
@@ -16668,82 +16785,66 @@ function getEffectiveMaxTokens(model) {
 
 
 
-// Model pill dropdown
+// Unified picker events are installed below.
 
-els.modelPillBtn.addEventListener("click", (e) => {
-
-  e.stopPropagation();
-
-  const opening = els.modelPillDropdown.classList.contains("hidden");
-
-  if (opening) {
-
-    // Decide direction: if there are messages (composer is near bottom), flip upward
-
-    const btnRect = els.modelPillBtn.getBoundingClientRect();
-
-    const dropdownH = 360; // max-height
-
-    const spaceBelow = window.innerHeight - btnRect.bottom;
-
-    if (spaceBelow < dropdownH + 16) {
-
-      els.modelPillDropdown.classList.add("up");
-
-    } else {
-
-      els.modelPillDropdown.classList.remove("up");
-
-    }
-
-  }
-
-  els.modelPillWrap.classList.toggle("open");
-
-  els.modelPillDropdown.classList.toggle("hidden");
-
+els.modelPillBtn.setAttribute("aria-controls", "modelReasoningDropdown");
+els.modelPillBtn.setAttribute("aria-expanded", "false");
+els.modelPillBtn.addEventListener("click", (event) => {
+  event.stopPropagation();
+  document.getElementById("modelReasoningDropdown").classList.contains("hidden")
+    ? showModelPickerPane() : closeModelPicker();
 });
-
-
-
-els.modelPillDropdown.addEventListener("click", (e) => {
-
-  const opt = e.target.closest(".model-pill-option");
-
-  if (!opt) return;
-
-  if (state.routingV2 && opt.dataset.routeRef) {
-    setSelectedModelRoute(opt.dataset.routeRef, state.modelRouteCatalogRevision);
-  } else {
-    setSelectedModel(opt.dataset.model);
-  }
-
-  els.modelPillWrap.classList.remove("open");
-
-  els.modelPillDropdown.classList.add("hidden");
-
+els.modelPillWrap.querySelectorAll("[data-picker-pane]").forEach((button) => {
+  button.addEventListener("click", () => showModelPickerPane(button.dataset.pickerPane));
+});
+document.getElementById("modelPickerBack").addEventListener("click", () => {
+  const previous = document.getElementById("modelReasoningDropdown").dataset.pane;
+  showModelPickerPane("root", previous);
+});
+els.modelPillDropdown.addEventListener("click", (event) => {
+  const option = event.target.closest(".model-pill-option");
+  if (!option || option.disabled) return;
+  if (state.routingV2 && option.dataset.routeRef) setSelectedModelRoute(option.dataset.routeRef, state.modelRouteCatalogRevision);
+  else setSelectedModel(option.dataset.model);
   saveLocalSettings();
-
   updateStatsPanel();
   if (getSelectedModel()) onboardingTasksFeature?.confirmFirstTaskModel();
-
+  try { getReasoningSelectionForModel(getSelectedModel()); closeModelPicker(true); }
+  catch (_) { showModelPickerPane("effort"); }
 });
-
-
-
-document.addEventListener("click", (e) => {
-
-  if (!els.modelPillWrap.contains(e.target)) {
-
-    els.modelPillWrap.classList.remove("open");
-
-    els.modelPillDropdown.classList.add("hidden");
-
+els.thinkingPillDropdown.addEventListener("click", (event) => {
+  const option = event.target.closest("[data-value]");
+  if (!option || option.disabled) return;
+  reasoningPreference = { mode: "v2", intent: option.dataset.value };
+  localStorage.setItem(REASONING_STORAGE_KEY, JSON.stringify({ schemaVersion: 2, intent: option.dataset.value }));
+  updateReasoningPicker();
+  updateSendButtonState();
+  closeModelPicker(true);
+});
+els.modelPillWrap.addEventListener("keydown", (event) => {
+  const menu = document.getElementById("modelReasoningDropdown");
+  if (menu.classList.contains("hidden")) return;
+  if (event.key === "Escape" || (event.key === "ArrowLeft" && menu.dataset.pane !== "root")) {
+    event.preventDefault(); event.stopPropagation();
+    menu.dataset.pane === "root" ? closeModelPicker(true) : showModelPickerPane("root", menu.dataset.pane);
+  } else if (event.key === "ArrowRight" && event.target.dataset.pickerPane) {
+    event.preventDefault(); showModelPickerPane(event.target.dataset.pickerPane);
+  } else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+    const buttons = [...menu.querySelectorAll("button:not(:disabled)")].filter((button) => button.getClientRects().length);
+    if (!buttons.length) return;
+    event.preventDefault();
+    const current = buttons.indexOf(document.activeElement);
+    const index = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+      : (current + (event.key === "ArrowDown" ? 1 : buttons.length - 1)) % buttons.length;
+    buttons[index].focus();
   }
-
 });
-
-
+document.addEventListener("click", (event) => {
+  if (!els.modelPillWrap.contains(event.target)) closeModelPicker();
+});
+els.modelPillWrap.addEventListener("focusout", (event) => {
+  if (event.relatedTarget && !els.modelPillWrap.contains(event.relatedTarget)) closeModelPicker();
+});
 
 els.temperature.addEventListener("change", () => saveLocalSettings());
 
@@ -16760,63 +16861,7 @@ function updateContextBudgetStatus() {
 
 
 
-// Thinking pill dropdown
-
-els.thinkingPillBtn.addEventListener("click", (e) => {
-
-  e.stopPropagation();
-
-  const dd = els.thinkingPillDropdown;
-
-  const opening = dd.classList.contains("hidden");
-
-  if (opening) {
-
-    const btnRect = els.thinkingPillBtn.getBoundingClientRect();
-
-    const spaceBelow = window.innerHeight - btnRect.bottom;
-
-    dd.classList.toggle("up", spaceBelow < 200 + 16);
-
-  }
-
-  els.thinkingPillWrap.classList.toggle("open");
-
-  dd.classList.toggle("hidden");
-
-});
-
-
-
-els.thinkingPillDropdown.addEventListener("click", (e) => {
-
-  const opt = e.target.closest(".model-pill-option");
-
-  if (!opt) return;
-
-  setThinkingLevel(opt.dataset.value);
-
-  els.thinkingPillWrap.classList.remove("open");
-
-  els.thinkingPillDropdown.classList.add("hidden");
-
-  saveLocalSettings();
-
-});
-
-
-
-document.addEventListener("click", (e) => {
-
-  if (!els.thinkingPillWrap.contains(e.target)) {
-
-    els.thinkingPillWrap.classList.remove("open");
-
-    els.thinkingPillDropdown.classList.add("hidden");
-
-  }
-
-});
+// Legacy thinking is retained only as a stored compatibility value.
 
 els.toolPreset.addEventListener("change", saveLocalSettings);
 
@@ -18273,7 +18318,7 @@ async function init() {
   els.contextBudget.value = savedContextBudget === "auto" ? "" : savedContextBudget;
   normalizeContextBudgetSetting();
 
-  setThinkingLevel(localStorage.getItem("code-thinking") || "auto");
+  setThinkingLevel(reasoningPreference.mode === "legacy" ? reasoningPreference.value : "auto");
 
   els.toolPreset.value = localStorage.getItem("code-tool-preset") || "default";
 

@@ -48,7 +48,7 @@ class TestRunningMessageQueue(unittest.TestCase):
             "const model = String(existingMessage?._model || getSelectedModel())",
             "const permissionProfile = getPermissionProfile()",
             'const toolPreset = els.toolPreset.value || "default"',
-            "const thinkingLevel = getThinkingLevel()",
+            "const thinkingLevel = existingMessage?.meta?.queuedDispatch?.thinkingLevel || getThinkingLevel()",
             "const temperature = Number(els.temperature.value",
             "const maxTokens = getEffectiveMaxTokens(model)",
             "permissionProfile,",

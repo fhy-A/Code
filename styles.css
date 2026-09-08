@@ -14905,3 +14905,51 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
     grid-template-columns: 38px minmax(0, 1fr) auto;
   }
 }
+
+/* Unified model/effort picker: content-sized panes with stable selection dots. */
+#modelPillWrap .model-picker-menu {
+  left: auto; right: 0; width: max-content;
+  min-width: min(220px, var(--picker-available-width, 420px));
+  max-width: var(--picker-available-width, 420px);
+  padding: 6px; overflow: hidden; display: flex; flex-direction: column;
+  background: var(--panel-3); border-radius: 12px;
+}
+#modelPillWrap .model-picker-menu.hidden { display: none; }
+#modelPillWrap .model-picker-menu .hidden { display: none !important; }
+#modelPillWrap .model-picker-menu[data-pane="effort"] { width: 168px; min-width: 0; }
+#modelPillWrap .model-picker-models { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+#modelPillWrap .model-picker-entry {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px;
+  border: 0; border-radius: 8px; padding: 10px; text-align: left;
+  background: transparent; color: var(--text); font: inherit; cursor: pointer;
+}
+#modelPillWrap .model-picker-value { flex: 1; min-width: 0; text-align: right; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+#modelPillWrap .model-picker-entry > span:first-child { flex: none; }
+#modelPillWrap .model-picker-back {
+  flex: none; width: 100%; min-height: 40px; border: 0; border-bottom: 1px solid var(--line);
+  padding: 8px 10px; color: var(--muted); background: transparent; text-align: left; font: inherit; cursor: pointer;
+}
+#modelPillWrap .model-picker-back::before { content: "‹ "; }
+#modelPillWrap .model-picker-menu .model-pill-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-height: 40px; padding: 8px 10px; border-radius: 7px;
+  font-size: 14px; font-weight: 400; color: var(--text);
+}
+#modelPillWrap .model-picker-menu .model-pill-option > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#modelPillWrap .model-picker-menu .model-pill-option::after {
+  content: ""; width: 8px; height: 8px; flex: none; margin: 0 4px;
+  border-radius: 50%; background: var(--accent); visibility: hidden;
+}
+#modelPillWrap .model-picker-menu .model-pill-option.selected::after { visibility: visible; }
+#modelPillWrap .model-picker-menu .model-pill-option:disabled { opacity: .5; cursor: default; }
+#modelPillWrap .model-picker-menu .model-pill-option:hover:not(:disabled),
+#modelPillWrap .model-picker-entry:hover { background: var(--panel-2); color: var(--text); }
+#modelPillWrap .model-pill-optgroup-label { position: sticky; top: 0; background: var(--panel-3); text-transform: none; font-size: 12px; font-weight: 400; letter-spacing: normal; }
+#modelPillWrap .model-picker-status { padding: 6px 10px; color: var(--muted); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+#modelPillWrap .model-picker-status:empty { display: none; }
+#modelPillBtn { min-width: 0; max-width: min(420px, 48vw); }
+#modelPillLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#modelReasoningLabel, #modelPillBtn > .model-pill-chevron { flex: none; }
+@media (pointer: coarse) {
+  #modelPillWrap .model-picker-menu .model-pill-option, #modelPillWrap .model-picker-back { min-height: 44px; }
+}

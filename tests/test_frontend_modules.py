@@ -368,6 +368,8 @@ const translations = {{
 }};
 function t(key) {{ return translations[key] || key; }}
 function getSelectedModel() {{ return selectedModel; }}
+function getReasoningSelectionForModel() {{ return null; }}
+function getThinkingLevel() {{ return "auto"; }}
 async function getFallbackKeys(model) {{
   keyLookups.push(model);
   if (selectedKey) return [selectedKey];
@@ -2447,7 +2449,7 @@ setImmediate(() => {{
         self.assertIn('data-onboarding-example="${index}"', ONBOARDING_TASKS_SOURCE)
         self.assertIn('els.prompt.dispatchEvent(new Event("input", { bubbles: true }))', APP_SOURCE)
         self.assertIn('permissionProfile: getStoredValue("code-permission-profile") || "accept"', STATE_SOURCE)
-        self.assertIn('setThinkingLevel(localStorage.getItem("code-thinking") || "auto")', APP_SOURCE)
+        self.assertIn('setThinkingLevel(reasoningPreference.mode === "legacy" ? reasoningPreference.value : "auto")', APP_SOURCE)
         self.assertIn('const savedPerm = localStorage.getItem("code-permission-profile") || "accept"', APP_SOURCE)
 
         for key in (
@@ -5877,7 +5879,7 @@ process.stdout.write(JSON.stringify({{
 }}));
 """
         completed = subprocess.run(
-            ["node", "-e", script],
+            ["node", "-"], input=script,
             cwd=ROOT,
             check=True,
             capture_output=True,
@@ -24250,6 +24252,7 @@ const goalFeature = {{
 }};
 const t = (key) => key;
 const getSelectedModel = () => "trusted-model";
+const getReasoningSelectionForModel = () => null;
 const getMsgText = (message) => Array.isArray(message?.content)
   ? String(message.content.find((item) => item?.type === "text")?.text || "")
   : String(message?.content || "");
@@ -24443,7 +24446,7 @@ function resetScenario() {{
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         completed = subprocess.run(
-            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            ["node", "-"], input=script, cwd=ROOT, capture_output=True,
             text=True, encoding="utf-8", check=True,
         )
         data = json.loads(completed.stdout)
@@ -30700,7 +30703,7 @@ class FormControlFocusStyleTests(unittest.TestCase):
 
     def focus_source(self):
         self.assertIn(self.MARKER, STYLE_SOURCE)
-        return STYLE_SOURCE.split(self.MARKER, 1)[1]
+        return STYLE_SOURCE.split(self.MARKER, 1)[1].split("/* CODE-070 trace and commentary density hierarchy */", 1)[0]
 
     @staticmethod
     def rule(source, selector):

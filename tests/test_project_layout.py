@@ -22,6 +22,7 @@ RUNTIME_MODULES = (
     "model_route_registry",
     "official_model_capabilities",
     "ppt_master_runtime",
+    "reasoning_capabilities",
     "skill_activation",
     "skill_admission",
     "skill_completion",

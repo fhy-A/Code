@@ -414,6 +414,7 @@
     temperature = 0.2,
     maxTokens = 0,
     thinkingLevel = "auto",
+    reasoningSelection = null,
   } = {}) {
     const requestTools = Array.isArray(tools) ? tools : [];
     const payload = {
@@ -434,6 +435,10 @@
     }
 
     const thinkingMode = thinkingLevel || "auto";
+    if (reasoningSelection !== null) {
+      // v2 is compiled by the local server; never run the legacy name mapping.
+      return payload;
+    }
     if (/claude|opus|sonnet|haiku/i.test(model)) {
       if (thinkingMode === "off") {
         payload.thinking = { type: "disabled" };
@@ -460,8 +465,41 @@
     return payload;
   }
 
+  function initialReasoningPreference({ rawV2 = null, rawLegacy = null, hasLegacyInstall = false } = {}) {
+    if (rawV2 !== null) {
+      try {
+        const parsed = JSON.parse(rawV2);
+        if (parsed?.schemaVersion === 2 && ["default", "low", "medium", "high"].includes(parsed.intent)) {
+          return { mode: "v2", intent: parsed.intent };
+        }
+      } catch (_) {}
+      return { mode: "invalid" };
+    }
+    if (rawLegacy !== null || hasLegacyInstall) {
+      return { mode: "legacy", value: rawLegacy === null ? "auto" : rawLegacy };
+    }
+    return { mode: "v2", intent: "default" };
+  }
+
+  function snapshotReasoningSelection(preference, route) {
+    const cap = route?.reasoning;
+    const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
+    if (cap?.reason === "reasoning_protocol_unsupported") fail(cap.reason);
+    if (preference?.mode === "legacy") {
+      if (!["auto", "off", "high", "max"].includes(preference.value)) fail("reasoning_selection_invalid");
+      return null;
+    }
+    if (preference?.mode !== "v2") fail("reasoning_selection_invalid");
+    if (cap?.schemaVersion !== 2 || !cap.capabilityRevision) fail("reasoning_client_upgrade_required");
+    if (!cap.intents?.includes(preference.intent)) fail(cap.reason || "reasoning_intent_unsupported");
+    return { schemaVersion: 2, intent: preference.intent, modelId: route.modelId,
+      routeRef: route.routeRef, capabilityRevision: cap.capabilityRevision };
+  }
+
   agent.modelRequest = Object.freeze({
     assembleModelRequestPayload,
+    initialReasoningPreference,
+    snapshotReasoningSelection,
     buildModelRequestMessages,
     buildNativeToolCallMessage,
     canonicalizeSteerToolResultOrder,

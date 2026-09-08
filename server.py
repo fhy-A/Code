@@ -62,6 +62,7 @@ from code_runtime.image_runtime import (
     validate_image_bytes,
 )
 from code_runtime.model_route_registry import ModelRouteError, ModelRouteRegistry
+from code_runtime import reasoning_capabilities
 from code_runtime.ppt_master_runtime import (
     PptMasterRuntimeError,
     execute_ppt_master_tool,
@@ -3745,6 +3746,8 @@ def _agent_run_record(run):
         **({"pendingContextCalibration": pending_context_calibration}
            if pending_context_calibration else {}),
         "request": _json_clone(run.get("request") or {}),
+        **({"reasoningSnapshot": _json_clone(run["reasoning_snapshot"])}
+           if run.get("reasoning_snapshot") is not None else {}),
         "messages": _json_clone(run.get("messages") or []),
         "tools": _json_clone(run.get("tools") or []),
         "toolBudgets": _json_clone(run.get("tool_budgets") or []),
@@ -4869,6 +4872,10 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         max((int(event.get("seq") or 0) for event in events), default=0) + 1,
     )
     request_options = dict(record.get("request") or {})
+    reasoning_snapshot = reasoning_capabilities.restore_snapshot(
+        record.get("reasoningSnapshot"), model_id=request_options.get("model"),
+        route_ref=str(record.get("routeRef") or ""),
+    )
     if _agent_value_has_credential_field(request_options):
         raise ValueError("persisted Agent request contains credentials")
     permission_profile = str(record.get("permissionProfile") or "read").strip().lower()
@@ -5352,6 +5359,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
             )
         ),
         "request": request_options,
+        "reasoning_snapshot": reasoning_snapshot,
         "messages": list(record.get("messages") or []),
         "tools": restored_tools,
         "tool_budgets": restored_tool_budgets,
@@ -7645,6 +7653,7 @@ def _ensure_agent_delegation_child(run, call, execution):
             inherited_context=_agent_frozen_context_resolution(run),
             route_ref=run.get("route_ref") or "",
             catalog_revision=run.get("catalog_revision") or 0,
+            inherited_reasoning_snapshot=run.get("reasoning_snapshot"),
         )
         execution["childAgentRunId"] = child["id"]
         execution["prompt"] = prompt
@@ -10459,6 +10468,7 @@ def _handoff_agent_goal_run(
         route_ref=run.get("route_ref") or "",
         catalog_revision=run.get("catalog_revision") or 0,
         image_route=_agent_image_route_public(run),
+        inherited_reasoning_snapshot=run.get("reasoning_snapshot"),
     )
     existing_meta = successor.get("continuation") or {}
     if str(existing_meta.get("parentRunId") or "") != parent_id:
@@ -11439,6 +11449,8 @@ def _create_agent_run(
     skill_activation_request=None,
     _admission_run_id="",
     _immutable_skill_reader=None,
+    reasoning_selection=None,
+    inherited_reasoning_snapshot=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -11499,7 +11511,25 @@ def _create_agent_run(
                 skill_activation_request,
                 run_id,
                 _immutable_skill_reader,
+                reasoning_selection=reasoning_selection,
+                inherited_reasoning_snapshot=inherited_reasoning_snapshot,
             )
+    reasoning_snapshot = reasoning_capabilities.restore_snapshot(
+        inherited_reasoning_snapshot, model_id=request_options.get("model"),
+        route_ref=str(route_ref or ""),
+    )
+    if reasoning_selection is not None:
+        if inherited_reasoning_snapshot is not None:
+            raise reasoning_capabilities.ReasoningError("reasoning_parameter_conflict")
+        resolved_reasoning_route = _model_route_registry.resolve(
+            route_ref, catalog_revision, request_options.get("model"),
+        )
+        request_options, reasoning_snapshot = reasoning_capabilities.compile_request(
+            request_options, reasoning_selection,
+            model_id=resolved_reasoning_route.model_id,
+            route_ref=resolved_reasoning_route.route_ref,
+            base_url=resolved_reasoning_route.base_url,
+        )
     management_plain = False
     if _immutable_skill_reader is None:
         immutable_profile = _skill_management_service().has_store()
@@ -11789,6 +11819,7 @@ def _create_agent_run(
         "context_failure_attribution": None,
         "pending_context_calibration": None,
         "request": request_options,
+        "reasoning_snapshot": reasoning_snapshot,
         "messages": _json_clone(messages),
         "tools": tools,
         "tool_budgets": normalized_tool_budgets,
@@ -26347,6 +26378,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     active_skill_names=body.get("activeSkillNames"),
                     image_route=resolved_image_route,
                     skill_activation_request=body.get("skillActivationRequest"),
+                    reasoning_selection=body.get("reasoningSelection"),
                 )
                 response = {
                     "agentRunId": run["id"],
@@ -26564,6 +26596,13 @@ class CodeHandler(BaseHTTPRequestHandler):
                         payload.get("model"),
                     )
                     keys = [resolved_route.key]
+                if body.get("reasoningSelection") is not None:
+                    if resolved_route is None:
+                        raise reasoning_capabilities.ReasoningError("reasoning_client_upgrade_required")
+                    payload, _reasoning_snapshot = reasoning_capabilities.compile_request(
+                        payload, body["reasoningSelection"], model_id=resolved_route.model_id,
+                        route_ref=resolved_route.route_ref, base_url=resolved_route.base_url,
+                    )
                 run = _create_model_runtime_run(
                     body.get("sessionId"),
                     payload,
@@ -26726,6 +26765,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 "route_catalog_unavailable", "route_credentials_unavailable",
             } else 409
             self.send_json(exc.public_payload(), status)
+            return
+        except reasoning_capabilities.ReasoningError as exc:
+            self.send_json(exc.public_payload(), 409)
             return
         except SkillActivationError as exc:
             self.send_json({

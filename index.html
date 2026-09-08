@@ -230,20 +230,23 @@
                 <div class="model-pill-wrap" id="modelPillWrap">
                   <button id="modelPillBtn" class="model-pill-btn" type="button" title="选择模型" data-i18n-title="selectModel">
                     <span id="modelPillLabel" data-i18n="selectModel">选择模型</span>
-                    <svg class="model-pill-chevron" width="10" height="10" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span aria-hidden="true">·</span><span id="modelReasoningLabel"></span>
+                    <svg class="model-pill-chevron" width="14" height="14" viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </button>
-                  <div class="model-pill-dropdown hidden" id="modelPillDropdown"></div>
-                </div>
-                <div class="model-pill-wrap" id="thinkingPillWrap">
-                  <button id="thinkingPillBtn" class="model-pill-btn thinking-pill" type="button" title="推理强度" data-i18n-title="reasoningEffort">
-                    <span id="thinkingPillLabel" data-i18n="thinkingAuto">自动</span>
-                    <svg class="model-pill-chevron" width="10" height="10" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  </button>
-                  <div class="model-pill-dropdown hidden" id="thinkingPillDropdown" style="min-width:100px">
-                    <button class="model-pill-option" type="button" data-value="auto" data-i18n="thinkingAuto">自动</button>
-                    <button class="model-pill-option" type="button" data-value="off" data-i18n="thinkingOff">关闭</button>
-                    <button class="model-pill-option" type="button" data-value="high" data-i18n="thinkingHigh">高</button>
-                    <button class="model-pill-option" type="button" data-value="max" data-i18n="thinkingMax">最高</button>
+                  <div id="modelReasoningDropdown" class="model-pill-dropdown model-picker-menu hidden" data-pane="root" role="group" data-i18n-aria-label="reasoningEffort">
+                    <button id="modelPickerBack" class="model-picker-back hidden" type="button" data-i18n="modelPickerBack">返回</button>
+                    <div id="modelPickerRoot">
+                      <button class="model-picker-entry" type="button" data-picker-pane="model"><span data-i18n="modelPickerModel">模型</span><span id="modelPickerCurrent" class="model-picker-value"></span><span aria-hidden="true">›</span></button>
+                      <div id="thinkingPillWrap"><button id="thinkingPillBtn" class="model-picker-entry" type="button" data-picker-pane="effort"><span data-i18n="reasoningEffort">推理强度</span><span id="thinkingPillLabel" class="model-picker-value"></span><span aria-hidden="true">›</span></button></div>
+                    </div>
+                    <div class="model-picker-models hidden" id="modelPillDropdown"></div>
+                    <div class="model-picker-efforts hidden" id="thinkingPillDropdown">
+                      <button class="model-pill-option" type="button" data-value="default" data-i18n="reasoningDefault">默认</button>
+                      <button class="model-pill-option" type="button" data-value="low" data-i18n="reasoningLow">低</button>
+                      <button class="model-pill-option" type="button" data-value="medium" data-i18n="reasoningMedium">中</button>
+                      <button class="model-pill-option" type="button" data-value="high" data-i18n="thinkingHigh">高</button>
+                      <div id="reasoningPickerStatus" class="model-picker-status" role="status"></div>
+                    </div>
                   </div>
                 </div>
                 <button id="sendBtn" class="send-btn" type="submit" disabled>

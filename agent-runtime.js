@@ -241,6 +241,7 @@
   async function createRun({
     sessionId,
     payload,
+    reasoningSelection = null,
     baseUrl,
     keys,
     routeRef = "",
@@ -253,6 +254,7 @@
       body: JSON.stringify({
         sessionId,
         payload,
+        ...(reasoningSelection !== null ? { reasoningSelection } : {}),
         ...(routeRef
           ? { routeRef, catalogRevision }
           : { baseUrl, keys }),
@@ -268,6 +270,7 @@
     activeSkillNames = [],
     skillActivationRequest = null,
     payload,
+    reasoningSelection = null,
     baseUrl,
     keys,
     routeRef = "",
@@ -296,6 +299,7 @@
           activeSkillNames: Array.isArray(activeSkillNames) ? [...activeSkillNames] : [],
         }),
         payload,
+        ...(reasoningSelection !== null ? { reasoningSelection } : {}),
         ...(routeRef
           ? { routeRef, catalogRevision }
           : { baseUrl, keys }),
@@ -493,6 +497,7 @@
     runId = "",
     sessionId = "",
     payload = {},
+    reasoningSelection = null,
     baseUrl = "",
     keys = [],
     routeRef = "",
@@ -557,6 +562,7 @@
             const created = await createRun({
               sessionId,
               payload,
+              reasoningSelection,
               baseUrl,
               keys,
               routeRef,

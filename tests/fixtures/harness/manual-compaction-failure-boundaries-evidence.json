@@ -30,10 +30,10 @@
     {"id": "operation-lock-render-throws"}
   ],
   "expected": {
-    "sourceFixtureSha256": "101b15517dd0290992e1b1ec3d6d1c8a908cbcb6c41b6c14cd01c3100e6ad39c",
+    "sourceFixtureSha256": "f035daea1d6396b0c25fcfc258067c78409737240854d0e7173c5fbf47ecab58",
     "slice": {
-      "sha256": "8f302b695a7608ed39e3b2d0b53a659059b6bb803dd674c2e150176221baa1e8",
-      "characterLength": 24065
+      "sha256": "da6ae098197df8a53c2a7cff366583d491456e8155821dd09b2a1ade509034c0",
+      "characterLength": 24179
     },
     "dispatchIdentity": {
       "routeRef": "route-h3-2d3-synthetic",
@@ -60,7 +60,7 @@
       "failed-marker-persistence-retry-succeeds": "c209353acb27ab6e3bf16751e1c907146ae51252b148ef29c0aeb8aee98e8548",
       "operation-lock-render-throws": "e3c9a8c8b0e473782c45db21b076f84f523bf5d3a180b52981d3d6806be50f4c"
     },
-    "suiteHash": "40427bf3921b91868081b21ea5b73ed0e50ad2117f772693e62cbcfb0ac0e662",
+    "suiteHash": "4a8956a1ba675b04c50859b830b15f0ba69326118e2665b89cac1a1b14dcf991",
     "mutationFirstDifferencePaths": {
       "caseOrder": "$.cases[0].id",
       "errorCode": "$.results.compact-throws.marker.errorCode",
