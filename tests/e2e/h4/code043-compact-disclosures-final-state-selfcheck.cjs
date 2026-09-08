@@ -273,6 +273,59 @@ async function captureFocus(page) {
   return result;
 }
 
+async function checkTraceHeaderSpacing(page) {
+  const results = [];
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    for (const theme of ["light", "dark"]) {
+      await page.evaluate((mode) => Code.core.theme.activateTheme(mode), theme);
+      for (const scenario of ["direct", "hidden-before", "visible-before", "collapsed-hidden-before", "collapsed-visible-before", "collapsed-tools-hidden"]) {
+        await installDisclosureFixture(page);
+        const observed = await page.evaluate((scenario) => {
+          const trace = document.getElementById("traceFixture");
+          const body = trace.querySelector(".execution-trace-body");
+          const tool = body.querySelector(".tool-process");
+          const collapsed = scenario.startsWith("collapsed");
+          trace.classList.toggle("is-expanded", !collapsed);
+          if (scenario.includes("before")) {
+            const commentary = document.createElement("article");
+            commentary.className = "msg assistant agent-commentary";
+            commentary.innerHTML = '<div class="bubble">先核对文件与样式。</div>';
+            if (scenario === "hidden-before") commentary.hidden = true;
+            if (scenario === "collapsed-visible-before") commentary.classList.add("execution-trace-persistent");
+            body.prepend(commentary);
+          }
+          if (scenario === "collapsed-tools-hidden") tool.classList.remove("execution-trace-persistent");
+          const later = tool.cloneNode(true);
+          later.removeAttribute("id");
+          body.append(later);
+          const visible = tool.getClientRects().length > 0;
+          const previous = tool.previousElementSibling;
+          const previousVisible = previous && previous.getClientRects().length > 0;
+          return {
+            visible,
+            headerGap: visible ? tool.getBoundingClientRect().top - trace.querySelector(".execution-trace-summary").getBoundingClientRect().bottom : null,
+            commentaryGap: previousVisible ? tool.getBoundingClientRect().top - previous.getBoundingClientRect().bottom : null,
+            laterMargin: getComputedStyle(later).marginTop,
+            bottomMargin: getComputedStyle(tool).marginBottom,
+            nameWeight: getComputedStyle(tool.querySelector("strong")).fontWeight,
+          };
+        }, scenario);
+        if (scenario === "collapsed-tools-hidden") assert.equal(observed.visible, false);
+        else if (scenario === "visible-before" || scenario === "collapsed-visible-before") assert.equal(observed.commentaryGap, 16);
+        else assert.equal(observed.headerGap, 10, `${theme}/${width}/${scenario}`);
+        assert.equal(observed.laterMargin, "16px");
+        assert.equal(observed.bottomMargin, "16px");
+        assert.equal(observed.nameWeight, "400");
+        results.push({ width, theme, scenario, ...observed });
+      }
+    }
+  }
+  await page.setViewportSize(VIEWPORT);
+  await page.evaluate(() => Code.core.theme.activateTheme("light"));
+  return results;
+}
+
 async function exerciseRuntime(browser, host, runtime, audit) {
   const context = await createContext(browser, host, runtime, audit);
   const page = await context.newPage();
@@ -289,6 +342,7 @@ async function exerciseRuntime(browser, host, runtime, audit) {
     await page.goto(target, { waitUntil: "domcontentloaded" });
     await sessionsReady;
     await waitForRuntime(page, runtime);
+    const headerSpacing = await checkTraceHeaderSpacing(page);
     await installDisclosureFixture(page);
     const transitionOverride = await installFinalStateTransitionOverride(page);
 
@@ -379,6 +433,7 @@ async function exerciseRuntime(browser, host, runtime, audit) {
 
     return {
       runtime,
+      headerSpacing,
       transitionOverride,
       initial,
       blankSpaceClicks,

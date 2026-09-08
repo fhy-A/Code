@@ -9891,7 +9891,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
 .tool-process-stage-heading strong {
   flex: 0 0 auto;
   color: currentColor;
-  font-weight: 620;
+  font-weight: 400;
 }
 
 .tool-process-stage-heading code {
@@ -9991,7 +9991,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
   font-size: 12px;
   line-height: 1.5;
 }
-.tool-process-row-heading strong { flex: 0 0 auto; }
+.tool-process-row-heading strong { flex: 0 0 auto; font-weight: 400; }
 .tool-process-row-heading code {
   min-width: 0;
   overflow: hidden;
@@ -14803,8 +14803,10 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   line-height: 1.5;
 }
 
-.chat-pane:not(.empty-chat) .msg.assistant.tool-process:has(> .tool-process-stage:is(.succeeded, .completed)) {
-  margin-bottom: 6px;
+/* CODE-076: separate tool blocks from surrounding commentary and answers. */
+.chat-pane:not(.empty-chat) .msg.assistant.tool-process {
+  margin-top: 16px;
+  margin-bottom: 16px;
 }
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) > .tool-process-stage-summary {
@@ -14819,7 +14821,7 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 }
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading strong {
-  font-weight: 580;
+  font-weight: 400;
 }
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading code {
@@ -14855,7 +14857,7 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 }
 
 .chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-row-heading strong {
-  font-weight: 580;
+  font-weight: 400;
 }
 
 .chat-pane:not(.empty-chat) .tool-process-item:is(.succeeded, .completed) .tool-process-row-heading code {
@@ -14875,3 +14877,13 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   color: color-mix(in srgb, var(--text) 78%, var(--muted));
 }
 /* CODE-070 trace and commentary density hierarchy end */
+
+/* CODE-076: the trace header already supplies the first visible block gap.
+   Collapsed traces hide non-persistent siblings, including commentary. */
+.chat-pane:not(.empty-chat) .execution-trace.is-expanded > .execution-trace-body > .tool-process:nth-child(1 of :not([hidden])) {
+  margin-top: 0;
+}
+
+.chat-pane:not(.empty-chat) .execution-trace:not(.is-expanded) > .execution-trace-body > .tool-process.execution-trace-persistent:nth-child(1 of .execution-trace-persistent:not([hidden])) {
+  margin-top: 10px;
+}

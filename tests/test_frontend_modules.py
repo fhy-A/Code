@@ -34252,9 +34252,10 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
 
         process = self.rule(
             source,
-            ".chat-pane:not(.empty-chat) .msg.assistant.tool-process:has(> .tool-process-stage:is(.succeeded, .completed)) {",
+            ".chat-pane:not(.empty-chat) .msg.assistant.tool-process {",
         )
-        self.assertIn("margin-bottom: 6px;", process)
+        self.assertIn("margin-top: 16px;", process)
+        self.assertIn("margin-bottom: 16px;", process)
         stage_summary = self.rule(source, f"{self.COMPLETED_STAGE} > .tool-process-stage-summary {{")
         for declaration in (
             "min-height: 28px;",
