@@ -1,4 +1,5 @@
 import io
+from dataclasses import replace
 import json
 import subprocess
 import tempfile
@@ -234,7 +235,7 @@ class TestPrepareAtomicFailure(unittest.TestCase):
             for item in verification.get_release_definition_manifest()["checks"]
             if item["id"] == "pytest_full"
         )
-        self.assertEqual(pytest_manifest["timeout"], 1080)
+        self.assertEqual(pytest_manifest["timeout"], 1500)
         self.assertEqual(
             credential["verification"]["definitionSha256"],
             release.get_release_definition_fingerprint(),
@@ -262,7 +263,12 @@ class TestCredentialInvalidationMatrix(unittest.TestCase):
 
     def test_verification_definition_drift_fails_before_reuse(self):
         credential = self._credential()
-        credential["verification"]["definitionSha256"] = "stale"
+        current = verification.CHECKS["pytest_full"]
+        with mock.patch.dict(verification.CHECKS, {"pytest_full": replace(
+                current, command=current.command[:-1], timeout=1080)}):
+            old_fingerprint = verification.get_release_definition_fingerprint()
+        self.assertNotEqual(old_fingerprint, verification.get_release_definition_fingerprint())
+        credential["verification"]["definitionSha256"] = old_fingerprint
         with mock.patch.object(release, "_release_paths", return_value=()), \
                 mock.patch.object(release, "validate_recorded_files", return_value=[]):
             with self.assertRaises(SystemExit):

@@ -349,16 +349,17 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
     def _expected_npm_executable():
         return "npm.cmd" if release.os.name == "nt" else "npm"
 
-    def test_pytest_full_uses_shared_1080_second_definition(self):
+    def test_pytest_full_uses_shared_1500_second_definition_and_durations(self):
         spec = release.CHECKS["pytest_full"]
-        self.assertEqual(spec.timeout, 1080)
+        self.assertEqual(spec.timeout, 1500)
+        self.assertEqual(spec.command, (release.sys.executable, "-m", "pytest", "tests", "-q", "--durations=30"))
         manifest_entry = next(
             item
             for item in verification.get_release_definition_manifest()["checks"]
             if item["id"] == "pytest_full"
         )
         self.assertEqual(manifest_entry["command"], spec.command)
-        self.assertEqual(manifest_entry["timeout"], 1080)
+        self.assertEqual(manifest_entry["timeout"], 1500)
 
         with mock.patch.object(
             release,
@@ -370,7 +371,7 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
         run_command.assert_called_once_with(
             list(spec.command),
             description="pytest tests -q",
-            timeout=1080,
+            timeout=1500,
         )
         mark_ok.assert_called_once_with("全量测试通过")
 
