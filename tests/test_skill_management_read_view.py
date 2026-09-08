@@ -18,36 +18,52 @@ from tests.test_skill_store import _snapshot, _write_skill, _CrashOnce
 from tests.test_skill_store_management import apply
 
 
-def test_31_skill_toggle_segments_and_integrity_counts(tmp_path):
-    """Comparable measurements, with correctness independent of elapsed time."""
-    data, bundle = tmp_path / "profile", tmp_path / "bundle"
-    prepared = os.environ.get("CODE_SKILL_BENCH_FIXTURE")
-    if prepared:
-        source = Path(prepared)
-        shutil.copytree(source / "profile", data)
-        shutil.copytree(source / "bundle", bundle)
-        assert _snapshot(data) == _snapshot(source / "profile")
-    else:
-        data.mkdir()
-        for index in range(31):
-            _write_skill(bundle, f"skill-{index:02}", extra={
-                f"resources/reference-{number}.txt": "synthetic reference\n" * 20 for number in range(6)
-            })
-        catalog = skill_revisions.build_bundled_catalog(bundle, {
-            f"skill-{index:02}": f"code.bundle/skill-{index:02}" for index in range(31)
+@pytest.fixture(scope="module")
+def selected_31_skill_template(tmp_path_factory):
+    """Build the real generation-32 history once; tests only mutate copies."""
+    root = tmp_path_factory.mktemp("selected-31-skill-template")
+    data, bundle = root / "profile", root / "bundle"
+    data.mkdir()
+    for index in range(31):
+        _write_skill(bundle, f"skill-{index:02}", extra={
+            f"resources/reference-{number}.txt": "synthetic reference\n" * 20 for number in range(6)
         })
+    catalog = skill_revisions.build_bundled_catalog(bundle, {
+        f"skill-{index:02}": f"code.bundle/skill-{index:02}" for index in range(31)
+    })
     store = skill_store.SkillStore(data, bundle, write_enabled=True)
-    if not prepared:
-        store.bootstrap(catalog)
+    store.bootstrap(catalog)
+    with data_dir_owner.acquire_data_dir_owner(data) as owner:
+        manager = skill_store_management.SkillStoreManager(store, owner=owner)
+        apply(manager, "convert", {"kind": "convert-v2"})
+        for item in store.read_registry()["installations"]:
+            apply(manager, item["displayName"], {"kind": "select-candidate",
+                  "installationId": item["installationId"], "routingAlias": item["displayName"]})
+        assert store.read_registry()["generation"] == 32
+    before = _snapshot(root)
+    yield root
+    assert _snapshot(root) == before
+
+
+def _copy_31_skill_template(source, destination):
+    data, bundle = destination / "profile", destination / "bundle"
+    shutil.copytree(source / "profile", data)
+    shutil.copytree(source / "bundle", bundle)
+    assert _snapshot(data) == _snapshot(source / "profile")
+    assert _snapshot(bundle) == _snapshot(source / "bundle")
+    return data, bundle
+
+
+def test_31_skill_toggle_segments_and_integrity_counts(tmp_path, request):
+    """Comparable measurements, with correctness independent of elapsed time."""
+    prepared = os.environ.get("CODE_SKILL_BENCH_FIXTURE")
+    source = Path(prepared) if prepared else request.getfixturevalue("selected_31_skill_template")
+    data, bundle = _copy_31_skill_template(source, tmp_path)
+    store = skill_store.SkillStore(data, bundle, write_enabled=True)
     with data_dir_owner.acquire_data_dir_owner(data) as owner:
         if not prepared:
             manager = skill_store_management.SkillStoreManager(store, owner=owner)
-            apply(manager, "convert", {"kind": "convert-v2"})
-            registry = store.read_registry()
-            for item in registry["installations"]:
-                apply(manager, item["displayName"], {"kind": "select-candidate",
-                      "installationId": item["installationId"], "routingAlias": item["displayName"]})
-            target = registry["installations"][0]
+            target = store.read_registry()["installations"][0]
             for index in range(5):
                 apply(manager, f"toggle-{index}", {"kind": "set-enabled", "installationId": target["installationId"], "enabled": bool(index % 2)})
         registry = store.read_registry()
@@ -224,25 +240,12 @@ def test_detail_verifies_target_only_but_snapshot_rejects_any_returned_corruptio
     assert _snapshot(service.data_root) == before
 
 
-def test_31_skill_first_reads_counts_and_serial_parallel_timing(tmp_path):
-    data, bundle = tmp_path / "profile", tmp_path / "bundle"
-    data.mkdir()
-    for index in range(31):
-        _write_skill(bundle, f"skill-{index:02}", extra={
-            f"resources/reference-{number}.txt": "synthetic reference\n" * 20 for number in range(6)
-        })
-    catalog = skill_revisions.build_bundled_catalog(bundle, {
-        f"skill-{index:02}": f"code.bundle/skill-{index:02}" for index in range(31)
-    })
+def test_31_skill_first_reads_counts_and_serial_parallel_timing(tmp_path, selected_31_skill_template):
+    data, bundle = _copy_31_skill_template(selected_31_skill_template, tmp_path)
     store = skill_store.SkillStore(data, bundle, write_enabled=True)
-    store.bootstrap(catalog)
     with data_dir_owner.acquire_data_dir_owner(data) as owner:
         manager = skill_store_management.SkillStoreManager(store, owner=owner)
-        apply(manager, "convert", {"kind": "convert-v2"})
         registry = store.read_registry()
-        for item in registry["installations"]:
-            apply(manager, item["displayName"], {"kind": "select-candidate",
-                  "installationId": item["installationId"], "routingAlias": item["displayName"]})
         target = registry["installations"][0]
         for enabled in (False, True):
             apply(manager, str(enabled), {"kind": "set-enabled", "installationId": target["installationId"], "enabled": enabled})
