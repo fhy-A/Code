@@ -13636,6 +13636,7 @@ function projectAgentModelCompleted(ctx, event) {
         ...agentEventMeta(ctx, event, "model_completed"),
         agentRuntimeRunId: runtimeRunId,
         toolCalls,
+        ...(data.protocolRef ? { protocolRef: data.protocolRef } : {}),
         ...(publicProcessCommentary ? { publicProcessCommentary: true } : {}),
       },
     };
@@ -13651,11 +13652,16 @@ function projectAgentModelCompleted(ctx, event) {
       ...agentEventMeta(ctx, event, "model_completed"),
       agentRuntimeRunId: runtimeRunId,
       toolCalls,
+      ...(data.protocolRef ? { protocolRef: data.protocolRef } : {}),
       ...(publicProcessCommentary ? { publicProcessCommentary: true } : {}),
     };
     if (!publicProcessCommentary) delete assistant.meta.publicProcessCommentary;
   }
 
+  if (data.protocolRef) {
+    assistant.meta.protocolContent = projectedContent.content;
+    assistant.meta.protocolDisplayContent = assistant.content;
+  }
   if (!assistant.meta._usageRecorded) {
     const usage = data.usage || {};
     assistant.meta._usageRecorded = true;
@@ -16017,7 +16023,7 @@ function getReasoningSelectionForModel(model, routeRef = "") {
   const route = routeRef
     ? state.modelRoutes.find((candidate) => candidate.routeRef === routeRef)
     : selectedModelRoute()?.modelId === model ? selectedModelRoute() : routeForModel(model, { unique: true });
-  try { return snapshotReasoningSelection(reasoningPreference, route); }
+  try { return snapshotReasoningSelection(reasoningPreference, route, getEffectiveMaxTokens(model)); }
   catch (error) {
     error.message = t(error.code === "reasoning_protocol_unsupported" ? "reasoningProtocolUnsupported" : "reasoningSelectRequired");
     throw error;
@@ -16033,7 +16039,9 @@ function updateReasoningPicker() {
   if (!menu) return;
   const model = getSelectedModel(), cap = selectedModelRoute()?.reasoning;
   const intent = reasoningPreference?.mode === "v2" ? reasoningPreference.intent : "";
-  const selectable = model && cap?.schemaVersion === 2 ? (cap.intents || []) : [];
+  const selectable = model && cap?.schemaVersion === 2 ? (cap.intents || []).filter(
+    (value) => !cap.minimumOutputTokens?.[value] || getEffectiveMaxTokens(model) >= cap.minimumOutputTokens[value]
+  ) : [];
   const invalid = reasoningPreference?.mode === "invalid"
     || (intent && !selectable.includes(intent))
     || (reasoningPreference?.mode === "legacy" && !["auto", "off", "high", "max"].includes(reasoningPreference.value));
@@ -16855,6 +16863,7 @@ els.temperature.addEventListener("change", () => saveLocalSettings());
 
 els.maxTokens.addEventListener("change", () => {
   saveLocalSettings();
+  updateReasoningPicker();
 });
 els.contextBudget.addEventListener("change", () => {
   saveLocalSettings({ contextBudgetReportAdjustment: true });

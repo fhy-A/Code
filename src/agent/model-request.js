@@ -183,15 +183,22 @@
     }
 
     if (message.role === "assistant") {
+      const visibleText = getMessageText(message);
+      const protocolRef = message.meta?.protocolRef &&
+        (message.meta.protocolDisplayContent === undefined || visibleText === message.meta.protocolDisplayContent)
+        ? message.meta.protocolRef : null;
+      const content = protocolRef ? (message.meta.protocolContent ?? visibleText) : visibleText;
       const toolCalls = includeNativeTools ? (message.meta?.toolCalls || []) : [];
       if (toolCalls.length > 0) {
         return {
           role: "assistant",
-          content: getMessageText(message),
+          content,
           tool_calls: toolCalls.map(buildNativeToolCallMessage),
+          ...(protocolRef ? { _protocolRef: protocolRef } : {}),
         };
       }
-      return { role: "assistant", content: getMessageText(message) };
+      return { role: "assistant", content,
+        ...(protocolRef ? { _protocolRef: protocolRef } : {}) };
     }
 
     if (message.role === "tool-call") return null;
@@ -481,7 +488,7 @@
     return { mode: "v2", intent: "default" };
   }
 
-  function snapshotReasoningSelection(preference, route) {
+  function snapshotReasoningSelection(preference, route, outputTokens) {
     const cap = route?.reasoning;
     const fail = (code) => { const error = new Error(code); error.code = code; throw error; };
     if (cap?.reason === "reasoning_protocol_unsupported") fail(cap.reason);
@@ -492,6 +499,7 @@
     if (preference?.mode !== "v2") fail("reasoning_selection_invalid");
     if (cap?.schemaVersion !== 2 || !cap.capabilityRevision) fail("reasoning_client_upgrade_required");
     if (!cap.intents?.includes(preference.intent)) fail(cap.reason || "reasoning_intent_unsupported");
+    if (outputTokens !== undefined && Number(outputTokens) < Number(cap.minimumOutputTokens?.[preference.intent] || 0)) fail("reasoning_budget_insufficient");
     return { schemaVersion: 2, intent: preference.intent, modelId: route.modelId,
       routeRef: route.routeRef, capabilityRevision: cap.capabilityRevision };
   }

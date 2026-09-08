@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import secrets
 import threading
+import copy
 from typing import Callable, Iterable
 
 from . import reasoning_capabilities
@@ -52,6 +53,7 @@ class ResolvedRoute:
     label: str
     base_url: str
     key: str
+    reasoning_contract: dict | None = None
 
 
 def _clean_text(value, limit: int = 240) -> str:
@@ -94,6 +96,7 @@ class ModelRouteRegistry:
             "salt": secrets.token_hex(32),
             "catalogRevision": 0,
             "routes": [],
+            "reasoningContracts": {},
         }
 
     def _load_catalog(self) -> dict:
@@ -124,6 +127,7 @@ class ModelRouteRegistry:
             "salt": salt,
             "catalogRevision": revision,
             "routes": sorted(normalized, key=self._route_sort_key),
+            "reasoningContracts": payload.get("reasoningContracts", {}),
         }
 
     def _write_catalog(self) -> None:
@@ -204,6 +208,7 @@ class ModelRouteRegistry:
                     "reasoning": reasoning_capabilities.projection(
                         route["modelId"], route["routeRef"],
                         self._base_urls.get(route["connectionId"], ""),
+                        contract=self.reasoning_contract(route["routeRef"]),
                     ),
                     "credentialsAvailable": bool(
                         route.get("enabled") and self._credentials.get(route["routeRef"])
@@ -214,6 +219,42 @@ class ModelRouteRegistry:
                 "catalogRevision": int(self._catalog["catalogRevision"]),
                 "routes": routes,
             }
+
+    def reasoning_contract(self, route_ref):
+        """Resolve only a locally reviewed, exact route binding; never browser metadata."""
+        with self._lock:
+            route = next((r for r in self._catalog["routes"] if r["routeRef"] == route_ref), None)
+            contracts = self._catalog.get("reasoningContracts")
+            value = contracts.get(route_ref) if isinstance(contracts, dict) else None
+            if not route or not isinstance(value, dict):
+                return None
+            base_url = self._base_urls.get(route["connectionId"], "")
+            if not base_url or self.base_url_id(base_url) != route["baseUrlId"]:
+                return None
+            allowed = {"connectionId", "baseUrlId", "modelId", "upstreamModelId", "adapterProfile",
+                       "revision", "officialEvidence", "adapterEvidence", "routeEvidence", "routeVerified", "expiresAt"}
+            if (set(value) != allowed or any(value.get(k) != route[k] for k in ("connectionId", "baseUrlId", "modelId"))
+                    or value["upstreamModelId"] != route["modelId"]
+                    or type(value["routeVerified"]) is not bool
+                    or any(not isinstance(value[k], str) or not value[k] for k in allowed - {"routeVerified", "routeEvidence"})
+                    or not isinstance(value["routeEvidence"], str)
+                    or (value["routeVerified"] and not value["routeEvidence"])):
+                return None
+            return copy.deepcopy(value)
+
+    def register_reasoning_contract(self, route_ref, contract):
+        """Internal maintenance API. No HTTP handler accepts this declaration."""
+        with self._lock:
+            previous = copy.deepcopy(self._catalog.get("reasoningContracts", {}))
+            self._catalog.setdefault("reasoningContracts", {})[route_ref] = copy.deepcopy(contract)
+            if self.reasoning_contract(route_ref) is None:
+                self._catalog["reasoningContracts"] = previous
+                raise ValueError("Invalid reasoning route contract")
+            try:
+                self._write_catalog()
+            except Exception:
+                self._catalog["reasoningContracts"] = previous
+                raise
 
     def revoke_runtime_bindings(self) -> dict:
         """Fail closed without claiming that the durable catalog was refreshed."""
@@ -459,6 +500,7 @@ class ModelRouteRegistry:
                 label=route["label"],
                 base_url=self._base_urls.get(route["connectionId"], ""),
                 key=key,
+                reasoning_contract=self.reasoning_contract(normalized_ref),
             )
 
     def bind_runtime_base_urls(self, connections: Iterable[dict]) -> None:

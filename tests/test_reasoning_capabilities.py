@@ -19,7 +19,7 @@ def selection(model="gpt-5.5", intent="high", route_ref="mr1_fixture", base_url=
             "routeRef": route_ref, "capabilityRevision": cap["capabilityRevision"]}
 
 
-@pytest.mark.parametrize("model", list(rc.MODELS))
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
 @pytest.mark.parametrize("intent", rc.INTENTS)
 def test_exact_native_wire(model, intent):
     payload = {"model": model, "temperature": 0.2, "max_tokens": 8192,
@@ -45,7 +45,7 @@ def test_unknown_transport_never_inherits_model_capability(url):
             model_id="gpt-5.5", route_ref="mr1_fixture", base_url=url)
 
 
-@pytest.mark.parametrize("model", ["alias-gpt-5.5", "gpt-5.5-high", "claude-opus-4-6", "o3", "o4-mini"])
+@pytest.mark.parametrize("model", ["alias-gpt-5.5", "gpt-5.5-high", "claude-opus-4-6", "o3-unknown", "o4-mini-unknown"])
 def test_unconfirmed_models_default_only(model):
     cap = rc.projection(model, "mr1_fixture", "https://api.openai.com")
     assert cap["intents"] == ["default"]

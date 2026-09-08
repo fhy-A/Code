@@ -204,6 +204,7 @@
       {
         "type": "model_completed",
         "payloadFields": [
+          "protocolRef",
           "round",
           "runtimeRunId",
           "content",

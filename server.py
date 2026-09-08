@@ -63,6 +63,7 @@ from code_runtime.image_runtime import (
 )
 from code_runtime.model_route_registry import ModelRouteError, ModelRouteRegistry
 from code_runtime import reasoning_capabilities
+from code_runtime import protocol_replay
 from code_runtime.ppt_master_runtime import (
     PptMasterRuntimeError,
     execute_ppt_master_tool,
@@ -1432,6 +1433,9 @@ def _model_runtime_worker(run):
     received_meaningful_output = False
 
     try:
+        if run.get("protocol_response") and run["protocol_response"].protocol == "claude":
+            payload = protocol_replay.messages_request(payload)
+            endpoint = _normalize_runtime_base_url(run["base_url"]) + "/v1/messages"
         for key_index, key in enumerate(keys):
             if run["cancel_event"].is_set():
                 _finish_runtime_run(run, "cancelled")
@@ -1439,6 +1443,9 @@ def _model_runtime_worker(run):
             headers = {"Content-Type": "application/json"}
             if key:
                 headers["Authorization"] = f"Bearer {key}"
+                if run.get("protocol_response") and run["protocol_response"].protocol == "claude":
+                    headers["x-api-key"] = key
+                    headers["anthropic-version"] = "2023-06-01"
             req = request.Request(
                 endpoint,
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -1491,6 +1498,8 @@ def _model_runtime_worker(run):
                     if not line.startswith("data:"):
                         continue
                     data = line[5:].lstrip()
+                    if run.get("protocol_response"):
+                        data = run["protocol_response"].feed(data)
                     _append_runtime_event(run, data)
                     if (
                         not received_meaningful_output
@@ -1504,6 +1513,12 @@ def _model_runtime_worker(run):
                 if run["cancel_event"].is_set():
                     _finish_runtime_run(run, "cancelled")
                 elif saw_done:
+                    if run.get("protocol_response"):
+                        complete = _runtime_result_snapshot(run)
+                        native_message = {"role": "assistant", "content": complete["content"]}
+                        if complete["toolCalls"]:
+                            native_message["tool_calls"] = [{k: v for k, v in call.items() if k != "index"} for call in complete["toolCalls"]]
+                        run["protocol_native"] = run["protocol_response"].complete(native_message)
                     _finish_runtime_run(run, "completed")
                 else:
                     _finish_runtime_run(
@@ -1526,7 +1541,11 @@ def _model_runtime_worker(run):
                 return
             except Exception as exc:
                 run["upstream_response"] = None
-                last_status, last_error, strict_context = _runtime_error_details(exc)
+                if isinstance(exc, reasoning_capabilities.ReasoningError):
+                    last_error_code = exc.code
+                    last_status, last_error, strict_context = 0, exc.code, {}
+                else:
+                    last_status, last_error, strict_context = _runtime_error_details(exc)
                 if strict_context.get("matched"):
                     try:
                         scope = context_calibration.calibration_scope(
@@ -1567,7 +1586,7 @@ def _model_runtime_worker(run):
                     break
                 if last_error_code == "tool_protocol_error":
                     break
-                if run["events"] or key_index >= len(keys) - 1:
+                if run.get("protocol_response") or run["events"] or key_index >= len(keys) - 1:
                     break
                 continue
             finally:
@@ -1589,6 +1608,9 @@ def _model_runtime_worker(run):
                 transient=False if last_error_code else None,
             )
     except Exception as exc:
+        if isinstance(exc, reasoning_capabilities.ReasoningError):
+            _finish_runtime_run(run, "failed", exc.code, error_code=exc.code, transient=False)
+            return
         status, message = _runtime_error_text(exc)
         _finish_runtime_run(
             run,
@@ -1611,6 +1633,7 @@ def _create_model_runtime_run(
     route_ref="",
     catalog_revision=0,
     first_response_timeout=True,
+    reasoning_snapshot=None,
 ):
     _cleanup_runtime_runs()
     run_id = uuid.uuid4().hex
@@ -1623,6 +1646,7 @@ def _create_model_runtime_run(
         )
     )
     run = {
+        "protocol_response": protocol_replay.Response(protocol_replay.kind(reasoning_snapshot)) if protocol_replay.kind(reasoning_snapshot) else None,
         "id": run_id,
         "session_id": str(session_id or ""),
         "payload": dict(payload or {}),
@@ -3338,6 +3362,8 @@ def _normalize_agent_model_checkpoint(value):
         "runtimeRunId": runtime_run_id[:128],
         "content": str(value.get("content") or ""),
         "hasReasoning": bool(value.get("hasReasoning")),
+        **({"protocolProfile": str(value["protocolProfile"]), "protocolReplayVersion": 1}
+           if value.get("protocolReplayVersion") == 1 and value.get("protocolProfile") in reasoning_capabilities.PROFILES else {}),
         "reasoningChars": reasoning_chars,
         "toolCalls": _json_clone(tool_calls),
         "capturedAt": captured_at[:64],
@@ -3748,6 +3774,8 @@ def _agent_run_record(run):
         "request": _json_clone(run.get("request") or {}),
         **({"reasoningSnapshot": _json_clone(run["reasoning_snapshot"])}
            if run.get("reasoning_snapshot") is not None else {}),
+        **({"protocolReplay": protocol_replay.normalize(run.get("protocol_replay"), run.get("reasoning_snapshot"))}
+           if protocol_replay.kind(run.get("reasoning_snapshot")) else {}),
         "messages": _json_clone(run.get("messages") or []),
         "tools": _json_clone(run.get("tools") or []),
         "toolBudgets": _json_clone(run.get("tool_budgets") or []),
@@ -4876,6 +4904,10 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         record.get("reasoningSnapshot"), model_id=request_options.get("model"),
         route_ref=str(record.get("routeRef") or ""),
     )
+    replay = protocol_replay.normalize(record.get("protocolReplay"), reasoning_snapshot)
+    if replay and model_checkpoint and (model_checkpoint.get("protocolReplayVersion") != 1
+            or model_checkpoint.get("protocolProfile") != reasoning_snapshot["protocolProfile"]):
+        raise reasoning_capabilities.ReasoningError("reasoning_snapshot_invalid")
     if _agent_value_has_credential_field(request_options):
         raise ValueError("persisted Agent request contains credentials")
     permission_profile = str(record.get("permissionProfile") or "read").strip().lower()
@@ -5360,6 +5392,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         ),
         "request": request_options,
         "reasoning_snapshot": reasoning_snapshot,
+        "protocol_replay": replay,
         "messages": list(record.get("messages") or []),
         "tools": restored_tools,
         "tool_budgets": restored_tool_budgets,
@@ -9776,6 +9809,8 @@ def _agent_wait_for_model(run, model_run, *, checkpoint_round=0):
                     snapshot, checkpoint_round, model_run["id"],
                 )
                 if checkpoint:
+                    if protocol_replay.kind(run.get("reasoning_snapshot")):
+                        checkpoint.update(protocolProfile=run["reasoning_snapshot"]["protocolProfile"], protocolReplayVersion=1)
                     fingerprint = hashlib.sha256(json.dumps(
                         checkpoint,
                         ensure_ascii=False,
@@ -9922,6 +9957,11 @@ def _agent_model_payload(run):
     else:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
+    if protocol_replay.kind(run.get("reasoning_snapshot")):
+        payload, run["protocol_scope"] = protocol_replay.project(
+            payload, run["reasoning_snapshot"], run.get("protocol_replay"),
+        )
+        run["protocol_history"] = protocol_replay.digest(payload["messages"])
     return payload, force_final_round
 
 
@@ -10037,6 +10077,7 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0, *, keys_override=
             run["base_url"],
             list(keys_override) if keys_override is not None else list(run["keys"]),
             first_response_timeout=None,
+            reasoning_snapshot=run.get("reasoning_snapshot"),
         )
         with run["condition"]:
             run["active_runtime_id"] = compaction_run["id"]
@@ -10565,6 +10606,8 @@ def _agent_enter_recovery(
             model_snapshot, round_number, runtime_run_id,
         )
         if checkpoint:
+            if protocol_replay.kind(run.get("reasoning_snapshot")):
+                checkpoint.update(protocolProfile=run["reasoning_snapshot"]["protocolProfile"], protocolReplayVersion=1)
             with run["condition"]:
                 run["model_checkpoint"] = checkpoint
     created_at = now_iso()
@@ -11089,6 +11132,7 @@ def _agent_run_worker(run):
 
             model_run = _create_model_runtime_run(
                 run["session_id"], payload, run["base_url"], attempt_keys,
+                reasoning_snapshot=run.get("reasoning_snapshot"),
                 first_response_timeout=(
                     _MODEL_RUNTIME_FIRST_RESPONSE_TIMEOUT
                     if round_number == 1 and not _agent_has_durable_progress(run)
@@ -11199,6 +11243,15 @@ def _agent_run_worker(run):
             }
             if tool_calls:
                 assistant_message["tool_calls"] = _agent_assistant_tool_calls(tool_calls)
+            protocol_ref = ""
+            if protocol_replay.kind(run.get("reasoning_snapshot")):
+                native = model_run.get("protocol_native")
+                protocol_replay.validate_native(protocol_replay.kind(run["reasoning_snapshot"]), native, assistant_message)
+                protocol_ref = f"{run['id']}:{round_number}"
+                entry = {"scope": run["protocol_scope"], "history": run["protocol_history"],
+                         "message": _json_clone(assistant_message), "native": native}
+                run["protocol_replay"]["entries"][protocol_ref] = protocol_replay.clone(entry)
+                assistant_message["_protocolRef"] = protocol_ref
             run["messages"].append(assistant_message)
             round_record = {
                 "round": round_number,
@@ -11209,6 +11262,7 @@ def _agent_run_worker(run):
                 "finishReason": str(model_result.get("finishReason") or ""),
                 "usage": _json_clone(model_result.get("usage") or {}),
                 "completedAt": now_iso(),
+                **({"protocolRef": protocol_ref} if protocol_ref else {}),
             }
             if force_final_round:
                 round_record["forcedFinal"] = True
@@ -11419,6 +11473,43 @@ def _agent_image_route_public(run):
     return _normalize_agent_image_route_identity(run.get("image_route"))
 
 
+def _agent_hydrate_protocol_history(run):
+    """Resolve opaque per-round references from this Session's durable records only."""
+    snapshot = run.get("reasoning_snapshot")
+    replay = run.get("protocol_replay")
+    cache = {}
+    had_refs = any(m.get("_protocolRef") for m in run["messages"])
+    if not replay and not had_refs:
+        return
+    for message in run["messages"]:
+        # Browser-provided native fields are never trusted or forwarded.
+        for field in ("reasoning_content", "thinking", "signature", "_nativeBlocks"):
+            message.pop(field, None)
+        ref = message.get("_protocolRef")
+        if not isinstance(ref, str) or not re.fullmatch(r"[a-f0-9]{32}:[1-9][0-9]*", ref):
+            message.pop("_protocolRef", None)
+            continue
+        if not replay or run.get("parent_agent_run_id") or not run.get("session_id"):
+            message.pop("_protocolRef", None)
+            continue
+        source_id = ref.split(":", 1)[0]
+        if source_id not in cache:
+            record = read_json(_agent_run_path(source_id), None)
+            if (not isinstance(record, dict) or record.get("sessionId") != run["session_id"]
+                    or record.get("reasoningSnapshot") != snapshot):
+                cache[source_id] = {}
+            else:
+                stored = protocol_replay.normalize(record.get("protocolReplay"), snapshot)
+                cache[source_id] = stored["entries"]
+        entry = cache[source_id].get(ref)
+        if entry and entry["message"] == protocol_replay.public_message(message):
+            replay["entries"][ref] = _json_clone(entry)
+    # New protocol segments carry public text across incompatible histories.
+    if not replay and had_refs:
+        projected, _ = protocol_replay.project({"messages": run["messages"]}, None, None)
+        run["messages"] = projected["messages"]
+
+
 @skill_dependency_operation.serialized
 def _create_agent_run(
     session_id,
@@ -11529,6 +11620,7 @@ def _create_agent_run(
             model_id=resolved_reasoning_route.model_id,
             route_ref=resolved_reasoning_route.route_ref,
             base_url=resolved_reasoning_route.base_url,
+            contract=resolved_reasoning_route.reasoning_contract,
         )
     management_plain = False
     if _immutable_skill_reader is None:
@@ -11820,6 +11912,7 @@ def _create_agent_run(
         "pending_context_calibration": None,
         "request": request_options,
         "reasoning_snapshot": reasoning_snapshot,
+        "protocol_replay": protocol_replay.empty(reasoning_snapshot),
         "messages": _json_clone(messages),
         "tools": tools,
         "tool_budgets": normalized_tool_budgets,
@@ -11941,6 +12034,7 @@ def _create_agent_run(
                 _managed_dependency_access(run)
             except skill_dependency_operation.DependencyOperationError as exc:
                 raise SkillActivationError(exc.code, "The Skill dependency runtime has an unsettled operation.") from exc
+        _agent_hydrate_protocol_history(run)
         _agent_runs[run_id] = run
     try:
         _append_agent_event(run, "created", {
@@ -11996,6 +12090,9 @@ def _resume_agent_run(
         raise skill_loading.SkillLoadingError("skill_loading_persistence_uncertain")
     if not isinstance(keys, list):
         raise ValueError("keys must be an array")
+    if protocol_replay.kind(run.get("reasoning_snapshot")) and base_url and (
+            reasoning_capabilities.transport_identity(base_url) != run["reasoning_snapshot"]["transportIdentity"]):
+        raise reasoning_capabilities.ReasoningError("reasoning_target_mismatch")
     if run.get("skill_recovery") is not None:
         raise ValueError(
             "Agent run cannot resume until its exact immutable Skill revision is restored"
@@ -26602,7 +26699,10 @@ class CodeHandler(BaseHTTPRequestHandler):
                     payload, _reasoning_snapshot = reasoning_capabilities.compile_request(
                         payload, body["reasoningSelection"], model_id=resolved_route.model_id,
                         route_ref=resolved_route.route_ref, base_url=resolved_route.base_url,
+                        contract=resolved_route.reasoning_contract,
                     )
+                    if protocol_replay.kind(_reasoning_snapshot):
+                        raise reasoning_capabilities.ReasoningError("reasoning_client_upgrade_required")
                 run = _create_model_runtime_run(
                     body.get("sessionId"),
                     payload,

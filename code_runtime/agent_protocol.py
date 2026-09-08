@@ -111,6 +111,7 @@ AGENT_EVENT_SPECS = {
         required=("round", "runtimeRunId"),
     ),
     "model_completed": _event_spec(
+        "protocolRef",
         "round",
         "runtimeRunId",
         "content",

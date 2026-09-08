@@ -4,6 +4,7 @@ const {chromium,expect}=require('@playwright/test');
 const {startIsolatedHost,getActiveChildCount}=require('./isolated-host.cjs');
 const cap=(intents,reason='')=>({schemaVersion:2,capabilityRevision:'synthetic-capability-0001',intents,reason,routeVerified:false,evidence:'adapter-tested'});
 const routes=[
+ {routeRef:'mr1_synthetic_claude',connectionId:'manual_synthetic_a',modelId:'claude-sonnet-4-5',label:'Synthetic A',reasoning:{...cap(['default','low','medium','high']),minimumOutputTokens:{low:2048,medium:3072,high:5120}}},
  {routeRef:'mr1_synthetic_gpt',connectionId:'manual_synthetic_a',modelId:'gpt-5.5',label:'Synthetic A',reasoning:cap(['default','low','medium','high'])},
  {routeRef:'mr1_synthetic_other',connectionId:'manual_synthetic_b',modelId:'gpt-5.5',label:'Synthetic B',reasoning:cap(['default'],'reasoning_connection_unverified')},
  {routeRef:'mr1_synthetic_astra',connectionId:'manual_synthetic_b',modelId:'gpt-6-astra',label:'Synthetic B',reasoning:cap([],'reasoning_protocol_unsupported')},
@@ -47,7 +48,7 @@ async function main(){
     await page.goto(new URL(runtime==='bundle'?'/':'/dist/frontend/index.classic.html',host.ready.codeUrl).href);
     await page.waitForFunction(()=>document.documentElement.getAttribute('data-code-phase-one-shell-ready')==='true');
     const trigger=page.locator('#modelPillBtn'),menu=page.locator('#modelReasoningDropdown');
-    await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===4);
+    await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===5);
     await page.waitForLoadState('networkidle');
     await expect(trigger).toHaveText(language==='zh'?'选择模型':'Select model',{useInnerText:true});
     await expect(trigger).toHaveAttribute('aria-label',language==='zh'?'选择模型':'Select model');
@@ -87,13 +88,21 @@ async function main(){
     await page.locator('[data-route-ref=mr1_synthetic_astra]').click();await expect(page.locator('#thinkingPillDropdown button:disabled')).toHaveCount(4);
     await page.locator('#modelPickerBack').click();await page.locator('[data-picker-pane=model]').click();await page.locator('[data-route-ref=mr1_synthetic_gpt]').click();
     await page.reload();await page.waitForFunction(()=>document.documentElement.getAttribute('data-code-phase-one-shell-ready')==='true');
-    await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===4);
+    await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===5);
     await page.waitForLoadState('networkidle');
     await expect(trigger).toHaveText(language==='zh'?'选择模型':'Select model',{useInnerText:true});
     await trigger.click();await page.locator('[data-picker-pane=model]').click();await page.locator('[data-route-ref=mr1_synthetic_gpt]').click();
     await expect(trigger).toContainText(language==='zh'?'高':'High');
     assert.equal(await page.evaluate(()=>localStorage.getItem('code-thinking')),'off');
-    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true});
+    await page.locator('#maxTokens').evaluate(el=>{el.value='4096';el.dispatchEvent(new Event('change',{bubbles:true}))});
+    await trigger.click();await page.locator('[data-picker-pane=model]').click();await page.locator('[data-route-ref=mr1_synthetic_claude]').click();
+    if(!(await menu.isVisible()))await trigger.click();
+    if(await menu.getAttribute('data-pane')!=='effort')await page.locator('#thinkingPillBtn').click();
+    await expect(page.locator('#thinkingPillDropdown [data-value=high]')).toBeDisabled();
+    await page.locator('#maxTokens').evaluate(el=>{el.value='8192';el.dispatchEvent(new Event('change',{bubbles:true}))});
+    await expect(page.locator('#thinkingPillDropdown [data-value=high]')).toBeEnabled();
+    await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-budget.png`)});
+    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true,budgetGuard:true});
    }finally{await context.close()}
   }
   const after=await host.metrics();assert.equal(after.chatRequests.length-before.chatRequests.length,0);assert.equal(after.toolExecutions.length-before.toolExecutions.length,0);assert.deepEqual(blockedWrites,[]);assert.deepEqual(errors,[]);result={ok:true,cases,evidenceDir};

@@ -6,6 +6,22 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def test_public_round_reference_and_budget_validation():
+    script = r'''
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const window={Code:{agent:{}}};vm.runInNewContext(fs.readFileSync('src/agent/model-request.js','utf8'),{window});
+const api=window.Code.agent.modelRequest;
+const m={role:'assistant',content:'Checking files',meta:{protocolRef:'round-ref',protocolContent:'',protocolDisplayContent:'Checking files',toolCalls:[{id:'c',function:{name:'list_files',arguments:'{}'}}]}};
+const wire=api.mapMessageForApi(m);assert.equal(wire.content,'');assert.equal(wire._protocolRef,'round-ref');
+m.content='edited';assert.equal(api.mapMessageForApi(m)._protocolRef,undefined);assert.equal(api.mapMessageForApi(m).content,'edited');
+const route={modelId:'claude-sonnet-4-5',routeRef:'r',reasoning:{schemaVersion:2,capabilityRevision:'rev',intents:['default','low','medium','high'],minimumOutputTokens:{low:2048,medium:3072,high:5120}}};
+assert.throws(()=>api.snapshotReasoningSelection({mode:'v2',intent:'high'},route,4096),/reasoning_budget_insufficient/);
+assert.equal(api.snapshotReasoningSelection({mode:'v2',intent:'high'},route,8192).intent,'high');
+'''
+    result = subprocess.run(["node", "-"], input=script, cwd=ROOT, text=True, capture_output=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+
+
 def test_picker_without_model_never_projects_saved_effort_or_legacy_status():
     script = r'''
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
