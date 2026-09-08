@@ -14887,3 +14887,21 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 .chat-pane:not(.empty-chat) .execution-trace:not(.is-expanded) > .execution-trace-body > .tool-process.execution-trace-persistent:nth-child(1 of .execution-trace-persistent:not([hidden])) {
   margin-top: 10px;
 }
+
+/* CODE-058: single authorization keeps its target and source, without selection columns. */
+.authorization-panel.is-single .authorization-row {
+  grid-template-columns: 42px minmax(0, 1fr) auto auto;
+}
+
+.authorization-source {
+  padding: 4px 2px;
+  color: var(--muted);
+  font-size: var(--type-interface);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .authorization-panel.is-single .authorization-row {
+    grid-template-columns: 38px minmax(0, 1fr) auto;
+  }
+}

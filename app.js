@@ -9486,6 +9486,10 @@ function authorizationGroupingProjection(items) {
   };
 }
 
+function selectedAuthorizations(items = pendingAuthorizations()) {
+  return items.filter((item) => (items.length === 1 || item.selected) && !item._finishing);
+}
+
 function renderAuthorizationPanel() {
   const panel = els.authorizationPanel;
   if (!panel) return;
@@ -9503,7 +9507,9 @@ function renderAuthorizationPanel() {
     return;
   }
 
-  const selectedCount = items.filter((item) => item.selected && !item._finishing).length;
+  const isSingle = items.length === 1;
+  const selectedCount = selectedAuthorizations(items).length;
+  const singleIdAttribute = isSingle ? `data-auth-single-id="${escapeHtml(items[0].id)}"` : "";
   const editCount = items.filter((item) => ["propose_edit", "write_file", "delete_file", "manage_generated_image"].includes(item.tool.action)).length;
   const commandCount = items.filter((item) => item.tool.action === "run_command").length;
   const summary = [editCount ? t("fileOpsCount", { count: editCount }) : "", commandCount ? t("commandsCount", { count: commandCount }) : ""].filter(Boolean).join(" · ");
@@ -9511,19 +9517,21 @@ function renderAuthorizationPanel() {
   const groups = groupAuthorizations(items);
   const renderAuthorizationRow = (item) => `
     <div class="authorization-row${item._finishing ? " is-submitting" : ""}" data-auth-id="${escapeHtml(item.id)}">
-      <input type="checkbox" data-auth-select="${escapeHtml(item.id)}" ${item.selected ? "checked" : ""} ${item._finishing ? "disabled" : ""} />
+      ${isSingle ? "" : `<input type="checkbox" data-auth-select="${escapeHtml(item.id)}" aria-label="${escapeHtml(`${authorizationActionLabel(item.tool.action)} · ${authorizationTarget(item.tool)}`)}" ${item.selected ? "checked" : ""} ${item._finishing ? "disabled" : ""} />`}
       <span class="authorization-kind">${escapeHtml(authorizationActionLabel(item.tool.action))}</span>
       <span class="authorization-target" title="${escapeHtml(authorizationTarget(item.tool))}">${escapeHtml(authorizationTarget(item.tool))}</span>
       ${item.stats ? `<span class="authorization-stats"><b>+${item.stats.additions || 0}</b><i>−${item.stats.removals || 0}</i></span>` : ""}
       ${item.editId ? `<button class="authorization-view" type="button" data-auth-view="${escapeHtml(item.editId)}">${t("view")}</button>` : ""}
     </div>`;
-  const authorizationList = grouping.showGroups
+  const authorizationList = isSingle
+    ? `${grouping.showGroups ? `<div class="authorization-source">${escapeHtml(items[0].sourceLabel)}</div>` : ""}${renderAuthorizationRow(items[0])}`
+    : grouping.showGroups
     ? groups.map((group) => {
       const groupSelected = group.items.every((item) => item.selected);
       return `
         <section class="authorization-group">
           <label class="authorization-group-head">
-            <input type="checkbox" data-auth-group="${escapeHtml(group.key)}" ${groupSelected ? "checked" : ""} />
+            <input type="checkbox" data-auth-group="${escapeHtml(group.key)}" aria-label="${escapeHtml(group.label)}" ${groupSelected ? "checked" : ""} />
             <strong>${escapeHtml(group.label)}</strong><span>${t("itemCount", { count: group.items.length })}</span>
           </label>
           ${group.items.map(renderAuthorizationRow).join("")}
@@ -9532,26 +9540,27 @@ function renderAuthorizationPanel() {
     : items.map(renderAuthorizationRow).join("");
 
   panel.classList.toggle("is-collapsed", state.authorizationPanelCollapsed);
+  panel.classList.toggle("is-single", isSingle);
   panel.classList.remove("hidden");
   messageScrollController?.setSuppressed(true);
   panel.innerHTML = `
-    <button class="authorization-collapsed-bar" type="button" data-auth-action="toggle">
-      <span>${t("awaitingApproval", { count: items.length })}</span><span aria-hidden="true">›</span>
+    <button class="authorization-collapsed-bar" type="button" data-auth-action="toggle" aria-expanded="false">
+      <span>${isSingle ? t("authorizationSingleTitle") : t("awaitingApproval", { count: items.length })}</span><span aria-hidden="true">›</span>
     </button>
     <div class="authorization-card">
       <div class="authorization-head">
-        <div class="authorization-head-copy"><strong>${t("confirmationRequired", { count: items.length })}</strong><span>${escapeHtml(summary)}</span></div>
+        <div class="authorization-head-copy"><strong>${isSingle ? t("authorizationSingleTitle") : t("confirmationRequired", { count: items.length })}</strong>${isSingle ? "" : `<span>${escapeHtml(summary)}</span>`}</div>
         <div class="authorization-head-actions">
           ${grouping.showHeaderSelectAll ? `<label class="authorization-select-all"><input type="checkbox" data-auth-group="main" aria-label="${escapeHtml(t("authorizationSelectAll"))}" ${items.every((item) => item.selected) ? "checked" : ""} /><span>${escapeHtml(t("authorizationSelectAll"))}</span></label>` : ""}
-          <button class="authorization-collapse" type="button" data-auth-action="toggle" title="${t("collapse")}">⌄</button>
+          <button class="authorization-collapse" type="button" data-auth-action="toggle" aria-expanded="true" title="${t("collapse")}">⌄</button>
         </div>
       </div>
       <div class="authorization-groups">
         ${authorizationList}
       </div>
       <div class="authorization-actions">
-        <button type="button" class="authorization-reject-all" data-auth-action="reject-all">${t("rejectAll")}</button>
-        <button type="button" class="authorization-approve" data-auth-action="approve" ${selectedCount ? "" : "disabled"}>${t("approveSelected")}${selectedCount ? ` (${selectedCount})` : ""}</button>
+        <button type="button" class="authorization-reject-all" data-auth-action="reject-all" ${singleIdAttribute} ${items.some((item) => !item._finishing) ? "" : "disabled"}>${isSingle ? t("authorizationSingleReject") : t("rejectAll")}</button>
+        <button type="button" class="authorization-approve" data-auth-action="approve" ${singleIdAttribute} ${selectedCount ? "" : "disabled"}>${isSingle ? t("authorizationSingleApprove") : `${t("approveSelected")}${selectedCount ? ` (${selectedCount})` : ""}`}</button>
       </div>
     </div>`;
 }
@@ -9676,11 +9685,20 @@ function bindAuthorizationPanel() {
     const actionButton = event.target.closest("[data-auth-action]");
     if (actionButton) {
       const action = actionButton.dataset.authAction;
+      if (action === "approve" || action === "reject-all") {
+        const items = pendingAuthorizations();
+        const singleId = actionButton.dataset.authSingleId;
+        // A stale single-item button must not approve a replacement or a new batch.
+        if ((items.length === 1) !== Boolean(singleId) || (singleId && items[0]?.id !== singleId)) {
+          renderAuthorizationPanel();
+          return;
+        }
+      }
       if (action === "toggle") {
         state.authorizationPanelCollapsed = !state.authorizationPanelCollapsed;
         renderAuthorizationPanel();
       } else if (action === "approve") {
-        const selected = pendingAuthorizations().filter((item) => item.selected && !item._finishing);
+        const selected = selectedAuthorizations();
         await Promise.allSettled(selected.map((item) => resolveAuthorization(item, true)));
         renderAuthorizationPanel();
       } else if (action === "reject-all") {
