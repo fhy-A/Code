@@ -157,9 +157,10 @@ gh auth login
 
 ```powershell
 git status                    # 工作区是否干净？
-python -m pytest tests -q     # 测试是否全过？
 git log --oneline -3          # 最近的提交是否就位？
 ```
+
+只核对现场与已完成的定向证据，不先手动再跑一次全量；下一步 canonical 入口会执行一次正式门禁。完整入口与两阶段入口二选一，不连续重复准备同一候选。
 
 ### 2. 运行发版脚本
 
@@ -213,7 +214,7 @@ python release.py 0.5.8 --resume --yes
 - Agent 应先写好 `docs/releases/v0.5.8.md` 的无占位中文正文，再运行 `python release.py 0.5.8 --yes`。Phase 5 会保留正文，并刷新日期、版本号、文件大小与 SHA-256。
 - 如果未预先准备正文，prepare 会在耗时验证前停止并提示补充；已有正文继续保留。
 - 无论采用人工还是 Agent 流程，创建标签和 GitHub Release 前都必须再次检查发布说明为中文主体、没有占位文案，并且只覆盖上一标签以来的真实改动。
-- Agent 不得把 `--skip-tests` 当作人工信任开关；没有有效 prepared 凭证时必须重新运行 `--prepare`。
+- Agent 不得把 `--skip-tests` 当作人工信任开关；没有有效 prepared 凭证不得发布。先核对候选/版本/发布状态，再按下方失败边界处理；不能循环重试同版本prepare或手改凭证。
 - `--prepare` 成功不代表已经获得 push、tag 或 Release 授权；执行 `--publish-prepared` / `--resume` 前仍需当前阶段的明确发布操作授权。
 
 ### Agent 无法处理的情况
@@ -222,93 +223,40 @@ python release.py 0.5.8 --resume --yes
 
 | 情况 | 脚本提示 | 人工处理 |
 |------|----------|----------|
-| 测试失败 | `全量测试未通过` | 修复代码，重新跑测试 |
+| 测试失败 | `全量测试未通过` | 保留失败日志，定位后只复验直接相关场景；修复稳定并重新冻结候选后再执行一次完整门禁 |
 | Harness replay 失败或超时 | `Harness replay 门禁失败` | 运行 `npm run verify:harness-replay`，核对首差异与固定哈希 |
 | 构建失败 | `PyInstaller 构建失败` | 检查 PyInstaller 日志，修复依赖 |
-| prepared 凭证损坏、陈旧或定义/环境漂移 | `请重新 prepare` | 保留事实证据，重新运行 `prepare`，不得手工改凭证 |
+| prepared 凭证损坏、陈旧或定义/环境漂移 | `请重新 prepare` | 停止并保留凭证/候选/日志，先区分尚未发布与发布已开始；当前同版本重新prepare可能被已同步版本号拒绝，不能循环重试、手改版本或凭证，须先审计恢复方案 |
 | 远端 master/tag/Release/资产与凭证不同 | `禁止覆盖` | 停止并核对远端对象，不 force-push、不删除重建 |
-| 推送失败 | `推送分支失败` | 检查网络和权限，手动 `git push` |
+| 推送失败 | `推送分支失败` | 保留凭证，先只读核对命令是否已成功；网络/权限恢复且同一候选匹配后使用 `--resume --yes`，不手工补推绕过审计 |
 | `gh` 未安装 | `未找到 GitHub CLI` | 安装并登录 GitHub CLI |
 | `gh` 未登录 | `GitHub CLI 未登录` | `gh auth login` |
-| Release 创建失败 | `GitHub Release 创建失败` | 代码已推送，手动上传 EXE 到 Release 页面 |
+| Release 创建或资产上传失败 | `GitHub Release 创建失败` 或上传错误 | 先读实际Release与资产状态，匹配同一凭证后使用 `--resume --yes`，不手工上传、覆盖或重建对象 |
 
 ---
 
-## 手动发版（不用脚本时的完整步骤）
+## 脚本不可用时的故障边界
 
-如果脚本不可用，以下是手动操作清单：
+手工路线只用于只读诊断，不是另一套绕开凭证的发布程序。保留当前 HEAD、index、版本元数据、凭证、EXE、完整日志及已观察到的远端对象；不要手改版本、补写凭证、手工提交/推送/上传或删除重建对象。
 
-### 1. 改版本号（3 个文件）
+- 尚未产生发布副作用：先修复脚本或提出独立、明确授权的一次性恢复方案。普通失败不能自动转成“信任已测试”的例外；既有例外记录也不构成后续版本的豁免。
+- 已进入 `publishing`：仅在原候选、制品、权限及远端对象一致时走 canonical `--resume --yes`。响应丢失先查事实，不盲重试；冲突或坏凭证先停下，不能重新prepare掩盖已经发生的外部操作。
+- 已是 `published`：仅作只读核验，缺失或漂移不授权重建。后续代码或文案变化属于新阶段，不能移动发布标签。
+- `gh` 未安装、未登录或网络不可用：报告具体边界，由操作者处理环境；Agent 不自动安装、登录或修改凭据。环境恢复后仍核对同一候选与实际发布状态。
 
-```
-VERSION                              → 改内容为 "0.5.8"
-file_version_info.txt                → 改 filevers/prodvers/FileVersion/ProductVersion/OriginalFilename
-README.md                            → 同步版本徽章 URL / alt 和具体 EXE 下载名
-```
+---
 
-### 2. 验证一致性
+## Skill 管理性能专项
 
-```powershell
-# 确认三个文件中的版本号都指向 0.5.8
-findstr "0.5.8" VERSION file_version_info.txt README.md
-```
+默认pytest保留当前31项规模的真实准备、独立可写副本、启停响应、完整性/计数、跨请求篡改拒绝及并发读取。只读模块准备基线在本轮pytest内复用，每项仍复制并校验内容，不持久缓存真实数据或共享可写profile。
 
-### 3. 质量检查
+旧实现成本对照、五次预热启停、逐函数耗时与重复测量属于可手动运行的专项，不进入默认pytest文件发现：
 
 ```powershell
-npm run check:frontend
-python -m pytest tests -q
-npm run verify:harness-replay
-git diff --check
-node --check app.js
-node --check agent-runtime.js
-python -m py_compile server.py launcher.py build_exe.py
+python -B -m pytest tests/performance/skill_management_read_view.py -q -s
 ```
 
-### 4. 构建
-
-```powershell
-python build_exe.py
-```
-
-### 5. 验证 EXE
-
-```powershell
-# 检查 Windows 文件属性中的版本号
-(Get-Item "dist\Code-v0.5.8.exe").VersionInfo | Format-List
-
-# 计算 SHA-256
-(Get-FileHash "dist\Code-v0.5.8.exe" -Algorithm SHA256).Hash
-```
-
-### 6. 写发布说明
-
-在 `docs/releases/v0.5.8.md` 中填写改动描述、文件大小、SHA-256。
-
-### 7. 提交 & 打标签
-
-```powershell
-git add VERSION file_version_info.txt README.md docs/releases/v0.5.8.md
-git commit -m "chore: prepare v0.5.8 release metadata"
-git tag v0.5.8
-```
-
-### 8. 推送
-
-```powershell
-git push origin master
-git push origin v0.5.8
-```
-
-### 9. 创建 GitHub Release
-
-```powershell
-gh release create v0.5.8 dist/Code-v0.5.8.exe `
-  --title "Code v0.5.8" `
-  --notes-file docs/releases/v0.5.8.md
-```
-
-或者打开 https://github.com/fhy-A/Code/releases/new?tag=v0.5.8 手动上传。
+专项仍保留原对照断言和完整诊断，仅使用合成库；不能指向真实运行数据。耗时只反映当次环境，不设计时通过阈值，不代替默认正确性、安全、兼容或恢复验证。前后比较须注明是否包含准备成本，不把不同基线的耗时直接相减为收益。
 
 ---
 
