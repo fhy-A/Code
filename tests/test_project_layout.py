@@ -29,6 +29,7 @@ RUNTIME_MODULES = (
     "skill_dependency_operation",
     "skill_lifecycle",
     "skill_lifecycle_v2",
+    "skill_loading",
     "skill_management_api",
     "skill_outcome",
     "skill_registry",

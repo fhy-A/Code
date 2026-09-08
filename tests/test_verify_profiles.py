@@ -401,17 +401,17 @@ class TestSharedReleaseDefinition(unittest.TestCase):
         ):
             self.assertNotEqual(first, verification.get_release_definition_fingerprint())
 
-    def test_formal_release_order_matches_historical_gate_order(self):
+    def test_formal_release_keeps_all_gates_with_fast_checks_first(self):
         self.assertEqual(
             verification.get_release_check_ids(dry_run=False, skip_tests=False),
             (
+                "git_diff_check",
+                *verification.SYNTAX_CHECK_IDS,
                 "frontend_build",
                 "frontend_freshness",
                 "frontend_bundle_syntax",
-                "pytest_full",
                 "harness_replay",
-                "git_diff_check",
-                *verification.SYNTAX_CHECK_IDS,
+                "pytest_full",
             ),
         )
 
@@ -419,65 +419,44 @@ class TestSharedReleaseDefinition(unittest.TestCase):
         syntax = verification.SYNTAX_CHECK_IDS
         self.assertEqual(
             verification.get_release_check_ids(dry_run=True, skip_tests=False),
-            ("frontend_freshness", "frontend_bundle_syntax", *syntax),
+            (*syntax, "frontend_freshness", "frontend_bundle_syntax"),
         )
         self.assertEqual(
             verification.get_release_check_ids(dry_run=False, skip_tests=True),
             (
+                *syntax,
                 "frontend_build",
                 "frontend_freshness",
                 "frontend_bundle_syntax",
-                *syntax,
             ),
         )
         self.assertEqual(
             verification.get_release_check_ids(dry_run=True, skip_tests=True),
-            ("frontend_freshness", "frontend_bundle_syntax", *syntax),
+            (*syntax, "frontend_freshness", "frontend_bundle_syntax"),
         )
 
     def test_release_runner_executes_shared_definition_once_in_order(self):
         calls = []
-        with mock.patch.object(
-            release,
-            "prepare_frontend_assets",
-            side_effect=lambda **kwargs: calls.extend(
-                (
-                    "frontend_build",
-                    "frontend_freshness",
-                    "frontend_bundle_syntax",
-                )
-                if kwargs["build"]
-                else ("frontend_freshness", "frontend_bundle_syntax")
-            ),
-        ), mock.patch.object(release, "run_tests", side_effect=lambda: calls.append("pytest_full")), \
-                mock.patch.object(
-                    release,
-                    "run_harness_replay_gate",
-                    side_effect=lambda: calls.append("harness_replay"),
-                ), mock.patch.object(
-                    release,
-                    "run_git_diff_check",
-                    side_effect=lambda: calls.append("git_diff_check"),
-                ), mock.patch.object(
-                    release,
-                    "run_syntax_checks",
-                    side_effect=lambda: calls.extend(verification.SYNTAX_CHECK_IDS),
-                ):
+        by_command = {tuple(spec.command): key for key, spec in verification.CHECKS.items()}
+        def command(args, **kwargs):
+            calls.append(by_command[tuple(args)])
+            return 0, "", ""
+        with mock.patch.object(release, "run", side_effect=command):
             release.run_release_quality_checks(dry_run=False, skip_tests=False)
-
-        expected = verification.get_release_check_ids(dry_run=False, skip_tests=False)
-        self.assertEqual(tuple(calls), expected)
+        self.assertEqual(tuple(calls), verification.get_release_check_ids(dry_run=False, skip_tests=False))
         self.assertEqual(len(calls), len(set(calls)))
 
+
     def test_release_runner_propagates_first_failure(self):
-        with mock.patch.object(release, "prepare_frontend_assets"), mock.patch.object(
-            release,
-            "run_tests",
-            side_effect=SystemExit(3),
-        ), mock.patch.object(release, "run_harness_replay_gate") as replay_gate:
+        with mock.patch.object(release, "run", return_value=(3, "bad diff", "")) as command, \
+                mock.patch.object(release, "run_tests") as pytest_gate, \
+                mock.patch.object(release, "run_harness_replay_gate") as replay_gate:
             with self.assertRaises(SystemExit):
                 release.run_release_quality_checks(dry_run=False, skip_tests=False)
+        self.assertEqual(command.call_count, 1)
+        pytest_gate.assert_not_called()
         replay_gate.assert_not_called()
+
 
     def test_shared_timeouts_preserve_release_contract(self):
         self.assertEqual(verification.CHECKS["frontend_build"].timeout, 120)

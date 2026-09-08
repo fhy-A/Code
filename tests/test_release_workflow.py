@@ -106,6 +106,8 @@ class TestPrepareAtomicFailure(unittest.TestCase):
         self.stack.enter_context(mock.patch.object(release, "_git_index_tree", return_value="index-tree"))
         self.stack.enter_context(mock.patch.object(release, "_credential_path", return_value=self.credential_path))
         self.stack.enter_context(mock.patch.object(release, "_tracked_state_digest", return_value="outside"))
+        self.stack.enter_context(mock.patch.object(release, "require_prepare_inputs"))
+        self.stack.enter_context(mock.patch.object(release, "_environment_fingerprint", return_value={"repository": "owner/repo", "platform": "test"}))
 
     def tearDown(self):
         self.stack.close()

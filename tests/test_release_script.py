@@ -148,12 +148,12 @@ Date: 2026-07-27
                 )
 
     def test_release_notes_gate_runs_before_git_commit_and_tag(self):
-        source = inspect.getsource(release.main)
+        source = inspect.getsource(release.prepare_release)
         self.assertLess(
             source.index("require_release_notes_ready"),
-            source.index("git_commit_and_tag"),
+            source.index("save_credential"),
         )
-        self.assertIn("if initial_errors and args.yes", source)
+        self.assertLess(source.index("require_prepare_inputs"), source.index("run_release_quality_checks"))
 
     def test_release_paths_exclude_generated_pyinstaller_spec(self):
         paths = release._release_paths("1.2.3")
@@ -218,7 +218,7 @@ Date: 2026-07-27
                 release.prepare_frontend_assets(build=False)
 
     def test_frontend_release_gate_runs_before_exe_packaging(self):
-        source = inspect.getsource(release.main)
+        source = inspect.getsource(release.prepare_release)
         self.assertLess(
             source.index("run_release_quality_checks"),
             source.index("build_exe"),
@@ -423,11 +423,12 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
                     release.run_harness_replay_gate()
                 self.assertLessEqual(len(stop_release.call_args.args[0]), 2100)
 
-    def test_replay_gate_runs_after_pytest_before_diff_syntax_and_exe(self):
-        source = inspect.getsource(release.run_release_quality_checks)
-        self.assertLess(source.index('"pytest_full"'), source.index('"harness_replay"'))
-        self.assertLess(source.index('"harness_replay"'), source.index('"git_diff_check"'))
-        self.assertLess(source.index('"git_diff_check"'), source.index("SYNTAX_CHECK_IDS"))
+    def test_fast_checks_and_replay_precede_full_pytest(self):
+        ids = verification.get_release_check_ids(dry_run=False, skip_tests=False)
+        self.assertLess(ids.index("git_diff_check"), ids.index("frontend_build"))
+        self.assertLess(ids.index("syntax_build_exe"), ids.index("frontend_build"))
+        self.assertLess(ids.index("harness_replay"), ids.index("pytest_full"))
+
 
     def test_skip_tests_routes_to_prepared_credential_instead_of_trust_skip(self):
         with mock.patch.object(
@@ -448,58 +449,31 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
         build_exe.assert_not_called()
 
     def test_dry_run_does_not_execute_replay_gate(self):
-        class StopAfterChecks(Exception):
-            pass
-
-        with mock.patch.object(
-            release.sys,
-            "argv",
-            ["release.py", "0.5.99", "--dry-run", "--no-proxy"],
-        ), mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
+        calls = []
+        with mock.patch.object(release.sys, "argv", ["release.py", "0.5.99", "--dry-run", "--no-proxy"]), \
+                mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
                 mock.patch.object(release, "verify_version_consistency"), \
-                mock.patch.object(release, "prepare_frontend_assets") as frontend_gate, \
-                mock.patch.object(release, "run_tests") as run_tests, \
-                mock.patch.object(release, "run_harness_replay_gate") as replay_gate, \
-                mock.patch.object(release, "run_git_diff_check") as diff_check, \
-                mock.patch.object(release, "run_syntax_checks"), \
-                mock.patch.object(release, "git_commit_and_tag", side_effect=StopAfterChecks):
-            with self.assertRaises(StopAfterChecks):
-                release.main()
+                mock.patch.object(release, "run", side_effect=lambda cmd, **kw: (calls.append(tuple(cmd)) or (0, "", ""))), \
+                mock.patch.object(release, "git_commit_and_tag") as commit, \
+                mock.patch.object(release, "push_to_github") as push, \
+                mock.patch.object(release, "create_github_release") as publish:
+            release.main()
+        expected = verification.get_release_check_ids(dry_run=True, skip_tests=False)
+        self.assertEqual(calls, [verification.CHECKS[key].command for key in expected])
+        commit.assert_called_once_with("0.5.99", dry_run=True)
+        push.assert_called_once_with("0.5.99", dry_run=True)
+        self.assertTrue(publish.call_args.kwargs["dry_run"])
 
-        frontend_gate.assert_called_once_with(build=False)
-        run_tests.assert_not_called()
-        replay_gate.assert_not_called()
-        diff_check.assert_not_called()
 
-    def test_replay_failure_prevents_exe_build(self):
-        with mock.patch.object(
-            release.sys,
-            "argv",
-            ["release.py", "0.5.99", "--no-proxy"],
-        ), mock.patch.object(release, "get_current_version", return_value="0.5.98"), \
-                mock.patch.object(release, "ask", return_value=True), \
-                mock.patch.object(release, "run", return_value=(0, "", "")), \
-                mock.patch.object(release, "update_version_file"), \
-                mock.patch.object(release, "update_version_info"), \
-                mock.patch.object(release, "update_readme"), \
-                mock.patch.object(release, "verify_version_consistency"), \
-                mock.patch.object(release, "prepare_frontend_assets"), \
-                mock.patch.object(release, "run_tests") as run_tests, \
-                mock.patch.object(
-                    release,
-                    "run_harness_replay_gate",
-                    side_effect=SystemExit,
-                ) as replay_gate, mock.patch.object(release, "run_git_diff_check") as diff_check, \
-                mock.patch.object(release, "run_syntax_checks") as syntax_checks, \
-                mock.patch.object(release, "build_exe") as build_exe:
+    def test_replay_failure_prevents_full_pytest(self):
+        with mock.patch.object(release, "run", return_value=(0, "", "")), \
+                mock.patch.object(release, "run_harness_replay_gate", side_effect=SystemExit) as replay, \
+                mock.patch.object(release, "run_tests") as full:
             with self.assertRaises(SystemExit):
-                release.main()
+                release.run_release_quality_checks(dry_run=False, skip_tests=False)
+        replay.assert_called_once_with()
+        full.assert_not_called()
 
-        run_tests.assert_called_once_with()
-        replay_gate.assert_called_once_with()
-        diff_check.assert_not_called()
-        syntax_checks.assert_not_called()
-        build_exe.assert_not_called()
 
 
 if __name__ == "__main__":

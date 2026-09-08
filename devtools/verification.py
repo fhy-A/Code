@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import codecs
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,9 @@ import platform
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from typing import Callable, Iterable, TextIO
 
 
@@ -172,12 +177,12 @@ SYNTAX_CHECK_IDS = (
 # to frontend_build through get_release_check_ids(); it remains the same logical
 # release definition, with the existing dry-run/skip-tests policies applied.
 RELEASE_READ_ONLY_CHECK_IDS = (
-    "frontend_freshness",
-    "frontend_bundle_syntax",
-    "pytest_full",
-    "harness_replay",
     "git_diff_check",
     *SYNTAX_CHECK_IDS,
+    "frontend_freshness",
+    "frontend_bundle_syntax",
+    "harness_replay",
+    "pytest_full",
 )
 
 PROFILE_CHECK_IDS: dict[str, tuple[str, ...]] = {
@@ -215,13 +220,14 @@ def get_release_check_ids(*, dry_run: bool, skip_tests: bool) -> tuple[str, ...]
     """Return the exact ordered quality gates used by release.py.
 
     This preserves the historical release gate mapping:
-    - formal release builds the bundle, then runs the complete release profile;
+    - formal release runs cheap source checks before build/replay/full pytest;
     - dry-run does not build, run pytest/replay, or inspect the working diff;
     - the legacy --skip-tests subset remains defined, but non-dry-run CLI reuse
       is accepted only through a current sealed prepared credential.
     """
 
-    checks = ("frontend_build", *RELEASE_READ_ONLY_CHECK_IDS)
+    checks = list(RELEASE_READ_ONLY_CHECK_IDS)
+    checks.insert(checks.index("frontend_freshness"), "frontend_build")
     excluded = set()
     if dry_run:
         excluded.add("frontend_build")
@@ -271,17 +277,160 @@ Executor = Callable[[CheckSpec], subprocess.CompletedProcess[str]]
 DoctorExecutor = Callable[[tuple[str, ...], int], subprocess.CompletedProcess[str]]
 
 
-def _default_executor(spec: CheckSpec) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(spec.command),
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=spec.timeout,
-        check=False,
-    )
+_COMMAND_GATE = """\
+import json, subprocess, sys
+request = json.loads(sys.stdin.readline())
+raise SystemExit(subprocess.call(request['command'], shell=request['shell']))
+"""
+
+
+def _write_live(stream, text):
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        stream.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+    stream.flush()
+
+
+def run_logged_command(command, *, cwd, timeout, env=None, label="command",
+                       stream=None, log_dir=None, cancel_event=None):
+    """Stream diagnostics; use the existing Job owner before releasing a child.
+
+    The tiny stdin gate cannot spawn the requested command until containment
+    succeeds. Quiet identity/credential commands deliberately do not use this.
+    """
+    output = stream if stream is not None else sys.stdout
+    directory = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="code-check-"))
+    directory.mkdir(parents=True, exist_ok=True)
+    stdout_path, stderr_path = directory / "stdout.log", directory / "stderr.log"
+    for path in (stdout_path, stderr_path):
+        path.touch(exist_ok=False)
+    started = time.monotonic()
+    captured = {"stdout": [], "stderr": []}
+    pump_errors, threads = [], []
+    console_lock = threading.Lock()
+    process, job, attached = None, None, False
+    status, failure = "failed", None
+    environment = dict(os.environ if env is None else env)
+    environment.setdefault("PYTHONUNBUFFERED", "1")
+    environment["PYTHONIOENCODING"] = "utf-8"
+    _write_live(output, f"START {label} timeout={timeout}s logs={directory}\n")
+
+    def pump(pipe, name, path):
+        decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True)
+        try:
+            with path.open("a", encoding="utf-8", newline="", buffering=1) as log:
+                while True:
+                    chunk = pipe.read1(4096)
+                    text = decoder.decode(chunk, final=not chunk)
+                    if text:
+                        captured[name].append(text)
+                        log.write(text)
+                        log.flush()
+                        with console_lock:
+                            _write_live(output, text)
+                    if not chunk:
+                        break
+        except Exception as exc:
+            pump_errors.append(exc)
+        finally:
+            pipe.close()
+
+    try:
+        if os.name == "nt":
+            from code_runtime.skill_dependency_operation import _WindowsJob
+            job = _WindowsJob()
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", _COMMAND_GATE], cwd=str(cwd), env=environment,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW) if os.name == "nt" else 0,
+            start_new_session=os.name != "nt",
+        )
+        if job is not None:
+            job.attach(process)
+            attached = True
+        for name, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+            thread = threading.Thread(target=pump, args=(getattr(process, name), name, path), daemon=True)
+            thread.start()
+            threads.append(thread)
+        payload_command = command if isinstance(command, str) else [os.fspath(part) for part in command]
+        process.stdin.write((json.dumps({"command": payload_command, "shell": isinstance(command, str)}) + "\n").encode("utf-8"))
+        process.stdin.close()
+        while process.poll() is None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise KeyboardInterrupt("command cancelled")
+            if pump_errors:
+                raise OSError("command diagnostic stream failed") from pump_errors[0]
+            remaining = timeout - (time.monotonic() - started)
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                process.wait(timeout=min(remaining, 0.1))
+            except subprocess.TimeoutExpired:
+                pass
+        status = "passed" if process.returncode == 0 else "failed"
+    except BaseException as exc:
+        failure = exc
+        status = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed"
+    finally:
+        # Confirm the existing Job is empty before reporting completion, even
+        # when a descendant outlives its leader. No process-name enumeration.
+        if job is not None:
+            try:
+                if attached and not job.empty():
+                    job.stop()
+                    deadline = time.monotonic() + 5
+                    while not job.empty() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not job.empty():
+                        raise OSError("command process tree exit unconfirmed")
+            except Exception as exc:
+                failure = failure or exc
+                status = "failed"
+            finally:
+                job.close()
+        if process is not None:
+            if os.name != "nt":
+                import signal
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif not attached and process.poll() is None:
+                process.kill()  # Still behind the unopened stdin gate.
+            process.wait(timeout=5)
+            if process.stdin and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass  # The gated child was already stopped during setup.
+        for thread in threads:
+            thread.join(timeout=5)
+        if any(thread.is_alive() for thread in threads) or pump_errors:
+            failure = failure or OSError("command diagnostics did not finish")
+            status = "failed"
+        stdout, stderr = "".join(captured["stdout"]), "".join(captured["stderr"])
+        exit_code = 124 if status == "timeout" else 130 if status == "cancelled" else process.returncode if process else 127
+        if failure is not None and exit_code == 0:
+            exit_code = 127
+        summary = {"label": label, "status": status, "exitCode": exit_code,
+                   "elapsedSeconds": round(time.monotonic() - started, 3),
+                   "stdout": stdout_path.name, "stderr": stderr_path.name}
+        if failure is not None:
+            summary["error"] = f"{type(failure).__name__}: {failure}"
+        (directory / "result.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        _write_live(output, f"\nEND {label} status={status} exit={exit_code} elapsed={summary['elapsedSeconds']}s logs={directory}\n")
+    if failure is not None:
+        if isinstance(failure, subprocess.TimeoutExpired):
+            failure.output, failure.stderr = stdout, stderr
+        raise failure
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _default_executor(spec: CheckSpec, *, stream=None) -> subprocess.CompletedProcess[str]:
+    return run_logged_command(list(spec.command), cwd=ROOT, timeout=spec.timeout,
+                              label=spec.check_id, stream=stream)
 
 
 def _default_doctor_executor(
@@ -697,7 +846,7 @@ def run_profile(
     output.write(f"EXECUTE count={len(selected)} items={','.join(selected)}\n")
     output.write(f"SKIP count={len(skipped)} items={','.join(skipped) or '-'}\n")
 
-    invoke = executor or _default_executor
+    invoke = executor or (lambda spec: _default_executor(spec, stream=output))
     for index, check_id in enumerate(selected, start=1):
         spec = CHECKS[check_id]
         output.write(
@@ -706,7 +855,8 @@ def run_profile(
         try:
             result = invoke(spec)
         except subprocess.TimeoutExpired as exc:
-            _write_lines(output, (str(exc.stdout or ""), str(exc.stderr or "")))
+            if executor is not None:
+                _write_lines(output, (str(exc.stdout or ""), str(exc.stderr or "")))
             output.write(f"FAIL id={check_id} reason=timeout exit=124\n")
             output.write(f"FIRST_FAILURE {check_id}\n")
             output.write(f"RESULT profile={profile} status=failed exit=124\n")
@@ -717,7 +867,8 @@ def run_profile(
             output.write(f"RESULT profile={profile} status=failed exit=127\n")
             return 127
 
-        _write_lines(output, (result.stdout or "", result.stderr or ""))
+        if executor is not None:
+            _write_lines(output, (result.stdout or "", result.stderr or ""))
         if result.returncode != 0:
             output.write(f"FAIL id={check_id} reason=command exit={result.returncode}\n")
             output.write(f"FIRST_FAILURE {check_id}\n")

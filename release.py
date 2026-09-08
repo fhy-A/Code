@@ -1,10 +1,10 @@
 """
 Code 自动发版脚本
 
-保留项目已有一次性发版流程，并提供可验证的两阶段发布：
+默认完整发布与显式两阶段入口共用 sealed 候选流程：
   1. 版本号同步（VERSION / file_version_info.txt / README.md）
   2. 一致性校验
-  3. 全量测试 + 语法检查
+  3. 快速语法/diff → 前端 → replay → 全量测试
   4. PyInstaller 构建 EXE
   5. EXE 元数据 + SHA-256 校验
   6. 生成发布说明
@@ -29,6 +29,7 @@ import json
 import os
 import platform
 import re
+import importlib.util
 import shutil
 import subprocess
 import sys
@@ -54,6 +55,7 @@ from devtools.verification import (
     SYNTAX_CHECK_IDS,
     get_release_check_ids,
     get_release_definition_fingerprint,
+    run_logged_command,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -159,19 +161,9 @@ def run(cmd, *, cwd=None, timeout=300, description=None):
     if _proxy_url:
         env.update(_build_proxy_env(_proxy_url))
 
-    result = subprocess.run(
-        cmd, cwd=str(cwd),
-        capture_output=True, text=True,
-        encoding="utf-8", errors="replace",
-        timeout=timeout,
-        shell=isinstance(cmd, str),
-        env=env,
+    result = run_logged_command(
+        cmd, cwd=cwd, timeout=timeout, env=env, label=label,
     )
-    if result.returncode != 0:
-        if result.stderr:
-            print(_console_safe(f"  STDERR:\n{result.stderr[-500:]}"))
-        if result.stdout:
-            print(_console_safe(f"  STDOUT:\n{result.stdout[-500:]}"))
     return result.returncode, result.stdout, result.stderr
 
 
@@ -717,41 +709,23 @@ def run_release_quality_checks(*, dry_run, skip_tests):
     behavior and direct compatibility tests keep the historical definition.
     """
     check_ids = get_release_check_ids(dry_run=dry_run, skip_tests=skip_tests)
-    consumed = []
-
-    frontend_ids = tuple(
-        check_id
-        for check_id in check_ids
-        if check_id in {
-            "frontend_build",
-            "frontend_freshness",
-            "frontend_bundle_syntax",
-        }
-    )
-    if frontend_ids:
-        prepare_frontend_assets(build="frontend_build" in frontend_ids)
-        consumed.extend(frontend_ids)
-
-    if "pytest_full" in check_ids:
-        run_tests()
-        consumed.append("pytest_full")
-    if "harness_replay" in check_ids:
-        run_harness_replay_gate()
-        consumed.append("harness_replay")
-    if "git_diff_check" in check_ids:
-        run_git_diff_check()
-        consumed.append("git_diff_check")
-
-    if skip_tests:
-        warn("跳过测试（--skip-tests）")
-
-    syntax_ids = tuple(check_id for check_id in check_ids if check_id in SYNTAX_CHECK_IDS)
-    if syntax_ids:
-        run_syntax_checks()
-        consumed.extend(syntax_ids)
-
-    if tuple(consumed) != check_ids:
-        die("共享 release 验证定义包含未被执行的检查项")
+    for index, check_id in enumerate(check_ids):
+        spec = CHECKS[check_id]
+        print(f"CHECK_START id={check_id} timeout={spec.timeout}s", flush=True)
+        try:
+            if check_id == "pytest_full":
+                run_tests()
+            elif check_id == "harness_replay":
+                run_harness_replay_gate()
+            else:
+                rc, _stdout, _stderr = run(list(spec.command), description=spec.label, timeout=spec.timeout)
+                if rc != 0:
+                    die(f"发布检查失败: {check_id} (exit={rc})")
+        except BaseException:
+            print(f"CHECK_FAILED id={check_id}", flush=True)
+            print("NOT_RUN " + (",".join(check_ids[index + 1:]) or "none"), flush=True)
+            raise
+        print(f"CHECK_PASS id={check_id}", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -973,13 +947,7 @@ def generate_release_notes(new_version, sha256, exe_size):
     return release_file
 
 
-def validate_release_notes(release_file, new_version):
-    """Return blocking release-note validation errors."""
-    release_file = Path(release_file)
-    if not release_file.exists():
-        return [f"发布说明不存在: {release_file}"]
-
-    content = release_file.read_text(encoding="utf-8")
+def _validate_release_notes_body(content):
     body = _extract_release_notes_body(content)
     errors = []
 
@@ -996,6 +964,18 @@ def validate_release_notes(release_file, new_version):
     for pattern, message in _RELEASE_NOTES_PLACEHOLDER_PATTERNS:
         if pattern.search(content):
             errors.append(message)
+
+    return errors
+
+
+def validate_release_notes(release_file, new_version):
+    """Return blocking release-note validation errors."""
+    release_file = Path(release_file)
+    if not release_file.exists():
+        return [f"发布说明不存在: {release_file}"]
+
+    content = release_file.read_text(encoding="utf-8")
+    errors = _validate_release_notes_body(content)
 
     expected_header = f"# Code v{new_version} Release Notes"
     expected_asset = f"Code-v{new_version}.exe"
@@ -1104,6 +1084,21 @@ def _validate_prepared_candidate(credential, version):
         die("GitHub 仓库身份已漂移，请重新 prepare")
 
 
+def require_prepare_inputs(version):
+    """Cheap local readiness only; no artifact or version mutation."""
+    notes = RELEASES_DIR / f"v{version}.md"
+    if not notes.is_file():
+        die(f"请先编写中文发布说明正文: {notes}")
+    errors = _validate_release_notes_body(notes.read_text(encoding="utf-8"))
+    if errors:
+        die("发布说明正文未就绪: " + "; ".join(errors))
+    for executable in ("node", "npm.cmd" if os.name == "nt" else "npm"):
+        if shutil.which(executable) is None:
+            die(f"缺少现有发布工具: {executable}")
+    if importlib.util.find_spec("PyInstaller") is None:
+        die("当前 Python 缺少 PyInstaller；未安装依赖或启动耗时验证")
+
+
 def prepare_release(version):
     """Create a fully verified local candidate and sealed credential."""
     version_tuple = parse_version(version)
@@ -1117,7 +1112,9 @@ def prepare_release(version):
     base_head = _git_head()
     credential_path = _credential_path(version)
     try:
+        require_prepare_inputs(version)
         remote = remote_read_only_preflight(version, base_head)
+        environment = _environment_fingerprint(remote["repository"])
     except BaseException:
         invalidate_credential(credential_path)
         raise
@@ -1148,6 +1145,8 @@ def prepare_release(version):
         if outside_after != outside_before:
             die("prepare 产生了发布白名单外 tracked 差量")
 
+        if _environment_fingerprint(remote["repository"]) != environment:
+            die("prepare 期间验证环境已变化，请重新 prepare")
         release_records = record_files(ROOT, release_paths)
         for record in release_records:
             record["gitBlob"] = _git_blob_hash(record["path"])
@@ -1182,7 +1181,7 @@ def prepare_release(version):
                 "sha256": sha256_file(exe_path),
                 "peMetadata": pe_metadata,
             },
-            "environment": _environment_fingerprint(remote["repository"]),
+            "environment": environment,
             "publication": {
                 "startedAt": None,
                 "commit": None,
@@ -1437,6 +1436,26 @@ def _continue_publication(path, credential):
     if _git_branch() != DEFAULT_BRANCH:
         die(f"当前分支不是 {DEFAULT_BRANCH}")
 
+    if credential["state"] == "published":
+        _ensure_cached_empty()
+        commit = credential["publication"].get("commit")
+        if not commit or _git_head() != commit:
+            die("已发布候选 HEAD 已变化；只允许审计同一候选")
+        _verify_release_commit(credential, commit)
+        if _tracked_state_digest(commit, tuple(record["path"] for record in credential["releaseFiles"])) != credential["baseline"]["outsideTrackedSha256"]:
+            die("已发布候选工作区已漂移")
+        if (_local_tag_commit(credential["tag"]) != commit
+                or _read_remote_branch() != commit
+                or _read_remote_tag(credential["tag"]) != commit):
+            die("已发布分支或标签缺失/漂移，禁止重新创建")
+        info = _read_remote_release(credential["tag"], credential["environment"]["repository"])
+        if info is None:
+            die("已发布 Release 缺失，禁止重新创建")
+        _audit_release_metadata(info, credential)
+        _audit_release_asset(info, credential)
+        ok(f"Code v{credential['version']} 已发布候选只读审计通过")
+        return credential
+
     commit, credential = _ensure_release_commit(path, credential)
     if _tracked_state_digest(commit, tuple(record["path"] for record in credential["releaseFiles"])) != credential["baseline"]["outsideTrackedSha256"]:
         die("发布白名单外 tracked 状态与 prepared 凭证不一致")
@@ -1641,6 +1660,29 @@ def create_github_release(new_version, sha256, dry_run=False):
 # 主流程
 # ═══════════════════════════════════════════════════════════════
 
+def full_release(version, *, auto_yes=False):
+    """One sealed path for fresh preparation, reuse, and interrupted publication."""
+    path = _credential_path(version)
+    if path.exists() or path.is_symlink():
+        _path, credential = _load_prepared_credential(version)
+        if credential["state"] == "prepared":
+            return publish_prepared(version, auto_yes=auto_yes)
+        if credential["state"] in {"publishing", "published"}:
+            return resume_release(version, auto_yes=auto_yes)
+        die("未知发布凭证状态；禁止覆盖或重新发布")
+    if not auto_yes:
+        rc, status, _stderr = run(["git", "status", "--short"], description="git status")
+        if rc != 0:
+            die("无法核对发布工作区")
+        if status.strip() and not ask("工作区不干净，是否继续？"):
+            return
+        if not ask(f"确认从 v{get_current_version()} 发版到 v{version}？"):
+            return
+    prepare_release(version)
+    # The full-release confirmation already authorizes this exact prepared run.
+    return publish_prepared(version, auto_yes=True)
+
+
 def main():
     import argparse
 
@@ -1728,13 +1770,6 @@ def main():
 
     parse_version(new_version)
 
-    # --yes 模式下跳过所有交互确认
-    if args.yes:
-        global ask
-        def ask(prompt):
-            print(f"  ?  {prompt} [y/N]  (--yes: auto y)")
-            return True
-
     if action == "prepare":
         prepare_release(new_version)
         return
@@ -1752,120 +1787,18 @@ def main():
         publish_prepared(new_version, auto_yes=args.yes)
         return
 
-    version_tuple = parse_version(new_version)
+    if not args.dry_run:
+        return full_release(new_version, auto_yes=args.yes)
+
+    # Keep the historical read-only dry-run subset and CLI aliases.
     old_version = get_current_version()
-
-    # ── 预检 ──
-    print("=" * 60)
-    print(f"  Code 发版脚本")
-    print(f"  旧版本: {old_version}")
-    print(f"  新版本: {new_version}")
-    print(f"  模式: {'预演 (dry-run)' if args.dry_run else '正式发版'}")
-    print(f"  代理: {_proxy_url or '无（直连）'}")
-    print("=" * 60)
-
-    if not args.dry_run:
-        # 检查工作区
-        rc, stdout, _ = run(["git", "status", "--short"], description="git status")
-        if stdout.strip():
-            print(f"\n  未跟踪/未提交的文件:\n{stdout}")
-            if not ask("工作区不干净，是否继续？"):
-                die("用户取消")
-
-        if not ask(f"确认从 v{old_version} 发版到 v{new_version}？"):
-            print("  已取消")
-            return
-
-    # ── Phase 1: 版本号同步 ──
-    print("\n" + "=" * 60)
-    print("  Phase 1: 版本号同步")
-    print("=" * 60)
-
-    if not args.dry_run:
-        update_version_file(new_version)
-        update_version_info(new_version, version_tuple)
-        update_readme(new_version)
-    verify_version_consistency(new_version, old_version, dry_run=args.dry_run)
-
-    # ── Phase 2: 代码质量检查 ──
-    print("\n" + "=" * 60)
-    print("  Phase 2: 代码质量检查")
-    print("=" * 60)
-    run_release_quality_checks(
-        dry_run=args.dry_run,
-        skip_tests=args.skip_tests,
-    )
-
-    # ── Phase 3: 构建 EXE ──
-    print("\n" + "=" * 60)
-    print("  Phase 3: 构建 EXE")
-    print("=" * 60)
-
-    if not args.dry_run:
-        build_exe(new_version)
-    else:
-        print("  [DRY RUN] 跳过构建")
-
-    # ── Phase 4: EXE 验证 ──
-    print("\n" + "=" * 60)
-    print("  Phase 4: EXE 验证")
-    print("=" * 60)
-
-    if not args.dry_run:
-        verify_exe_metadata(new_version)
-        sha256 = compute_sha256(new_version)
-        exe_size = (ROOT / "dist" / f"Code-v{new_version}.exe").stat().st_size
-    else:
-        sha256 = "DRY_RUN_SHA256"
-        exe_size = 0
-        print("  [DRY RUN] 跳过 EXE 验证")
-
-    # ── Phase 5: 生成发布说明 ──
-    print("\n" + "=" * 60)
-    print("  Phase 5: 生成发布说明")
-    print("=" * 60)
-
-    if not args.dry_run:
-        release_file = generate_release_notes(new_version, sha256, exe_size)
-        initial_errors = validate_release_notes(release_file, new_version)
-
-        if initial_errors and args.yes:
-            print(f"\n  请先编辑发布说明后重新运行本脚本:")
-            print(f"    docs/releases/v{new_version}.md")
-        elif not args.yes and not ask("发布说明是否已编辑好？"):
-            print(f"\n  请编辑发布说明后重新运行本脚本，或手动完成后续步骤。")
-            print(f"  发布说明位置: docs/releases/v{new_version}.md")
-            print(f"\n  后续手动步骤:")
-            print(f"    git add -A && git commit -m 'chore: prepare v{new_version} release metadata'")
-            print(f"    git tag v{new_version}")
-            print(f"    git push origin {DEFAULT_BRANCH} && git push origin v{new_version}")
-            print(f"    gh release create v{new_version} dist/Code-v{new_version}.exe --notes-file docs/releases/v{new_version}.md")
-            die("用户暂停以编辑发布说明")
-
-        require_release_notes_ready(release_file, new_version)
-    else:
-        print("  [DRY RUN] 跳过发布说明生成")
-
-    # ── Phase 6: Git 提交 & 标签 ──
-    print("\n" + "=" * 60)
-    print("  Phase 6: Git 提交 & 标签")
-    print("=" * 60)
-    git_commit_and_tag(new_version, dry_run=args.dry_run)
-
-    # ── Phase 7: 推送 & GitHub Release ──
-    print("\n" + "=" * 60)
-    print("  Phase 7: 推送 & GitHub Release")
-    print("=" * 60)
-    push_to_github(new_version, dry_run=args.dry_run)
-    create_github_release(new_version, sha256, dry_run=args.dry_run)
-
-    # ── 完成 ──
-    print("\n" + "=" * 60)
-    print(f"  Code v{new_version} 发版完成!")
-    print("=" * 60)
-
-    if args.dry_run:
-        print("\n  [预演模式 -- 未做任何实际修改]")
+    verify_version_consistency(new_version, old_version, dry_run=True)
+    run_release_quality_checks(dry_run=True, skip_tests=args.skip_tests)
+    print("  [DRY RUN] 跳过构建、EXE 校验和发布说明生成")
+    git_commit_and_tag(new_version, dry_run=True)
+    push_to_github(new_version, dry_run=True)
+    create_github_release(new_version, "DRY_RUN_SHA256", dry_run=True)
+    print("\n  [预演模式 -- 未做任何实际修改]")
 
 
 if __name__ == "__main__":
