@@ -42,7 +42,7 @@ RUNTIME_MODULES = (
     "skill_store_v2",
     "windows_explorer",
 )
-DEVTOOL_MODULES = ("release_state", "verification")
+DEVTOOL_MODULES = ("release_inputs", "release_state", "verification")
 
 
 def first_party_runtime_sources():
