@@ -288,7 +288,7 @@ def test_cancel_and_timeout_after_effect_do_not_claim_rollback(tmp_path, cancel)
     try:
         import time
         deadline = time.monotonic() + 5
-        while not marker.exists() and worker.is_alive() and time.monotonic() < deadline:
+        while (not marker.exists() or marker.read_text() != "changed") and worker.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert marker.read_text() == "changed"
     finally:
