@@ -191,6 +191,9 @@ class TestCanonicalSkillAgentAccess(unittest.TestCase):
             mock.patch.object(server_mod, "DATA_DIR", self.data_dir),
             mock.patch.object(server_mod, "SKILLS_DIR", self.skills_dir),
             mock.patch.object(server_mod, "_SKILL_ACTIVATION_ENABLED", True),
+            # Keep the old access protocol fixture explicit as new defaults evolve.
+            mock.patch.object(server_mod, "_SKILL_IMMUTABLE_ADMISSION_ENABLED", False),
+            mock.patch.object(server_mod, "_SKILL_MODEL_LOADING_ENABLED", False),
             mock.patch.object(server_mod, "_MODEL_ROUTE_REGISTRY_ENABLED", False),
         ]
         for patcher in self.patchers:
