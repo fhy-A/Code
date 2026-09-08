@@ -26,16 +26,18 @@ async function main(){
       if(!['GET','HEAD','OPTIONS'].includes(method)){blockedWrites.push({path:url.pathname,method});return route.abort()}
       return route.continue();
     });
-    await context.addInitScript(({language,theme,token})=>{
+    const initialPreference=width===390?'v2':'legacy';
+    await context.addInitScript(({language,theme,token,initialPreference})=>{
       class Renderer{};window.marked={Renderer,setOptions(){},parse:v=>String(v??'')};
       localStorage.setItem('code-key-config',JSON.stringify([
         {key:'sk-synthetic-picker-a',name:'Synthetic A',source:'manual',connectionId:'manual_synthetic_a',enabled:true},
         {key:'sk-synthetic-picker-b',name:'Synthetic B',source:'manual',connectionId:'manual_synthetic_b',enabled:true},
       ]));localStorage.setItem('code-thinking','off');
+      if(initialPreference==='v2')localStorage.setItem('code-reasoning-v2',JSON.stringify({schemaVersion:2,intent:'high'}));
       localStorage.setItem('code-model','gpt-5.5');localStorage.setItem('code-model-route-ref','mr1_synthetic_gpt');localStorage.setItem('code-model-route-revision','1');
       localStorage.setItem('code-lang',language);localStorage.setItem('code-theme-mode',theme);localStorage.setItem('code-sidebar-hidden','1');
       localStorage.setItem('code-platform-auth',JSON.stringify({token,userId:'43',username:'synthetic-picker'}));
-    },{language,theme,token:host.platformToken});
+    },{language,theme,token:host.platformToken,initialPreference});
     await context.addInitScript(()=>{
       window.Code={core:{},features:{},services:{},agent:{},ui:{}};
       let i18nApi;Object.defineProperty(Code.core,'i18n',{configurable:true,get:()=>i18nApi,set(api){i18nApi=Object.freeze({...api,createI18nRuntime(options){const runtime=api.createI18nRuntime(options);window.__code083Lang=runtime.setLang;return runtime}})}});
@@ -47,12 +49,19 @@ async function main(){
     const trigger=page.locator('#modelPillBtn'),menu=page.locator('#modelReasoningDropdown');
     await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===4);
     await page.waitForLoadState('networkidle');
+    await expect(trigger).toHaveText(language==='zh'?'选择模型':'Select model',{useInnerText:true});
+    await expect(trigger).toHaveAttribute('aria-label',language==='zh'?'选择模型':'Select model');
+    await trigger.click();await expect(page.locator('#thinkingPillLabel')).toHaveText(language==='zh'?'请先选择模型':'Select a model first');
+    await page.locator('#thinkingPillBtn').click();await expect(page.locator('#reasoningPickerStatus')).toHaveText(language==='zh'?'请先选择模型':'Select a model first');
+    await expect(page.locator('#thinkingPillDropdown button:disabled')).toHaveCount(4);
+    await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-unselected.png`)});
+    await page.keyboard.press('Escape');await page.keyboard.press('Escape');
     // Two connections intentionally expose the same model; startup cannot pick one by name.
     await trigger.click();await page.locator('[data-picker-pane=model]').click();
     await page.locator('[data-route-ref=mr1_synthetic_gpt]').click();
     await expect(trigger).toContainText('gpt-5.5');await trigger.click();
     await expect(page.locator('#modelPickerRoot')).toBeVisible();
-    await expect(page.locator('#thinkingPillLabel')).toHaveText(language==='zh'?'旧设置待切换':'Legacy setting');
+    await expect(page.locator('#thinkingPillLabel')).toHaveText(initialPreference==='legacy'?(language==='zh'?'旧设置待切换':'Legacy setting'):(language==='zh'?'高':'High'));
     await page.locator('#thinkingPillBtn').click();await expect(page.locator('#thinkingPillDropdown [data-value]')).toHaveCount(4);
     await expect(page.locator('#thinkingPillDropdown [data-value=off]')).toHaveCount(0);
     await page.locator('#thinkingPillDropdown [data-value=high]').click();await expect(menu).toBeHidden();
@@ -80,10 +89,11 @@ async function main(){
     await page.reload();await page.waitForFunction(()=>document.documentElement.getAttribute('data-code-phase-one-shell-ready')==='true');
     await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===4);
     await page.waitForLoadState('networkidle');
+    await expect(trigger).toHaveText(language==='zh'?'选择模型':'Select model',{useInnerText:true});
     await trigger.click();await page.locator('[data-picker-pane=model]').click();await page.locator('[data-route-ref=mr1_synthetic_gpt]').click();
     await expect(trigger).toContainText(language==='zh'?'高':'High');
     assert.equal(await page.evaluate(()=>localStorage.getItem('code-thinking')),'off');
-    cases.push({runtime,language,theme,width,geometry,modelGeometry,legacyOptIn:true,unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true});
+    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true});
    }finally{await context.close()}
   }
   const after=await host.metrics();assert.equal(after.chatRequests.length-before.chatRequests.length,0);assert.equal(after.toolExecutions.length-before.toolExecutions.length,0);assert.deepEqual(blockedWrites,[]);assert.deepEqual(errors,[]);result={ok:true,cases,evidenceDir};

@@ -16033,20 +16033,24 @@ function updateReasoningPicker() {
   if (!menu) return;
   const model = getSelectedModel(), cap = selectedModelRoute()?.reasoning;
   const intent = reasoningPreference?.mode === "v2" ? reasoningPreference.intent : "";
-  const selectable = cap?.schemaVersion === 2 ? (cap.intents || []) : [];
+  const selectable = model && cap?.schemaVersion === 2 ? (cap.intents || []) : [];
   const invalid = reasoningPreference?.mode === "invalid"
     || (intent && !selectable.includes(intent))
     || (reasoningPreference?.mode === "legacy" && !["auto", "off", "high", "max"].includes(reasoningPreference.value));
-  const label = invalid ? t("reasoningPending") : intent ? reasoningIntentLabel(intent) : t("reasoningLegacy");
+  const label = !model ? t("reasoningSelectModelFirst")
+    : invalid ? t("reasoningPending") : intent ? reasoningIntentLabel(intent) : t("reasoningLegacy");
   els.thinkingPillLabel.textContent = label;
-  document.getElementById("modelReasoningLabel").textContent = label;
+  const effortLabel = document.getElementById("modelReasoningLabel");
+  effortLabel.textContent = model ? label : "";
+  effortLabel.hidden = !model;
+  document.getElementById("modelReasoningSeparator").hidden = !model;
   document.getElementById("modelPickerCurrent").textContent = model || t("selectModel");
-  els.modelPillBtn.setAttribute("aria-label", `${model || t("selectModel")} · ${label}`);
+  els.modelPillBtn.setAttribute("aria-label", model ? `${model} · ${label}` : t("selectModel"));
   menu.setAttribute("aria-label", t("reasoningEffort"));
   els.thinkingPillDropdown.querySelectorAll("[data-value]").forEach((option) => {
     option.disabled = !selectable.includes(option.dataset.value);
     option.setAttribute("role", "radio");
-    const selected = !invalid && option.dataset.value === intent;
+    const selected = Boolean(model) && !invalid && option.dataset.value === intent;
     option.setAttribute("aria-checked", String(selected));
     option.classList.toggle("selected", selected);
   });
@@ -16056,7 +16060,8 @@ function updateReasoningPicker() {
     option.setAttribute("aria-label", option.dataset.model || "");
   });
   const status = document.getElementById("reasoningPickerStatus");
-  status.textContent = cap?.reason === "reasoning_protocol_unsupported" ? t("reasoningProtocolUnsupported")
+  status.textContent = !model ? t("reasoningSelectModelFirst")
+    : cap?.reason === "reasoning_protocol_unsupported" ? t("reasoningProtocolUnsupported")
     : invalid ? t("reasoningSelectRequired")
     : !intent ? t("reasoningLegacy")
     : !selectable.includes("low") ? t("reasoningDefaultOnly") : "";

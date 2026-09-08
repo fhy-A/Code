@@ -6,6 +6,36 @@ import subprocess
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def test_picker_without_model_never_projects_saved_effort_or_legacy_status():
+    script = r'''
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const element=()=>({textContent:'',hidden:false,attributes:{},setAttribute(k,v){this.attributes[k]=v},classList:{selected:false,toggle(k,v){this.selected=v},contains(){return this.selected}}});
+const ids=Object.fromEntries(['modelReasoningDropdown','modelReasoningLabel','modelReasoningSeparator','modelPickerCurrent','reasoningPickerStatus'].map(id=>[id,element()]));
+const options=['default','low','medium','high'].map(value=>({...element(),dataset:{value}}));
+const els={thinkingPillLabel:element(),modelPillBtn:element(),thinkingPillDropdown:{...element(),querySelectorAll:()=>options},modelPillDropdown:{querySelectorAll:()=>[]}};
+let model='',cap={schemaVersion:2,intents:['default','low','medium','high']};
+const sandbox={document:{getElementById:id=>ids[id]},els,getSelectedModel:()=>model,selectedModelRoute:()=>({reasoning:cap}),t:x=>x};
+const app=fs.readFileSync('app.js','utf8'),start=app.indexOf('function reasoningIntentLabel('),end=app.indexOf('function closeModelPicker(',start);
+vm.runInNewContext(app.slice(start,end),sandbox);
+for(const preference of [...['auto','off','high','max','broken'].map(value=>({mode:'legacy',value})),...['default','low','medium','high'].map(intent=>({mode:'v2',intent})),{mode:'invalid'}]){
+ const before=JSON.stringify(preference);sandbox.reasoningPreference=preference;model='';sandbox.updateReasoningPicker();
+ assert.equal(els.modelPillBtn.attributes['aria-label'],'selectModel');
+ assert.equal(ids.modelReasoningLabel.textContent,'');assert(ids.modelReasoningLabel.hidden);assert(ids.modelReasoningSeparator.hidden);
+ assert.equal(els.thinkingPillLabel.textContent,'reasoningSelectModelFirst');assert.equal(ids.reasoningPickerStatus.textContent,'reasoningSelectModelFirst');
+ assert(options.every(o=>o.disabled&&o.attributes['aria-checked']==='false'));
+ model='gpt-5.5';sandbox.updateReasoningPicker();assert(!ids.modelReasoningLabel.hidden);assert(!ids.modelReasoningSeparator.hidden);
+ assert.equal(JSON.stringify(preference),before);
+ model='';sandbox.updateReasoningPicker();assert.equal(els.thinkingPillLabel.textContent,'reasoningSelectModelFirst');assert.equal(JSON.stringify(preference),before);
+}
+model='gpt-5.5';cap=undefined;sandbox.reasoningPreference={mode:'v2',intent:'high'};sandbox.updateReasoningPicker();
+assert.equal(els.thinkingPillLabel.textContent,'reasoningPending');assert.equal(ids.reasoningPickerStatus.textContent,'reasoningSelectRequired');
+console.log('ok');
+'''
+    result = subprocess.run(["node", "-"], input=script, cwd=ROOT, text=True,
+                            capture_output=True, encoding="utf-8")
+    assert result.returncode == 0, result.stderr
+
+
 def test_enqueue_freezes_intent_before_async_route_resolution():
     script = r'''
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
