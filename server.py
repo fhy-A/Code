@@ -6328,7 +6328,14 @@ def _agent_image_effective_fingerprint(call):
     ).hexdigest()
 
 
-def _normalize_agent_tool_calls(run, tool_calls, round_number):
+_AGENT_TOOL_JSON_OUTPUT_LIMIT_NOTE = (
+    " Model output token limit reached (finish_reason=length); "
+    "this invalid JSON tool call was not executed. "
+    "Send complete, valid JSON arguments in a new call; do not guess missing text."
+)
+
+
+def _normalize_agent_tool_calls(run, tool_calls, round_number, *, finish_reason=None):
     normalized = []
     for fallback_index, source in enumerate(tool_calls or []):
         if not isinstance(source, dict):
@@ -6361,6 +6368,8 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number):
             if name == "generate_image":
                 arguments_text = "{}"
                 parse_error = "generate_image arguments must be a valid JSON object"
+            if isinstance(exc, json.JSONDecodeError) and str(finish_reason or "").strip().lower() == "length":
+                parse_error += _AGENT_TOOL_JSON_OUTPUT_LIMIT_NOTE
         else:
             parse_error = ""
             arguments_text = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
@@ -6471,7 +6480,11 @@ def _agent_tool_failure_signature(result):
     if not isinstance(result, dict) or result.get("ok") is not False:
         return ""
     error_code = str(result.get("errorCode") or "").strip().lower()
-    error_text = " ".join(str(result.get("error") or "").split()).lower()
+    raw_error = str(result.get("error") or "")
+    if error_code == "invalid_tool_arguments":
+        # Presentation context must not reset an existing identical-failure streak.
+        raw_error = raw_error.removesuffix(_AGENT_TOOL_JSON_OUTPUT_LIMIT_NOTE)
+    error_text = " ".join(raw_error.split()).lower()
     return f"{error_code}\0{error_text}"
 
 
@@ -10985,6 +10998,7 @@ def _agent_skill_completion_reconcile(run):
     latest = rounds[-1]
     calls = _normalize_agent_tool_calls(
         run, latest.get("toolCalls") or [], int(latest.get("round") or len(rounds)),
+        finish_reason=latest.get("finishReason"),
     )
     if calls:
         return _agent_skill_completion_tool_batch(run, calls)
@@ -11385,7 +11399,10 @@ def _agent_run_worker(run):
                 run["recovery_state"] = None
                 run["error"] = ""
                 run["error_code"] = ""
-            tool_calls = _normalize_agent_tool_calls(run, model_result.get("toolCalls"), round_number)
+            tool_calls = _normalize_agent_tool_calls(
+                run, model_result.get("toolCalls"), round_number,
+                finish_reason=model_result.get("finishReason"),
+            )
             assistant_message = {
                 "role": "assistant",
                 "content": str(model_result.get("content") or ""),
@@ -24580,12 +24597,12 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files and directories in the current project. Use maxDepth for shallow recursion.",
+            "description": "List files/directories; default depth 1, clamped to 1-3, at most 200 entries. Common dependency/build directories are skipped. A nonexistent directory fails; an empty result does not prove every directory was readable. Example: {\"path\":\"src\",\"maxDepth\":2}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project-relative directory; empty means project root."},
-                    "maxDepth": {"type": "integer", "description": "Recursion depth, normally 1-3."},
+                    "path": {"type": "string", "description": "Optional starting directory; empty means project root. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection."},
+                    "maxDepth": {"type": "integer", "description": "Integer depth, normally 1-3; default 1. Values outside that range are currently clamped."},
                 },
                 "required": [],
                 "additionalProperties": False,
@@ -24596,13 +24613,13 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a project or attachment file. Text files support an optional inclusive line range.",
+            "description": "Read text or image/binary metadata from a project or attachments/ file. Text is decoded as UTF-8. Current line slicing applies to only the first 512 KiB preview, not the whole file; later or empty ranges can be unavailable. Ranges are one-based/inclusive; end must not precede start. Images/binary use separate visual limits. Example: {\"path\":\"src/main.py\",\"startLine\":1,\"endLine\":40}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project-relative file path."},
-                    "startLine": {"type": "integer", "description": "Optional one-based start line."},
-                    "endLine": {"type": "integer", "description": "Optional inclusive end line."},
+                    "path": {"type": "string", "description": "Required file path; attachments/ references are also supported. Use path; Server Agent legacy file_path is normalized only when it does not conflict with path. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection."},
+                    "startLine": {"type": "integer", "description": "Optional one-based inclusive start; default 1 when a range is requested. Lines beyond the 512 KiB preview can be unavailable."},
+                    "endLine": {"type": "integer", "description": "Optional inclusive end within the preview; omit to use its end. Do not reverse the range or infer missing content from truncation."},
                 },
                 "required": ["path"],
                 "additionalProperties": False,
@@ -24613,16 +24630,16 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "search_files",
-            "description": "Search project file names and text content with optional regex, type, glob, and context filters.",
+            "description": "Search file names and text. query is literal unless regex=true; glob filters paths. Content scanning skips files over 1 MiB, returns at most 100 matching files and normally 10 matches per file; unreadable files can be skipped. No matches is not an execution failure. Example: {\"query\":\"TODO|FIXME\",\"regex\":true,\"glob\":\"**/*.py\",\"contextAround\":1}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Literal substring unless regex=true; operators such as | are literal otherwise."},
-                    "path": {"type": "string", "description": "Optional project-relative search directory."},
-                    "regex": {"type": "boolean", "description": "Enable regular-expression matching."},
-                    "type": {"type": "string", "description": "Comma or space separated file extensions."},
-                    "glob": {"type": "string", "description": "Optional path glob; ** matches zero or more directory levels."},
-                    "contextAround": {"type": "integer", "description": "Context lines before and after each match."},
+                    "query": {"type": "string", "description": "Required nonempty query; use query, not pattern. |, ^, $ and .* are literal unless regex=true."},
+                    "path": {"type": "string", "description": "Optional search directory. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection."},
+                    "regex": {"type": "boolean", "description": "Boolean, default false. Set true only for a valid regular expression; malformed regex is rejected."},
+                    "type": {"type": "string", "description": "Optional comma/space-separated extensions, e.g. js,ts,py; not a regex."},
+                    "glob": {"type": "string", "description": "Optional path glob, e.g. **/*.py; ** includes project-root files. This does not make query a regex."},
+                    "contextAround": {"type": "integer", "description": "Use a nonnegative integer for surrounding lines; default 0, usually 1-3."},
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -24633,12 +24650,12 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "glob_files",
-            "description": "Find project files and directories whose names or relative paths match a glob pattern.",
+            "description": "Find names/relative paths with glob syntax, not text content or regex. ** includes zero or more directory levels. Common skipped directories and a 200-entry cap apply. If the starting directory has no matches, current behavior retries from the project root; inspect returned paths. Example: {\"pattern\":\"**/*.py\",\"path\":\"src\"}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Glob pattern such as **/*.py or *.js; ** matches zero or more directory levels."},
-                    "path": {"type": "string", "description": "Optional project-relative starting directory."},
+                    "pattern": {"type": "string", "description": "Nonempty glob such as **/*.py, *.js or src/**/*.tsx. Use search_files for text content."},
+                    "path": {"type": "string", "description": "Optional starting directory; empty means project root. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection."},
                 },
                 "required": ["pattern"],
                 "additionalProperties": False,
@@ -24825,17 +24842,17 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Create a project file or replace its complete contents. Existing files are backed up before replacement.",
+            "description": "Create a UTF-8 text file or replace complete contents; parent directories are created and existing files backed up. Empty content is valid. Supply complete JSON with correctly escaped quotes, backslashes and newlines; the actual content should contain intended text/newlines, not extra escaping. CRLF/CR normalize to LF. Existing permissions/authorization apply; an I/O failure does not prove no write occurred. Example: {\"path\":\"output/note.txt\",\"content\":\"hello\\n\"}.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Project-relative file path.",
+                        "description": "Required nonempty file path; an existing directory is rejected. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection.",
                     },
                     "content": {
                         "type": "string",
-                        "description": "Complete UTF-8 text content to write.",
+                        "description": "Required complete UTF-8 text, including empty string to intentionally empty a file. Use JSON string escaping; never guess missing text to repair a truncated call.",
                     },
                 },
                 "required": ["path", "content"],
@@ -24847,13 +24864,13 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "delete_file",
-            "description": "Delete a project file or empty directory. Files are backed up before deletion.",
+            "description": "Delete a file or empty directory under existing permissions/authorization; files are backed up. Nonempty directories are rejected by this tool: inspect their contents and confirm the intended deletion scope. Other existing tools still follow their own authorization and safety contracts; do not switch to commands to bypass authorization or expand unconfirmed deletion scope. Missing targets normally fail; do not assume success or blindly repeat an uncertain deletion. Example: {\"path\":\"output/obsolete.txt\"}.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Project-relative file or empty-directory path.",
+                        "description": "Required nonempty file/empty-directory path; confirm the exact target. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection.",
                     },
                 },
                 "required": ["path"],
@@ -24901,14 +24918,14 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "propose_edit",
-            "description": "Prepare a reviewable file edit. The server never writes until the permission profile permits it and any required authorization is approved.",
+            "description": "Prepare a diff, then apply only as current permissions/authorization allow. Use either newContent for the entire file (empty string is valid), or oldText together with newText for a fragment. A complete fragment pair takes precedence if both modes are supplied. Read current text first; provide a unique exact fragment with context. Existing matching tolerates whitespace/similarity and replaces the first match; do not rely on fuzzy selection. Same content/no diff or stale application can fail. Example: {\"path\":\"src/main.py\",\"oldText\":\"return 1\",\"newText\":\"return 2\"}.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project-relative file path."},
-                    "oldText": {"type": "string", "description": "Existing fragment to replace."},
-                    "newText": {"type": "string", "description": "Replacement fragment."},
-                    "newContent": {"type": "string", "description": "Complete replacement content for the file."},
+                    "path": {"type": "string", "description": "Required target file path. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection."},
+                    "oldText": {"type": "string", "description": "Original fragment copied from a recent read, paired with newText. Include enough unique context; do not guess stale text."},
+                    "newText": {"type": "string", "description": "Replacement fragment paired with oldText; empty string removes the matched fragment. Identical old/new text is rejected."},
+                    "newContent": {"type": "string", "description": "Complete replacement text, including empty string. Use this field, not content. Omit fragment fields for whole-file mode; a complete oldText/newText pair wins if mixed."},
                 },
                 "required": ["path"],
                 "additionalProperties": False,

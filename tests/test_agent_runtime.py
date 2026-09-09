@@ -3434,6 +3434,170 @@ raise SystemExit(2)
             {"path": "README.md"},
         )
 
+    def test_budget_parse_feedback_is_bound_to_own_round_and_preserves_json_diagnostics(self):
+        raw = '{"path":"note.txt","content":"partial'
+        for finish in (None, "", "stop", "tool_calls", "length"):
+            with self.subTest(finish=finish):
+                call = server_mod._normalize_agent_tool_calls(
+                    {"id": "synthetic", "rounds": [{"finishReason": "length"}]},
+                    [{"function": {"name": "write_file", "arguments": raw}}], 2,
+                    finish_reason=finish,
+                )[0]
+                self.assertEqual(call["function"]["arguments"], raw)
+                self.assertIsNone(call["arguments"])
+                self.assertIn("Unterminated string", call["parseError"])
+                self.assertEqual("output token limit" in call["parseError"], finish == "length")
+                if finish == "length":
+                    self.assertIn("was not executed", call["parseError"])
+                    self.assertIn("complete, valid JSON", call["parseError"])
+        for raw in ('{"path":"empty.txt","content":""}', '{"path":"x"}', '[]'):
+            with self.subTest(complete_json=raw):
+                call = server_mod._normalize_agent_tool_calls(
+                    {"id": "synthetic"}, [{"function": {"name": "write_file", "arguments": raw}}], 1,
+                    finish_reason="length",
+                )[0]
+                self.assertNotIn("output token limit", call["parseError"])
+                if raw.startswith('{"path":"empty.txt"'):
+                    self.assertEqual(call["validationErrors"], [])
+                    self.assertEqual(call["arguments"]["content"], "")
+        alias = server_mod._normalize_agent_tool_calls(
+            {"id": "synthetic"}, [{"function": {"name": "read_file", "arguments": '{"path":"a","file_path":"b"}'}}], 1,
+            finish_reason="length",
+        )[0]
+        self.assertEqual(alias["parseError"], "")
+        self.assertTrue(any(error["reason"] == "conflict" for error in alias["validationErrors"]))
+
+    def test_budget_feedback_preserves_old_failure_signature_and_mixed_history_count(self):
+        raw = '{"path":"unfinished'
+        source = [{"function": {"name": "read_file", "arguments": raw}}]
+        old = server_mod._normalize_agent_tool_calls({"id": "synthetic"}, source, 1)[0]
+        new = server_mod._normalize_agent_tool_calls({"id": "synthetic"}, source, 2, finish_reason="length")[0]
+        old_result = server_mod._agent_invalid_tool_arguments_result("read_file", parse_error=old["parseError"])
+        new_result = server_mod._agent_invalid_tool_arguments_result("read_file", parse_error=new["parseError"])
+        signature = server_mod._agent_tool_failure_signature(old_result)
+        self.assertEqual(server_mod._agent_tool_failure_signature(new_result), signature)
+        other_code = {**new_result, "errorCode": "file_io_error"}
+        self.assertEqual(server_mod._agent_tool_failure_signature(other_code),
+                         "file_io_error\0" + " ".join(new_result["error"].split()).lower())
+        unrelated_suffix = {**new_result, "error": new_result["error"] + " unrelated detail"}
+        self.assertEqual(server_mod._agent_tool_failure_signature(unrelated_suffix),
+                         "invalid_tool_arguments\0" + " ".join(unrelated_suffix["error"].split()).lower())
+        self.assertEqual(old["fingerprint"], new["fingerprint"])
+        run = {"tool_executions": {
+            "old": {"status": "completed", "outcome": "failed", "fingerprint": old["fingerprint"], "result": old_result},
+            "new": {"status": "completed", "outcome": "failed", "fingerprint": new["fingerprint"], "result": new_result},
+        }}
+        self.assertEqual(server_mod._agent_identical_tool_failure_count(run, new["fingerprint"], signature), 2)
+
+    def test_budget_truncated_arguments_use_existing_correction_round_without_extra_execution(self):
+        def frame(call_id, arguments, finish):
+            return {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": {"name": "write_file", "arguments": arguments}}]}, "finish_reason": finish}]}
+        raw = '{"path":"created.txt","content":"unfinished'
+        content = 'UTF-8 中文 "quotes" \\ slash\nsecond\r\n'
+        good = json.dumps({"path": "created.txt", "content": content}, ensure_ascii=False)
+        # The invalid round is real streamed fragments; the next valid length
+        # round must still execute rather than being categorically blocked.
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [frame("budget-bad", raw[:22], None), {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": raw[22:]}}]}, "finish_reason": "length"}]}],
+                [frame("budget-good", good, "length")],
+                [{"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]}],
+            ]
+        with mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:
+            run = server_mod._create_agent_run(
+                "session-budget-correction", {"model": "test-model", "max_tokens": 4096, "messages": [{"role": "user", "content": "write a synthetic file"}]},
+                self.base_url, ["fixture-budget-key"], allowed_tools=["write_file"], permission_profile="bypass", max_rounds=4,
+            )
+            self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(execute_mock.call_count, 1)
+        executions = snapshot["toolExecutions"]
+        self.assertEqual(len(executions), 2)
+        failure, success = executions
+        self.assertEqual(failure["result"]["errorCode"], "invalid_tool_arguments")
+        self.assertEqual(failure["result"]["fieldErrors"], [])
+        self.assertIn("output token limit", failure["result"]["error"])
+        self.assertIn("Unterminated string", failure["result"]["error"])
+        # Existing UI compacts an error to 220 characters; preserve all core facts.
+        for detail in ("Unterminated string", "finish_reason=length", "was not executed"):
+            self.assertIn(detail, failure["result"]["error"][:220])
+        private_executions = server_mod._agent_run_record(run)["toolExecutions"]
+        self.assertFalse(private_executions["budget-bad"].get("operationId"))
+        self.assertFalse(private_executions["budget-bad"].get("authorizationDecision"))
+        self.assertTrue(success["result"]["ok"])
+        self.assertTrue(private_executions["budget-good"].get("operationId"))
+        self.assertEqual((self.project_dir / "created.txt").read_bytes(), server_mod.normalize_text_newlines(content).encode("utf-8"))
+        self.assertTrue(all(payload["max_tokens"] == 4096 for payload in _AgentUpstream.payloads))
+        tool_message = next(message for message in _AgentUpstream.payloads[1]["messages"] if message.get("role") == "tool")
+        self.assertIn("was not executed", tool_message["content"])
+        self.assertEqual(_AgentUpstream.payloads[0]["tools"][0]["function"]["parameters"], server_mod._SERVER_TOOL_DEFINITIONS["write_file"]["function"]["parameters"])
+        # Existing persisted fields carry the diagnostic across restart.
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        self.assertIn("output token limit", restored["tool_executions"]["budget-bad"]["result"]["error"])
+        self.assertEqual(_AgentUpstream.calls, 3)
+
+    def test_budget_parse_failure_preserves_existing_repeated_failure_signal(self):
+        rounds = []
+        for index in range(3):
+            rounds.append([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": f"budget-repeat-{index}", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"unfinished'}}]}, "finish_reason": "length"}]}])
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = rounds + [[{"choices": [{"delta": {"content": "cannot complete the arguments"}, "finish_reason": "stop"}]}]]
+        with mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:
+            run = server_mod._create_agent_run(
+                "session-budget-repeat", {"model": "test-model", "messages": [{"role": "user", "content": "repeat a synthetic invalid read"}]},
+                self.base_url, ["fixture-key"], allowed_tools=["read_file"], max_rounds=5,
+            )
+            self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(execute_mock.call_count, 0)
+        self.assertEqual(_AgentUpstream.calls, 4)
+        self.assertEqual([x["result"]["failureCount"] for x in snapshot["toolExecutions"]], [1, 2, 3])
+        self.assertTrue(snapshot["toolExecutions"][-1]["result"]["retryLimitReached"])
+
+    def test_file_tool_descriptions_preserve_parameter_schemas_and_valid_examples(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "file-tool-parameter-schemas.json").read_text(encoding="utf-8"))
+        script = "global.window={Code:{agent:{modelRequest:{}}}};eval(require('node:fs').readFileSync('src/agent/tools.js','utf8'));console.log(JSON.stringify(window.Code.agent.tools.nativeTools));"
+        frontend = json.loads(subprocess.check_output(["node", "-e", script], cwd=Path(__file__).resolve().parent.parent, text=True, encoding="utf-8"))
+        frontend = {entry["function"]["name"]: entry for entry in frontend}
+        def strip_descriptions(value):
+            if isinstance(value, dict):
+                return {key: strip_descriptions(item) for key, item in value.items() if key != "description"}
+            if isinstance(value, list):
+                return [strip_descriptions(item) for item in value]
+            return value
+        for name, expected in fixture["parameters"].items():
+            for source, marker in [(server_mod._SERVER_TOOL_DEFINITIONS[name], "Example: "), (frontend[name], "例：")]:
+                with self.subTest(name=name, source=marker):
+                    definition = source["function"]
+                    self.assertEqual(strip_descriptions(definition["parameters"]), expected)
+                    example = json.JSONDecoder().raw_decode(definition["description"].split(marker, 1)[1])[0]
+                    self.assertEqual(server_mod._registered_tool_argument_errors(name, example), [])
+                    self.assertTrue(all(field.get("description") for field in definition["parameters"]["properties"].values()))
+                    if name == "write_file":
+                        self.assertEqual(example["content"], "hello\n")
+        for name, terms in {"read_file": ("512",), "list_files": ("200",), "glob_files": ("200", "**"), "search_files": ("100", "10", "regex", "glob"), "propose_edit": ("oldText", "newText", "newContent"), "write_file": ("UTF-8", "JSON", "CRLF"), "delete_file": ("output/obsolete.txt",)}.items():
+            for term in terms:
+                self.assertIn(term, server_mod._SERVER_TOOL_DEFINITIONS[name]["function"]["description"])
+                self.assertIn(term, frontend[name]["function"]["description"])
+
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[{"choices": [{"delta": {"content": "definitions observed"}, "finish_reason": "stop"}]}]]
+        run = server_mod._create_agent_run(
+            "session-file-tool-descriptions", {"model": "test-model", "messages": [{"role": "user", "content": "inspect definitions only"}]},
+            self.base_url, ["fixture-key"], allowed_tools=list(fixture["parameters"]), permission_profile="bypass", max_rounds=1,
+        )
+        self._wait_terminal(run)
+        self.assertEqual(_AgentUpstream.calls, 1)
+        self.assertEqual(server_mod._agent_snapshot(run, 0)["toolExecutions"], [])
+        sent = {entry["function"]["name"]: entry for entry in _AgentUpstream.payloads[0]["tools"]}
+        for name in fixture["parameters"]:
+            self.assertEqual(sent[name], server_mod._SERVER_TOOL_DEFINITIONS[name])
+
     def test_agent_rejects_invalid_tool_arguments_without_calling_executor(self):
         with _AgentUpstream.scripted_lock:
             _AgentUpstream.scripted_rounds = [

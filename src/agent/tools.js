@@ -201,7 +201,7 @@ const nativeTools = [
 
       name: "list_files",
 
-      description: "列出项目目录中的文件和文件夹，用于了解目录结构。默认只返回一层，可设置 maxDepth 做浅层递归。",
+      description: "列出文件与目录：默认1层，深度限制1–3层，最多200项，跳过常见依赖/构建目录。目录不存在会失败；空结果不保证每个目录都可读。例：{\"path\":\"src\",\"maxDepth\":2}。",
 
       parameters: {
 
@@ -213,7 +213,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "可选的相对目录，留空表示项目根目录。",
+            description: "可选起始目录，空值表示项目根。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
@@ -221,7 +221,7 @@ const nativeTools = [
 
             type: "integer",
 
-            description: "递归层数，建议 1-3，默认 1。",
+            description: "整数深度，建议1–3，默认1；当前会将超范围值限制到1–3。",
 
           },
 
@@ -245,7 +245,7 @@ const nativeTools = [
 
       name: "read_file",
 
-      description: "读取项目目录或 attachments/ 下的文本与图片文件。文本支持按行读取；图片读取后会自动作为视觉输入提供给模型。",
+      description: "读取项目或attachments/文件的文本，或图片/二进制信息。文本按UTF-8解码；当前先截前512KiB再按行筛选，后段行与空范围可能不可用。行号从1开始且两端包含，结束不能早于开始；图片/二进制另有视觉上限。例：{\"path\":\"src/main.py\",\"startLine\":1,\"endLine\":40}。",
 
       parameters: {
 
@@ -257,7 +257,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "相对项目根目录的文件路径，例如 code/app.js",
+            description: "必填文件路径，也支持attachments/引用。优先用path；Server Agent仅在无冲突时兼容file_path别名。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
@@ -265,7 +265,7 @@ const nativeTools = [
 
             type: "integer",
 
-            description: "可选，起始行号，从 1 开始。",
+            description: "可选、从1开始且包含该行；指定范围时默认1。超出前512KiB预览的行可能不可用。",
 
           },
 
@@ -273,7 +273,7 @@ const nativeTools = [
 
             type: "integer",
 
-            description: "可选，结束行号，包含该行。",
+            description: "可选且包含该行，省略则取预览末行；不要反向指定范围，不要从截断推断后续文件内容。",
 
           },
 
@@ -297,7 +297,7 @@ const nativeTools = [
 
       name: "search_files",
 
-      description: "按文件名和文件内容搜索项目内文件，支持关键词、正则、文件类型过滤和上下文行。默认跳过 node_modules、.git、构建产物等目录。",
+      description: "搜索文件名与正文。query默认是字面文本，regex=true才解释正则；glob只过滤路径。正文跳过超过1MiB的文件，最多100个匹配文件、每文件通常10处匹配，不可读文件可能跳过。无匹配不等于执行失败。例：{\"query\":\"TODO|FIXME\",\"regex\":true,\"glob\":\"**/*.py\",\"contextAround\":1}。",
 
       parameters: {
 
@@ -309,7 +309,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "搜索关键词（子串匹配）或正则表达式（当 regex=true 时）。",
+            description: "必填非空query，不使用pattern替代；只有regex=true时才解释 |、^、$、.*。",
 
           },
 
@@ -317,7 +317,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "可选的相对搜索目录，留空表示项目根目录。",
+            description: "可选搜索目录。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
@@ -325,7 +325,7 @@ const nativeTools = [
 
             type: "boolean",
 
-            description: "是否启用正则匹配，默认 false。",
+            description: "布尔值，默认false；仅合法正则使用true，错误正则会被拒绝。",
 
           },
 
@@ -333,7 +333,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "文件类型过滤，如 \"js,ts,py\" 只搜索这些扩展名的文件。",
+            description: "可选扩展名列表，逗号或空格分隔，例如js,ts,py；不是正则。",
 
           },
 
@@ -341,7 +341,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "文件名 glob 模式，如 \"**/*.ts\" 只搜索匹配该模式的文件。",
+            description: "可选路径glob，如 **/*.py；**包含根目录文件，不会让query自动变成正则。",
 
           },
 
@@ -349,7 +349,7 @@ const nativeTools = [
 
             type: "integer",
 
-            description: "每个匹配行前后显示的行数，默认 0。",
+            description: "匹配行前后的非负整数行数，默认0，通常用1–3。",
 
           },
 
@@ -373,7 +373,7 @@ const nativeTools = [
 
       name: "glob_files",
 
-      description: "按 glob 模式匹配项目中的文件名和路径，用于快速查找符合命名规范的文件。默认跳过依赖、构建产物等目录。",
+      description: "用glob查找文件名/相对路径，不搜索正文，也不使用正则语法。**匹配零层或多层目录；跳过常见目录，最多200项。起始目录无匹配时，当前会回到项目根重查，请检查返回路径。例：{\"pattern\":\"**/*.py\",\"path\":\"src\"}。",
 
       parameters: {
 
@@ -385,7 +385,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "glob 模式，如 \"**/*.py\"、\"*.js\"、\"src/**/*.tsx\"。",
+            description: "必填非空glob，例如 **/*.py、*.js、src/**/*.tsx；搜索正文请用search_files。",
 
           },
 
@@ -393,7 +393,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "可选的搜索起始目录，留空表示项目根目录。",
+            description: "可选起始目录，空值表示项目根。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
@@ -417,7 +417,7 @@ const nativeTools = [
 
       name: "propose_edit",
 
-      description: "生成文件修改方案和 unified diff。该工具不会直接写入文件，必须等待用户点击应用修改。",
+      description: "生成diff，再按当前权限/审批应用。二选一：newContent整文件内容（可为空），或oldText+newText片段替换；混用时完整片段参数对优先。先读取当前文件，提供有唯一上下文的精确原文。现有匹配会容忍空白/相似度并替换首个命中，不要依赖模糊选择。同内容/无diff或应用时文件变化可失败。例：{\"path\":\"src/main.py\",\"oldText\":\"return 1\",\"newText\":\"return 2\"}。",
 
       parameters: {
 
@@ -429,7 +429,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "相对项目根目录的文件路径。",
+            description: "必填目标文件路径。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
@@ -437,7 +437,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "需要替换的原文片段。局部修改时使用。",
+            description: "从最近读取结果复制的原文，与newText配对，包含足够唯一上下文，不猜测过时内容。",
 
           },
 
@@ -445,7 +445,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "替换后的新片段。局部修改时使用。",
+            description: "与oldText配对的新片段，空字符串删除命中片段；与原文相同会拒绝。",
 
           },
 
@@ -453,7 +453,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "完整的新文件内容。新建文件或整文件重写时使用。",
+            description: "完整新内容，可为空；用newContent而非content。整文件模式省略片段字段；混用时完整oldText/newText参数对优先。",
 
           },
 
@@ -645,7 +645,7 @@ const nativeTools = [
 
       name: "write_file",
 
-      description: "创建新文件或覆盖已有文件。会自动备份原文件到 data/file-backups/。需要用户确认后才会执行。",
+      description: "创建UTF-8文本文件或整文件覆盖；自动创建父目录，覆盖前备份，空content合法。必须提供完整JSON，并正确转义字符串中的引号、反斜线与换行；实际内容应是预期文本/换行，不要重复转义。CRLF/CR会规范化为LF。仍遵守当前权限与审批；I/O失败不保证未写入。例：{\"path\":\"output/note.txt\",\"content\":\"hello\\n\"}。",
 
       parameters: {
 
@@ -657,7 +657,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "相对项目根目录的文件路径。",
+            description: "必填非空文件路径；已有目录会被拒绝。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
@@ -665,7 +665,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "文件的完整内容。",
+            description: "完整UTF-8文本；空字符串可用于明确清空文件。使用JSON字符串转义，禁止猜测缺失内容补全截断调用。",
 
           },
 
@@ -689,7 +689,7 @@ const nativeTools = [
 
       name: "delete_file",
 
-      description: "删除项目内的文件或空目录。文件会自动备份到 data/file-backups/。需要用户确认后才会执行。",
+      description: "按当前权限/审批删除文件或空目录，文件删除前备份。本工具拒绝非空目录：先检查内容并确认删除范围。其他现有工具仍按各自授权与安全合同处理，不得换用命令绕过授权或扩大未经确认的删除范围。目标缺失通常失败；不要假定已删除或盲目重复不确定的删除。例：{\"path\":\"output/obsolete.txt\"}。",
 
       parameters: {
 
@@ -701,7 +701,7 @@ const nativeTools = [
 
             type: "string",
 
-            description: "相对项目根目录的文件或空目录路径。",
+            description: "必填非空文件或空目录路径，先确认精确目标。优先使用项目相对路径。当前公共解析器也可能接受用户主目录内路径，或将其他路径转到项目 output/同名文件；不要假定强项目沙箱或依赖重定向猜目标。",
 
           },
 
