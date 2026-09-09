@@ -3090,10 +3090,10 @@ function bindCopyButtons() {
 
 
 
-// Only the same-origin endpoint performs network discovery and image validation.
-// Cache terminal failures: redraw must not create a fresh retry budget before expiry.
-const _FAVICON_RETRY_DELAY_MS = 1000;
-const _FAVICON_REQUEST_TIMEOUT_MS = 10000;
+// Browser images use two bounded candidates. Static input filtering cannot
+// provide the server proxy's DNS pinning or image-byte validation guarantees.
+const _FAVICON_GOOGLE_TIMEOUT_MS = 4000;
+const _FAVICON_ORIGIN_TIMEOUT_MS = 3000;
 const _FAVICON_CACHE_CAPACITY = 128;
 const _FAVICON_NEGATIVE_TTL_MS = 5 * 60 * 1000;
 const _FAVICON_POSITIVE_TTL_MS = 6 * 60 * 60 * 1000;
@@ -3108,6 +3108,7 @@ function _decorateFaviconImage(img) {
   img.className = "ext-favicon";
   img.alt = "";
   img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
   return img;
 }
 
@@ -3116,11 +3117,26 @@ function _connectedFaviconSlots(entry) {
   return [...entry.slots];
 }
 
+function _normalizeFaviconOrigin(value) {
+  const raw = String(value || "").trim();
+  if (!raw || /[\u0000-\u0020\u007f\\]/.test(raw)) return "";
+  try {
+    const parsed = new URL(raw);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.port) return "";
+    const authority = raw.match(/^https?:\/\/([^/?#]*)/i)?.[1] || "";
+    if (!authority || authority.includes("@")) return "";
+    const host = parsed.hostname.toLowerCase().replace(/\.+$/, "");
+    if (!host || host.length > 253 || host.startsWith("[") || /^\d+\.\d+\.\d+\.\d+$/.test(host)) return "";
+    if (!host.includes(".") || host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return "";
+    if (host.split(".").some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return "";
+    return `${parsed.protocol}//${host}`;
+  } catch (_) { return ""; }
+}
+
 function _disposeFaviconEntry(entry) {
-  if (entry.timer !== null) window.clearTimeout(entry.timer);
-  entry.timer = null;
-  entry.controller?.abort();
-  if (entry.url) URL.revokeObjectURL(entry.url);
+  for (const pending of [...entry.pendingImages]) pending.cancel();
+  entry.image?.removeAttribute("src");
+  entry.image = null;
   entry.url = "";
   entry.slots.clear();
 }
@@ -3133,7 +3149,7 @@ function _pruneFaviconConsumers() {
       continue;
     }
     if (_connectedFaviconSlots(entry).length) continue;
-    if (entry.status === "queued" || entry.status === "retry-wait" || entry.status === "loading") {
+    if (entry.status === "queued" || entry.status === "loading") {
       entry.status = "cancelled";
       _disposeFaviconEntry(entry);
       _faviconCache.delete(cacheKey);
@@ -3145,15 +3161,42 @@ function _pruneFaviconConsumers() {
   }
 }
 
-function _showCachedFavicon(slot, entry) {
-  if (!slot || slot.isConnected === false || !entry.url) return;
-  const img = _decorateFaviconImage(document.createElement("img"));
-  const url = entry.url;
-  img.addEventListener("load", () => {
-    if (slot.isConnected !== false && entry.url === url && img.naturalWidth > 1 && img.naturalHeight > 1) slot.replaceChildren(img);
-  }, {once: true});
-  // A failed browser decode leaves the original glyph in place.
-  img.src = url;
+function _loadFaviconImage(entry, url, timeoutMs) {
+  return new Promise(resolve => {
+    const img = _decorateFaviconImage(new Image());
+    let settled = false;
+    let timer;
+    const pending = {cancel: () => finish("cancelled")};
+    const finish = status => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      entry.pendingImages.delete(pending);
+      img.onload = img.onerror = null;
+      if (status !== "load") img.removeAttribute("src");
+      resolve({status, img});
+    };
+    entry.pendingImages.add(pending);
+    img.onload = () => finish(img.naturalWidth > 1 && img.naturalHeight > 1 ? "load" : "error");
+    img.onerror = () => finish("error");
+    timer = window.setTimeout(() => finish("timeout"), timeoutMs);
+    try { img.src = url; } catch (_) { finish("error"); }
+  });
+}
+
+function _showCachedFavicon(slot, entry, firstDisplay = false) {
+  if (!slot || slot.isConnected === false || !entry.image) return;
+  // Drawing a decoded cross-origin image is permitted; never read/export pixels.
+  // Reusing this resource avoids new requests even when the response is no-store.
+  const canvas = document.createElement("canvas");
+  canvas.className = "ext-favicon";
+  canvas.width = canvas.height = 32;
+  canvas.setAttribute("aria-hidden", "true");
+  if (!firstDisplay) canvas.style.animation = "none";
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  try { context.drawImage(entry.image, 0, 0, 32, 32); } catch (_) { return; }
+  slot.replaceChildren(canvas);
 }
 
 function _drainFaviconLoadQueue() {
@@ -3181,81 +3224,32 @@ function _queueFaviconLoad(cacheKey, entry) {
   _drainFaviconLoadQueue();
 }
 
-function _faviconRetryDelay(value) {
-  const seconds = Number(value);
-  const milliseconds = value && Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value || "") - Date.now();
-  if (Number.isFinite(milliseconds) && milliseconds > 10000) return null;
-  return Number.isFinite(milliseconds) ? Math.max(_FAVICON_RETRY_DELAY_MS, milliseconds) : _FAVICON_RETRY_DELAY_MS;
-}
-
 async function _startFaviconLoad(cacheKey, entry) {
   entry.status = "loading";
-  entry.attempts += 1;
-  const controller = new AbortController();
-  entry.controller = controller;
-  let objectUrl = "";
-  let transient = false;
-  let retryDelay = _FAVICON_RETRY_DELAY_MS;
-  let timeout = false;
-  const deadlineTimer = window.setTimeout(() => { timeout = true; controller.abort(); }, _FAVICON_REQUEST_TIMEOUT_MS);
   const current = () => !_faviconClosed && _faviconCache.get(cacheKey) === entry && entry.status === "loading";
-  try {
-    let response;
-    try {
-      response = await fetch(entry.source, {signal: controller.signal, credentials: "same-origin", redirect: "error", referrerPolicy: "no-referrer"});
-    } catch (error) { transient = !controller.signal.aborted || timeout; throw error; }
+  const candidates = [
+    {kind: "google", url: `https://www.google.com/s2/favicons?domain=${encodeURIComponent(cacheKey)}&sz=32`, timeout: _FAVICON_GOOGLE_TIMEOUT_MS},
+    {kind: "origin", url: `${cacheKey}/favicon.ico`, timeout: _FAVICON_ORIGIN_TIMEOUT_MS},
+  ];
+  for (const candidate of candidates) {
     if (!current()) return;
-    if (!response.ok) {
-      transient = [408, 425, 429].includes(response.status) || response.status >= 500;
-      retryDelay = _faviconRetryDelay(response.headers.get("Retry-After"));
-      await response.body?.cancel();
-      throw new Error("favicon unavailable");
-    }
-    let blob;
-    try { blob = await response.blob(); }
-    catch (error) { transient = !controller.signal.aborted || timeout; throw error; }
-    if (!current()) return;
-    if (!blob.size || blob.size > 256 * 1024 || !blob.type.startsWith("image/")) throw new Error("invalid favicon");
-    objectUrl = URL.createObjectURL(blob);
-    const img = _decorateFaviconImage(document.createElement("img"));
-    await new Promise((resolve, reject) => {
-      const abort = () => finish(new Error("favicon cancelled"));
-      const finish = (error) => {
-        controller.signal.removeEventListener("abort", abort);
-        img.onload = img.onerror = null;
-        error ? reject(error) : resolve();
-      };
-      img.onload = () => finish(img.naturalWidth <= 1 || img.naturalHeight <= 1 ? new Error("invalid favicon dimensions") : null);
-      img.onerror = () => finish(new Error("favicon decode failed"));
-      controller.signal.addEventListener("abort", abort, {once: true});
-      if (controller.signal.aborted) abort(); else img.src = objectUrl;
-    });
-    if (!current() || controller.signal.aborted) return;
+    entry.attempts += 1;
+    const {status, img} = await _loadFaviconImage(entry, candidate.url, candidate.timeout);
+    if (!current() || status === "cancelled") return;
+    if (status !== "load") continue;
     entry.status = "success";
     entry.expiresAt = Date.now() + _FAVICON_POSITIVE_TTL_MS;
-    entry.url = objectUrl;
-    objectUrl = "";
+    entry.url = candidate.url;
+    entry.image = img;
+    entry.sourceKind = candidate.kind;
     const slots = _connectedFaviconSlots(entry);
-    slots.forEach((slot, index) => index === 0 ? slot.replaceChildren(img) : _showCachedFavicon(slot, entry));
-  } catch (_) {
-    if (!current()) return;
-    if ((transient || timeout) && retryDelay !== null && entry.attempts < 2 && _connectedFaviconSlots(entry).length) {
-      entry.status = "retry-wait";
-      entry.timer = window.setTimeout(() => {
-        entry.timer = null;
-        if (_faviconCache.get(cacheKey) !== entry || entry.status !== "retry-wait") return;
-        if (_connectedFaviconSlots(entry).length) _queueFaviconLoad(cacheKey, entry);
-        else { entry.status = "cancelled"; _faviconCache.delete(cacheKey); }
-      }, retryDelay);
-    } else {
-      entry.status = "failed";
-      entry.expiresAt = Date.now() + _FAVICON_NEGATIVE_TTL_MS;
-      entry.slots.clear();
-    }
-  } finally {
-    window.clearTimeout(deadlineTimer);
-    if (entry.controller === controller) entry.controller = null;
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
+    slots.forEach(slot => _showCachedFavicon(slot, entry, true));
+    return;
+  }
+  if (current()) {
+    entry.status = "failed";
+    entry.expiresAt = Date.now() + _FAVICON_NEGATIVE_TTL_MS;
+    entry.slots.clear();
   }
 }
 
@@ -3279,14 +3273,8 @@ function bindExtLinkFavicons() {
     if (slot.dataset.bound) return;
     slot.dataset.bound = "1";
     const link = slot.closest("a.ext-link");
-    let host = "", scheme = "";
-    try {
-      const parsed = new URL(link?.getAttribute("href") || "");
-      host = parsed.hostname;
-      scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
-    } catch (_) { /* keep the glyph */ }
-    if (!host || !["http", "https"].includes(scheme)) return;
-    const cacheKey = `${scheme}://${host}`;
+    const cacheKey = _normalizeFaviconOrigin(link?.getAttribute("href"));
+    if (!cacheKey) return;
     let entry = _faviconCache.get(cacheKey);
     if (entry?.expiresAt && entry.expiresAt <= Date.now()) {
       _disposeFaviconEntry(entry);
@@ -3308,8 +3296,8 @@ function bindExtLinkFavicons() {
       _disposeFaviconEntry(reusable[1]);
       _faviconCache.delete(reusable[0]);
     }
-    entry = {status: "idle", source: `/api/favicon?scheme=${encodeURIComponent(scheme)}&host=${encodeURIComponent(host)}`,
-      attempts: 0, expiresAt: 0, timer: null, controller: null, url: "", slots: new Set([slot])};
+    entry = {status: "idle", attempts: 0, expiresAt: 0, url: "", sourceKind: "", image: null,
+      pendingImages: new Set(), slots: new Set([slot])};
     _faviconCache.set(cacheKey, entry);
     _queueFaviconLoad(cacheKey, entry);
   });

@@ -16718,6 +16718,7 @@ const test = base.test.extend({
     const sessionPutTimeline = [];
     const sessionPutRequests = new WeakMap();
     const blockedRequests = [];
+    const faviconBrowserLoads = [];
     const diagnosticSteps = [];
     const domTimeline = [];
     const observedAgentRunIds = new Set();
@@ -17104,6 +17105,15 @@ const test = base.test.extend({
       contextRouteHandler = async (route) => {
         const request = route.request();
         const url = new URL(request.url());
+        if (/CJK bare URL/.test(testInfo.title) && request.method() === "GET"
+            && url.hostname === "www.google.com" && url.pathname === "/s2/favicons"
+            && ["https://yuanbao.tencent.com", "https://xinghuo.xfyun.cn", "https://mistral.ai"].includes(url.searchParams.get("domain"))
+            && url.searchParams.get("sz") === "32") {
+          faviconBrowserLoads.push(url.href);
+          await route.fulfill({status: 200, contentType: "image/png", headers: {"Cache-Control": "no-store"},
+            body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGNUqPjwn4GBgYEJRIAwACXYAoumRkB8AAAAAElFTkSuQmCC", "base64")});
+          return;
+        }
         const isLoopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
         if (!isLoopback) {
           blockedRequests.push({ method: request.method(), path: url.pathname, reason: "non-loopback" });
@@ -17140,6 +17150,7 @@ const test = base.test.extend({
         loopbackRequests,
         sessionPutTimeline,
         blockedRequests,
+        faviconBrowserLoads,
         diagnosticSteps,
         domTimeline,
         async open(runtime) {
@@ -25420,17 +25431,15 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
   ))).some((href) => /%EF%BC|%E3%80|xn--/i.test(href))).toBe(false);
 
   const assertFaviconProjection = async () => {
-    await expect(links.nth(0).locator("img.ext-favicon")).toHaveCount(1);
-    await expect(links.nth(1).locator("img.ext-favicon")).toHaveCount(1);
+    await expect(links.nth(0).locator("canvas.ext-favicon")).toHaveCount(1);
+    await expect(links.nth(1).locator("canvas.ext-favicon")).toHaveCount(1);
     await expect(links.nth(1).locator(".link-ext-icon > svg")).toHaveCount(0);
-    await expect(links.nth(2).locator("img.ext-favicon")).toHaveCount(1);
-    const imageSources = await links.locator("img.ext-favicon").evaluateAll((images) => images.map((image) => ({
-      sameOrigin: new URL(image.src).origin === location.origin,
-      protocol: new URL(image.src).protocol,
+    await expect(links.nth(2).locator("canvas.ext-favicon")).toHaveCount(1);
+    const imageSources = await links.locator("canvas.ext-favicon").evaluateAll((images) => images.map((image) => ({
       host: new URL(image.closest("a.ext-link").href).hostname,
-      decoded: image.naturalWidth > 1 && image.naturalHeight > 1,
+      width: image.width, height: image.height,
     })));
-    expect(imageSources).toEqual(expectedHrefs.map(href => ({sameOrigin: true, protocol: "blob:", host: new URL(href).hostname, decoded: true})));
+    expect(imageSources).toEqual(expectedHrefs.map(href => ({host: new URL(href).hostname, width: 32, height: 32})));
   };
   await assertFaviconProjection();
 
@@ -25462,44 +25471,11 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     );
   }
 
-  const faviconMetricsBeforeReload = await h4.metrics();
-  expect(faviconMetricsBeforeReload.faviconFetches).toHaveLength(8);
-  expect(faviconMetricsBeforeReload.faviconFetches.every(
-    (request) => request.scheme === "https" && request.deadlinePresent === true,
-  )).toBe(true);
-  expect(faviconMetricsBeforeReload.faviconFetches.filter(
-    (request) => request.host === "yuanbao.tencent.com" && request.path === "/favicon.ico",
-  )).toHaveLength(1);
-  expect(faviconMetricsBeforeReload.faviconFetches.filter(
-    (request) => request.host === "mistral.ai" && request.path === "/favicon.ico",
-  )).toHaveLength(2);
-  expect(faviconMetricsBeforeReload.faviconFetches.filter(
-    (request) => request.host === "mistral.ai" && request.path === "/favicon.ico",
-  ).map((request) => request.attempt)).toEqual([1, 2]);
-  const xingExactDirectIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
-    (request) => request.host === "xinghuo.xfyun.cn" && request.path === "/favicon.ico",
-  );
-  const xingParentDirectIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
-    (request) => request.host === "xfyun.cn" && request.path === "/favicon.ico",
-  );
-  const xingRecoveryIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
-    (request) => request.host === "www.google.com"
-      && request.query.includes("domain=xinghuo.xfyun.cn"),
-  );
-  expect(xingExactDirectIndex).toBeGreaterThanOrEqual(0);
-  expect(xingParentDirectIndex).toBeGreaterThan(xingExactDirectIndex);
-  expect(xingRecoveryIndex).toBeGreaterThan(xingParentDirectIndex);
-  expect(faviconMetricsBeforeReload.faviconFetches.some(request => request.host.includes("faviconkit"))).toBe(false);
-  expect(new Set(faviconMetricsBeforeReload.faviconFetches.map((request) => request.host))).toEqual(
-    new Set([
-      "yuanbao.tencent.com",
-      "xinghuo.xfyun.cn",
-      "xfyun.cn",
-      "mistral.ai",
-      "www.google.com",
-      "icons.duckduckgo.com",
-    ]),
-  );
+  const faviconLoadsBeforeReload = h4.faviconBrowserLoads.slice();
+  expect(faviconLoadsBeforeReload).toHaveLength(3);
+  expect(new Set(faviconLoadsBeforeReload)).toEqual(new Set(expectedHrefs.map(origin =>
+    `https://www.google.com/s2/favicons?domain=${encodeURIComponent(origin)}&sz=32`)));
+  expect((await h4.metrics()).faviconFetches).toEqual([]);
 
   await h4.reloadRuntime(runtime);
   if (runtime === "classic") await assertDirectClassicEntry(page);
@@ -25513,7 +25489,8 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
   }
   await expect(reloadedActiveSession).toHaveCount(1);
   await assertFaviconProjection();
-  expect((await h4.metrics()).faviconFetches).toEqual(faviconMetricsBeforeReload.faviconFetches);
+  expect((await h4.metrics()).faviconFetches).toEqual([]);
+  expect(h4.faviconBrowserLoads.length).toBeLessThanOrEqual(6);
 
   const allowedBlockedPaths = new Set([
     "/npm/katex@0.16.11/dist/katex.min.css",
@@ -25535,13 +25512,14 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     punctuationPreserved: true,
     tooltipTargets: expectedHrefs,
     copiedContextMenuTargets: expectedHrefs,
-    sameOriginFaviconProxy: true,
+    browserFaviconCandidates: true,
     faviconSuccesses: 3,
     faviconFallbacks: 0,
-    transientFaviconRecovered: true,
-    placeholderFaviconRejectedBeforeRecovery: true,
+    transientFaviconRecovery: "covered by focused favicon fixture",
+    placeholderFaviconRejection: "covered by focused favicon fixture",
     singletonTooltip: true,
-    faviconFetchesBeforeAndAfterReload: faviconMetricsBeforeReload.faviconFetches.length,
+    browserFaviconLoadsBeforeReload: faviconLoadsBeforeReload.length,
+    browserFaviconLoadsAfterReload: h4.faviconBrowserLoads.length,
     modelRequests: metrics.chatRequests.length,
     toolExecutions: metrics.toolExecutions.length,
     blockedRequests: h4.blockedRequests.length,

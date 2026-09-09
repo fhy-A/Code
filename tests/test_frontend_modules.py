@@ -12519,15 +12519,17 @@ process.stdout.write(JSON.stringify(out));
         self.assertTrue(data["extIcon"])
         self.assertTrue(data["extLeft"])
         self.assertTrue(data["glyphInline"])
-        # R014 / CODE-036 phase 2: only the same-origin proxy reaches favicon sources.
-        self.assertIn('/api/favicon?scheme=${encodeURIComponent(scheme)}&host=${encodeURIComponent(host)}', APP_SOURCE)
+        # CODE-045 R023: only normalized origins enter the bounded browser candidates.
+        self.assertIn('https://www.google.com/s2/favicons?domain=${encodeURIComponent(cacheKey)}&sz=32', APP_SOURCE)
+        self.assertIn('_normalizeFaviconOrigin', APP_SOURCE)
         self.assertNotIn('icons.duckduckgo.com/ip3/', APP_SOURCE)
-        self.assertNotIn('www.google.com/s2/favicons', APP_SOURCE)
+        self.assertNotIn('/api/favicon?scheme=', APP_SOURCE)
         self.assertNotIn('api.faviconkit.com/', APP_SOURCE)
-        self.assertIn('naturalWidth <= 1', APP_SOURCE)
+        self.assertIn('naturalWidth > 1', APP_SOURCE)
 
         self.assertIn('_faviconCache', APP_SOURCE)
-        self.assertIn('_FAVICON_RETRY_DELAY_MS', APP_SOURCE)
+        self.assertIn('_FAVICON_GOOGLE_TIMEOUT_MS', APP_SOURCE)
+        self.assertIn('_FAVICON_ORIGIN_TIMEOUT_MS', APP_SOURCE)
         self.assertIn('_FAVICON_CACHE_CAPACITY', APP_SOURCE)
         self.assertNotIn('_FAVICON_FAILURE_COOLDOWN_MS', APP_SOURCE)
         self.assertNotIn('{ failed: true }', APP_SOURCE)
@@ -12578,7 +12580,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('data-favicon', MARKDOWN_SOURCE)
         self.assertNotIn('↗', MARKDOWN_SOURCE)
         self.assertIn('bindExtLinkFavicons', APP_SOURCE)
-        self.assertIn('/api/favicon?', APP_SOURCE)
+        self.assertIn('www.google.com/s2/favicons?', APP_SOURCE)
         self.assertIn('.ext-favicon', STYLE_SOURCE)
 
         self.assertIn('slugify(token.text)', MARKDOWN_SOURCE)
@@ -12793,7 +12795,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("clickable-path", data["insideCode"]["classes"])
         self.assertEqual(data["insideCode"]["attributes"]["data-path"], "C:/demo/project/src/a.js")
 
-    def test_external_favicon_binding_uses_same_origin_and_keeps_glyph_on_failure(self):
+    def test_external_favicon_binding_filters_origins_and_keeps_glyph_on_failure(self):
         subprocess.run(["node", "tests/e2e/h4/code045-favicon-unit.cjs", "binding"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
 
     def test_external_favicon_queue_is_bounded_fifo_and_stale_consumer_safe(self):
