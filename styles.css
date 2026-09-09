@@ -2148,7 +2148,7 @@ input:focus, select:focus, textarea:focus {
 .table-wrap[data-overflow="true"] .table-overflow-hint{display:flex}
 /* External link icon (answer-render 5) */
 a.ext-link .link-ext-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;margin-right:5px;vertical-align:-3px;line-height:0;color:var(--muted);flex:none}
-a.ext-link .link-ext-icon svg{display:block}
+a.ext-link .link-ext-icon > svg,a.ext-link .link-ext-icon > canvas{display:block;width:16px;height:16px}
 /* Favicon gets a fixed near-white backing tile so dark/transparent brand
    icons stay readable on both application themes; no brightness/contrast
    filters. Theme signal: html[data-theme-mode] only, for the tile border. */

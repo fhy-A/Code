@@ -3253,7 +3253,7 @@ async function _startFaviconLoad(cacheKey, entry) {
   }
 }
 
-function bindExtLinkFavicons() {
+function bindExtLinkFavicons(root = document) {
   if (_faviconClosed) return;
   if (!_faviconObserver) {
     _faviconObserver = new MutationObserver(records => {
@@ -3269,7 +3269,7 @@ function bindExtLinkFavicons() {
       _faviconLoadQueue.length = 0;
     });
   }
-  document.querySelectorAll("a.ext-link .link-ext-icon").forEach(slot => {
+  root.querySelectorAll("a.ext-link .link-ext-icon").forEach(slot => {
     if (slot.dataset.bound) return;
     slot.dataset.bound = "1";
     const link = slot.closest("a.ext-link");
@@ -4259,7 +4259,12 @@ function patchStreamingAssistantMessage(sessionId, index) {
 
   if (outputNode) {
     const nextOutputHtml = visibleContent ? renderAnswerMarkdown(visibleContent) : "";
-    if (outputNode.innerHTML !== nextOutputHtml) outputNode.innerHTML = nextOutputHtml;
+    if (outputNode.innerHTML !== nextOutputHtml) {
+      outputNode.innerHTML = nextOutputHtml;
+      // Register replacement consumers before the removal observer can cancel
+      // in-flight loads; cached decoded images are painted in this same frame.
+      bindExtLinkFavicons(outputNode);
+    }
     outputNode.classList.toggle("is-empty", !visibleContent);
     article.querySelector("[data-stream-role]")?.classList.toggle(
       "is-empty",

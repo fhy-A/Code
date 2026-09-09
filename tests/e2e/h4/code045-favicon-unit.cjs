@@ -54,6 +54,15 @@ async function main(){
  await check('queue','synchronous-redraw-registers-new-consumers-without-cancelling',async()=>{
   const h=setup(),a=h.slot();h.api.bindExtLinkFavicons();a.isConnected=false;const b=h.slot();h.api.bindExtLinkFavicons();h.remove();assert.equal(h.calls.length,1);assert(!h.calls[0].removed);h.calls[0].settle();await flush();assert.equal(a.children[0],'glyph');assert.equal(b.children[0].drawnFrom,h.calls[0]);
  });
+ await check('queue','scoped-incremental-binding-registers-before-pruning-and-paints-cache-synchronously',async()=>{
+  const h=setup(),old=h.slot(),unrelated=h.slot('https://unrelated.test');let scans=0;
+  const root={querySelectorAll:selector=>{assert.equal(selector,'a.ext-link .link-ext-icon');scans++;return [old]}};
+  h.api.bindExtLinkFavicons(root);assert.equal(scans,1);assert.equal(h.calls.length,1);assert.equal(unrelated.dataset.bound,undefined);
+  old.isConnected=false;const fresh=h.slot();root.querySelectorAll=()=>[fresh];h.api.bindExtLinkFavicons(root);h.remove();
+  assert.equal(h.calls.length,1);assert(!h.calls[0].removed);h.calls[0].settle();await flush();
+  fresh.isConnected=false;const cached=h.slot();root.querySelectorAll=()=>[cached];h.api.bindExtLinkFavicons(root);
+  assert.equal(cached.children[0].drawnFrom,h.calls[0]);assert.equal(h.calls.length,1);assert.equal(unrelated.dataset.bound,undefined);
+ });
  await check('queue','cancelled-origin-can-resubscribe-and-old-load-cannot-replace-it',async()=>{
   const h=setup(),a=h.slot();h.api.bindExtLinkFavicons();const late=h.calls[0].onload;a.isConnected=false;h.remove();await flush();assert(h.calls[0].removed);const b=h.slot();h.api.bindExtLinkFavicons();late();await flush();assert.equal(b.children[0],'glyph');assert.equal(h.calls.length,2);h.calls[1].settle();await flush();assert.equal(b.children[0].drawnFrom,h.calls[1]);assert.equal(h.api.active,0);
  });

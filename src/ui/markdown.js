@@ -655,7 +655,7 @@
       // The icon slot ships with an inline link glyph so no blank gap ever
       // shows; bindExtLinkFavicons replaces it with the site favicon on load
       // or keeps it when every source fails.
-      return `<a class="ext-link" href="${href}"${title} target="_blank" rel="noopener"><span class="link-ext-icon" data-favicon="" aria-hidden="true"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c2 1.8 3 3.9 3 6.5s-1 4.7-3 6.5c-2-1.8-3-3.9-3-6.5s1-4.7 3-6.5z"/></svg></span>${inner}</a>`;
+      return `<a class="ext-link" href="${href}"${title} target="_blank" rel="noopener"><span class="link-ext-icon" data-favicon="" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6.5"/><path d="M1.5 8h13M8 1.5c2 1.8 3 3.9 3 6.5s-1 4.7-3 6.5c-2-1.8-3-3.9-3-6.5s1-4.7 3-6.5z"/></svg></span>${inner}</a>`;
     };
 
     renderer.image = function renderImage(token) {

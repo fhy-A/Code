@@ -9,7 +9,7 @@ async function scenario(browser,host,runtime,theme,width,dir){
   // Expose existing closures only; product logic and rendering remain unchanged.
   await context.route(/\/(?:app\.js|code\.bundle\.js)$/,async route=>{
     const response=await route.fetch(),source=await response.text();
-    const needle='function bindExtLinkFavicons() {';assert(source.includes(needle));
+    const needle=source.match(/function bindExtLinkFavicons\([^)]*\) \{/)?.[0];assert(needle);
     // Playwright aborts URLs ending exactly in /favicon.ico before user routing.
     // The transport-only query keeps this isolated response controllable; the
     // deterministic source test separately verifies the exact production URL.
@@ -80,11 +80,121 @@ async function scenario(browser,host,runtime,theme,width,dir){
     return {runtime,theme,width,counts,requests,originFixtureQuery:true,geometry:before,originalNodeRecovered:true,noStoreRedrawRequests:beforeRedraw,streamingRedraws:20,tooltip:true,contextCopy:true,keyboardActivation:true,refresh:true,errors};
   }finally{release();await page.evaluate(()=>{if(window.__faviconUI?.state.sessionId==='code045-owned-ui')window.__faviconUI.state.sessionId=''}).catch(()=>{});await context.close();}
 }
+
+async function streamingScenario(browser,host,runtime,theme,width,dir,baseline){
+  const audit=createAudit(),context=await createContext(browser,host,runtime,audit,{width,theme,language:'zh'});
+  const requests=[],errors=[],failed=[],gates=new Map();
+  for(const name of ['quick.test','slow.test']){let release;const promise=new Promise(r=>release=r);gates.set(name,{promise,release})}
+  await context.route(/\/(?:app\.js|code\.bundle\.js)$/,async route=>{
+    const response=await route.fetch();let source=await response.text();
+    const needle=source.match(/function bindExtLinkFavicons\([^)]*\) \{/)?.[0];assert(needle);
+    source=source.replace(needle,'window.__faviconUI={bind:bindExtLinkFavicons,cache:_faviconCache,render:renderMessages,state,set:setSessionMessages,get:getSessionMessages,run:ensureSessionRun,update:updateAssistantMessage,patches:[],scheduled:0,fullRenders:0}; '+needle)
+      .replace('`${cacheKey}/favicon.ico`','`${cacheKey}/favicon.ico?code045-fixture=1`')
+      .replace('function renderMessages() {','function renderMessages() { if(window.__faviconUI)window.__faviconUI.fullRenders++;')
+      .replace('function scheduleStreamingAssistantPatch(sessionId, index) {','function scheduleStreamingAssistantPatch(sessionId, index) { window.__faviconUI.scheduled++;');
+    const start=source.indexOf('function patchStreamingAssistantMessage('),end=source.indexOf('function scheduleStreamingAssistantPatch(',start);
+    const block=source.slice(start,end),endNeedle='  messageScrollController?.onContentChanged(sessionId);';assert(block.includes(endNeedle));
+    source=source.slice(0,start)+block.replace(endNeedle,`  window.__faviconUI.patches.push({streaming:msg.streaming,canvases:outputNode?.querySelectorAll('canvas.ext-favicon').length,slots:outputNode?.querySelectorAll('.link-ext-icon').length,fullRenders:window.__faviconUI.fullRenders});\n${endNeedle}`)+source.slice(end);
+    await route.fulfill({response,body:source});
+  });
+  await context.route('**/*',async route=>{
+    const url=new URL(route.request().url());let name,kind;
+    if(url.hostname==='www.google.com'&&url.pathname==='/s2/favicons'){name=new URL(url.searchParams.get('domain')).hostname;kind='google'}
+    else if(url.hostname.endsWith('.test')&&url.pathname==='/favicon.ico'){name=url.hostname;kind='origin'}
+    else return route.fallback();
+    assert(['quick.test','slow.test','late.test','failed.test'].includes(name));requests.push({name,kind,time:Date.now()});
+    if(gates.has(name))await gates.get(name).promise;
+    if(name==='failed.test')return route.abort('failed');
+    return route.fulfill({status:200,contentType:'image/png',headers:{'Cache-Control':'no-store'},body:png});
+  });
+  const page=await context.newPage();page.on('pageerror',e=>errors.push(String(e)));page.on('requestfailed',r=>{if(r.url().includes('s2/favicons')||r.url().includes('/favicon.ico'))failed.push(r.url())});
+  // Shared offline harness parses HTML verbatim. Use the actual Markdown link
+  // renderer for frozen paragraph/table tokens; do not claim marked parsing coverage.
+  let prefix;
+
+  const geometry=()=>page.evaluate(()=>[...document.querySelectorAll('a.ext-link')].map(link=>{
+    const rect=e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height}};
+    const slot=link.querySelector('.link-ext-icon'),node=slot.firstElementChild,parent=link.closest('td,p');
+    const text=[...link.childNodes].find(n=>n.nodeType===Node.TEXT_NODE);const range=document.createRange();range.selectNodeContents(text);
+    return {href:link.getAttribute('href'),kind:parent.tagName,outer:rect(slot),inner:rect(node),text:rect(range),relativeText:{x:rect(range).x-rect(parent).x,y:rect(range).y-rect(parent).y},relativeOuter:{x:rect(slot).x-rect(parent).x,y:rect(slot).y-rect(parent).y},lineHeight:getComputedStyle(parent).lineHeight,parentHeight:parent.getBoundingClientRect().height};
+  }));
+  const stableGeometry=async()=>{
+    let previous='',stable=0,value;
+    for(let frame=0;frame<120;frame++){
+      await page.evaluate(()=>new Promise(requestAnimationFrame));value=await geometry();const next=JSON.stringify(value);
+      stable=next===previous?stable+1:0;if(stable>=5)return value;previous=next;
+    }
+    throw new Error('Icon/text geometry did not settle');
+  };
+  const update=async content=>{
+    const prior=await page.evaluate(content=>{const d=window.__faviconUI,n=d.patches.length;d.update(0,content,true,d.state.sessionId);return n},content);
+    await expect.poll(()=>page.evaluate(()=>window.__faviconUI.patches.length)).toBeGreaterThan(prior);
+  };
+  const result={runtime,theme,width,baseline,requests,failed};
+  try{
+    await page.goto(new URL(runtime==='bundle'?'/':'/dist/frontend/index.classic.html',host.ready.codeUrl).href);await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');
+    prefix=await page.evaluate(()=>{const renderer=Code.ui.markdown.createMarkdownFeature().renderer;
+      const link=(name,text,suffix='path')=>renderer.link({href:'https://'+name+'/'+suffix,text});
+      return '<p>段落 '+link('quick.test','快图')+' 与 '+link('slow.test','慢图')+' 尾文。</p><table><thead><tr><th>类型</th><th>链接</th></tr></thead><tbody><tr><td>一</td><td>'+link('quick.test','快图','other')+'</td></tr><tr><td>二</td><td>'+link('slow.test','慢图','other')+'</td></tr></tbody></table>';
+    });
+    await page.evaluate(()=>{const d=window.__faviconUI;d.state.sessionId='code045-stream-owned';d.run(d.state.sessionId).isStreaming=true;d.set(d.state.sessionId,[{role:'assistant',content:'准备输出。',streaming:true,_streamProjection:'answer'}]);d.render()});
+    await expect(page.locator('[data-stream-part="answer"]')).toHaveCount(1);
+    await update(prefix+'持续输出 0');await expect(page.locator('a.ext-link')).toHaveCount(4);
+    const initialRenders=await page.evaluate(()=>window.__faviconUI.fullRenders);
+    if(baseline){
+      for(let i=1;i<=6;i++)await update(prefix+'持续输出 '+i);
+      assert.equal(requests.length,0);assert.equal(await page.locator('canvas.ext-favicon').count(),0);
+      result.incrementalBeforeControl={updates:7,requests:0,globeCount:4,stillStreaming:await page.evaluate(()=>window.__faviconUI.get(window.__faviconUI.state.sessionId)[0].streaming)};
+    }else await expect.poll(()=>requests.length).toBe(2);
+    await page.screenshot({path:path.join(dir,`${runtime}-${theme}-${width}-stream-before.png`)});result.before=await stableGeometry();
+    if(baseline){await page.evaluate(()=>window.__faviconUI.bind());await expect.poll(()=>requests.length).toBe(2)}
+    gates.get('quick.test').release();await expect(page.locator('canvas.ext-favicon')).toHaveCount(2);
+    result.quickLoaded=await stableGeometry();
+    // The text is unchanged across these observations; only the icon loaded.
+    for(let i=0;i<result.before.length;i++){
+      if(!baseline){
+        assert.deepEqual(result.quickLoaded[i].outer,result.before[i].outer);
+        assert.deepEqual(result.quickLoaded[i].text,result.before[i].text);
+        assert.equal(result.quickLoaded[i].parentHeight,result.before[i].parentHeight);
+        assert.equal(result.quickLoaded[i].lineHeight,result.before[i].lineHeight);
+      }
+      assert.equal(result.before[i].outer.width,20);assert.equal(result.before[i].outer.height,20);
+      assert.equal(result.before[i].inner.width,baseline?12:16);assert.equal(result.before[i].inner.height,baseline?12:16);
+      if(i%2===0){assert.equal(result.quickLoaded[i].inner.width,16);assert.equal(result.quickLoaded[i].inner.height,16)}
+    }
+    if(!baseline){
+      for(let i=1;i<=8;i++)await update(prefix+'持续输出 '+i);
+      assert.equal(requests.length,2);assert.equal(failed.length,0);
+      const snapshots=await page.evaluate(()=>window.__faviconUI.patches.slice(-8));assert(snapshots.every(x=>x.streaming&&x.canvases===2&&x.slots===4));
+      result.cachedSynchronousPatches=snapshots;
+      assert.equal(await page.evaluate(()=>window.__faviconUI.fullRenders),initialRenders);
+      gates.get('slow.test').release();await expect(page.locator('canvas.ext-favicon')).toHaveCount(4);
+      const expanded=prefix+await page.evaluate(()=>{const renderer=Code.ui.markdown.createMarkdownFeature().renderer;return '<p>新增 '+renderer.link({href:'https://late.test/x',text:'后到'})+' 和 '+renderer.link({href:'https://failed.test/x',text:'失败'})+'。</p><p>持续输出 9</p>'});
+      await update(expanded);await expect(page.locator('canvas.ext-favicon')).toHaveCount(5);await expect.poll(()=>requests.length).toBe(5);
+      assert.equal(requests.filter(x=>x.name==='slow.test').length,1);assert.equal(requests.filter(x=>x.name==='quick.test').length,1);
+      await expect(page.locator('a[href="https://failed.test/x"] svg')).toHaveCount(1);
+      for(let i=10;i<14;i++)await update(expanded+' '+i);
+      assert.equal(requests.length,5);assert.equal(await page.evaluate(()=>window.__faviconUI.get(window.__faviconUI.state.sessionId)[0].streaming),true);
+      result.visibleBeforeEnd=await page.evaluate(()=>({streaming:window.__faviconUI.get(window.__faviconUI.state.sessionId)[0].streaming,canvases:document.querySelectorAll('canvas.ext-favicon').length,slots:document.querySelectorAll('.link-ext-icon').length}));
+      await page.screenshot({path:path.join(dir,`${runtime}-${theme}-${width}-stream-after.png`)});
+      await page.evaluate(content=>{const d=window.__faviconUI;d.run(d.state.sessionId).isStreaming=false;d.update(0,content,false,d.state.sessionId)},expanded+' 13');
+      await expect(page.locator('[data-streaming-message="true"]')).toHaveCount(0);await expect(page.locator('canvas.ext-favicon')).toHaveCount(5);assert.equal(requests.length,5);
+      result.finalGeometry=await geometry();assert(result.finalGeometry.every(x=>x.inner.width===16&&x.inner.height===16&&x.outer.width===20&&x.outer.height===20));
+    }else{gates.get('slow.test').release();await expect(page.locator('canvas.ext-favicon')).toHaveCount(4);await page.screenshot({path:path.join(dir,`${runtime}-${theme}-${width}-stream-after.png`)});}
+    result.trace=await page.evaluate(()=>({scheduled:window.__faviconUI.scheduled,patches:window.__faviconUI.patches,fullRenders:window.__faviconUI.fullRenders}));
+    assert.deepEqual(errors,[]);assert.deepEqual(audit.blockedWrites,[]);result.errors=errors;result.ok=true;
+    return result;
+  }catch(error){
+    await fs.writeFile(path.join(dir,`${runtime}-${theme}-${width}-failure.json`),JSON.stringify({measurements:result,error:String(error.stack),errors,requests,state:await page.evaluate(()=>({messages:window.__faviconUI?.get(window.__faviconUI.state.sessionId),trace:window.__faviconUI?.patches,html:document.querySelector('[data-stream-part="answer"]')?.innerHTML,marked:typeof marked})).catch(()=>null)},null,2));
+    await page.screenshot({path:path.join(dir,`${runtime}-${theme}-${width}-failure.png`)}).catch(()=>{});throw error;
+  }finally{for(const g of gates.values())g.release();await page.evaluate(()=>{if(window.__faviconUI?.state.sessionId==='code045-stream-owned')window.__faviconUI.state.sessionId=''}).catch(()=>{});await context.close();}
+}
+
 async function main(){
-  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'code045-r023-ui-')),host=await startIsolatedHost({disableRoutingV2:true});let browser,result={dir,cases:[]};
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),process.argv.includes('--streaming')?'code045-r025-ui-':'code045-r023-ui-')),host=await startIsolatedHost({disableRoutingV2:true});let browser,result={dir,cases:[]};
   try{browser=await chromium.launch({headless:true});for(const runtime of ['bundle','classic'])for(const theme of ['light','dark'])for(const width of [1280,390]){
     if(process.argv.includes("--quick") && !((runtime==="bundle"&&theme==="dark"&&width===390)||(runtime==="classic"&&theme==="light"&&width===1280)))continue;
-    result.cases.push(await scenario(browser,host,runtime,theme,width,dir));console.log(`${runtime} ${theme} ${width} passed`);
+    result.cases.push(await (process.argv.includes('--streaming')?streamingScenario(browser,host,runtime,theme,width,dir,process.argv.includes('--baseline')):scenario(browser,host,runtime,theme,width,dir)));console.log(`${runtime} ${theme} ${width} passed`);
   }const m=await host.metrics();assert.equal(m.chatRequests.length,0);assert.equal(m.toolExecutions.length,0);assert.equal(m.production.agentRuns.length,0);result.effects={modelRequests:0,tools:0,agentRuns:0};result.ok=true;
   }catch(e){result.ok=false;result.error=String(e.stack);process.exitCode=1;}
   finally{if(browser)await browser.close();const c=await host.stop();result.cleanup={childExited:c.childExited,portsClosed:c.portsClosed,rootRemoved:c.rootRemoved,errors:c.cleanupErrors,activeChildren:getActiveChildCount()};if(!c.childExited||!c.rootRemoved||!c.portsClosed.every(Boolean)||c.cleanupErrors.length||getActiveChildCount()){result.ok=false;process.exitCode=1;}await fs.writeFile(path.join(dir,'result.json'),JSON.stringify(result,null,2));}

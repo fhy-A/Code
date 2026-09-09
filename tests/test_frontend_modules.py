@@ -23478,6 +23478,8 @@ process.stdout.write(JSON.stringify({
         )
         self.assertIn('data-stream-part="answer"', patch)
         self.assertIn("renderAnswerMarkdown(visibleContent)", patch)
+        self.assertLess(patch.index("outputNode.innerHTML = nextOutputHtml"), patch.index("bindExtLinkFavicons(outputNode)"))
+        self.assertIn("function bindExtLinkFavicons(root = document)", APP_SOURCE)
         self.assertIn('streamKind === "pending" || !visibleContent', patch)
         self.assertNotIn("preservedNodes", APP_SOURCE)
         self.assertNotIn("appendChild(preservedNode)", APP_SOURCE)
