@@ -1139,6 +1139,9 @@
       const projectedBody = projectedStage.querySelector?.(
         ":scope > .tool-process-stage-body",
       ) || null;
+      if (currentStage.classList?.contains("tool-image-stage") && projectedStage.classList?.contains("tool-image-stage")) {
+        projectedStage.open = currentStage.open;
+      }
       syncProjectedElement(currentArticle, projectedArticle, { preserveChildren: true });
       syncProjectedElement(currentStage, projectedStage, { preserveChildren: true });
       syncProjectedElement(currentSummary, projectedSummary);
@@ -1465,6 +1468,17 @@
           onImagePreview(image.currentSrc || image.src || "");
           return;
         }
+        const readPreview = event.target?.closest?.("[data-tool-image-preview]");
+        if (readPreview && (!root.contains || root.contains(readPreview))) {
+          const image = readPreview.querySelector("img");
+          if (readPreview.disabled || !image?.naturalWidth) return;
+          const previews = [...readPreview.closest(".tool-image-grid").querySelectorAll("[data-tool-image-preview]:not(:disabled)")];
+          onImagePreview(image.currentSrc || image.src, {
+            sources: previews.map(button => button.querySelector("img")?.src).filter(Boolean),
+            index: Math.max(0, previews.indexOf(readPreview)),
+          });
+          return;
+        }
         const generatedPreview = event.target?.closest?.("[data-generated-image-preview]");
         if (generatedPreview && (!root.contains || root.contains(generatedPreview))) {
           const source = String(generatedPreview.dataset.generatedImagePreview || "");
@@ -1492,6 +1506,16 @@
         }
       }, true);
       root.addEventListener("error", (event) => {
+        const readImage = event.target?.closest?.("[data-tool-image]");
+        if (readImage && (!root.contains || root.contains(readImage))) {
+          const button = readImage.closest("[data-tool-image-preview]");
+          if (button) button.disabled = true;
+          readImage.hidden = true;
+          const feedback = button?.querySelector(".tool-image-unavailable");
+          if (feedback) feedback.hidden = false;
+          onImageLoad(readImage);
+          return;
+        }
         const image = event.target?.closest?.("[data-message-image-preview]")
           || event.target?.closest?.("[data-generated-image-preview-img]");
         if (!image || (root.contains && !root.contains(image))) return;
@@ -1950,6 +1974,9 @@
 
     function processCallResult(call) {
       if (call?.error) return boundedProcessDetail(call.error);
+      if (isSuccessfulImageRead(call)) {
+        return boundedProcessDetail({action: "read_file", path: call.target, mime: call.result.mime, size: call.result.size, visual: true});
+      }
       if (call?.action === "generate_image") {
         if (call?.result?.ok === false) {
           return boundedProcessDetail(
@@ -2054,38 +2081,16 @@
         || null;
     }
 
-    function processSummaryFamily(action) {
-      if (action === "run_command") return "command";
-      if (["propose_edit", "apply_edit", "write_file"].includes(action)) return "edit";
-      if (action === "delete_file") return "delete";
-      if (["read_file", "list_files", "search_files", "glob_files"].includes(action)) return "inspect";
-      if (action === "request_user_input") return "questionnaire";
-      return "tool";
-    }
-
-    function hasMultipleProcessSubjects(family, calls) {
-      if (family === "command" || family === "tool") return calls.length > 1;
-      const targets = new Set(calls.map((call) => String(call.target || "").trim()).filter(Boolean));
-      return (targets.size || calls.length) > 1;
-    }
-
     function completedProcessSummary(calls) {
-      const families = new Map();
+      const actions = new Map();
       calls.forEach((call) => {
-        const family = processSummaryFamily(call.action);
-        if (!families.has(family)) families.set(family, []);
-        families.get(family).push(call);
+        actions.set(call.action, (actions.get(call.action) || 0) + 1);
       });
-      const keys = {
-        command: ["toolProcessRanCommand", "toolProcessRanCommands"],
-        edit: ["toolProcessEditedFile", "toolProcessEditedFiles"],
-        inspect: ["toolProcessInspectedFile", "toolProcessInspectedFiles"],
-        delete: ["toolProcessDeletedFile", "toolProcessDeletedFiles"],
-        questionnaire: ["toolProcessAskedUser", "toolProcessAskedUserMultiple"],
-        tool: ["toolProcessUsedTool", "toolProcessUsedTools"],
-      };
-      return [...families.entries()]
-        .map(([family, familyCalls]) => t(keys[family][hasMultipleProcessSubjects(family, familyCalls) ? 1 : 0]))
+      return [...actions.entries()]
+        .map(([action, count]) => {
+          const label = getToolActionLabel(action);
+          return count > 1 ? `${label} ×${count}` : label;
+        })
         .join(" · ");
     }
 
@@ -2099,6 +2104,45 @@
       return "completed";
     }
 
+    function isSuccessfulImageRead(call) {
+      const result = call?.result;
+      return call?.action === "read_file"
+        && ["succeeded", "completed"].includes(call.outcome)
+        && result?.ok === true && result.binary === true && result.visual === true
+        && (!result.action || result.action === "read_file")
+        && /^image\/[a-z0-9.+-]+$/i.test(String(result.mime || ""));
+    }
+
+    function imageReadSource(result) {
+      const mime = String(result.mime || "").toLowerCase();
+      const data = result.base64;
+      // Match the existing 10 MiB read_file image limit; never decode markup or load a path.
+      if (typeof data !== "string" || !data || data.length > Math.ceil(10 * 1024 * 1024 / 3) * 4
+        || data.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) return "";
+      let header;
+      try { header = global.atob(data.slice(0, 32)); } catch (_) { return ""; }
+      const signatures = {
+        "image/png": () => header.startsWith("\x89PNG\r\n\x1a\n"),
+        "image/jpeg": () => header.startsWith("\xff\xd8\xff"),
+        "image/gif": () => /^GIF8[79]a/.test(header),
+        "image/webp": () => header.startsWith("RIFF") && header.slice(8, 12) === "WEBP",
+        "image/bmp": () => header.startsWith("BM"),
+        "image/x-icon": () => header.startsWith("\0\0\x01\0"),
+      };
+      return Object.hasOwn(signatures, mime) && signatures[mime]() ? `data:${mime};base64,${data}` : "";
+    }
+
+    function renderReadImagePreviews(calls) {
+      return `<div class="tool-image-grid">${calls.map((call, index) => {
+        const source = imageReadSource(call.result);
+        const label = t("toolImagePreview", {index: index + 1});
+        return `<button class="tool-image-preview" type="button" data-tool-image-preview aria-label="${escapeHtml(label)}" title="${escapeHtml(call.target || label)}"${source ? "" : " disabled"}>
+          ${source ? `<img data-tool-image data-message-scroll-on-load src="${escapeHtml(source)}" alt="${escapeHtml(label)}" width="112" height="112" loading="lazy" />` : ""}
+          <span class="tool-image-unavailable"${source ? " hidden" : ""}>${escapeHtml(t("toolImageUnavailable"))}</span>
+        </button>`;
+      }).join("")}</div>`;
+    }
+
     function renderToolProcessProjection(items, serial, options = {}) {
       const { calls } = collectToolProcess(items);
       const ownership = options.runOwnership || agentRunProjectionOwnership(
@@ -2107,6 +2151,21 @@
       );
       const visibleCalls = calls.map((call) => getProcessCallView(call, ownership));
       if (!visibleCalls.length) return "";
+      const groups = [];
+      const groupsByKind = new Map();
+      visibleCalls.forEach(call => {
+        const image = isSuccessfulImageRead(call);
+        if (!groupsByKind.has(image)) {
+          const group = {image, calls: []};
+          groupsByKind.set(image, group);
+          groups.push(group);
+        }
+        groupsByKind.get(image).calls.push(call);
+      });
+      return groups.map(group => renderToolProcessGroup(group.calls, serial, options, group.image)).join("");
+    }
+
+    function renderToolProcessGroup(visibleCalls, serial, options = {}, imageGroup = false) {
       const currentCall = currentProcessCall(visibleCalls);
       const detectedOutcome = stageProcessOutcome(visibleCalls);
       const singleToolStage = visibleCalls.length === 1;
@@ -2114,16 +2173,17 @@
       const stageIsCurrent = Boolean(options.activeStage)
         || toolIsActive;
       const processOutcome = toolIsActive ? "running" : detectedOutcome;
-      const headingText = singleToolStage
+      const headingText = imageGroup ? t(singleToolStage ? "toolImageViewed" : "toolImagesViewed", {count: visibleCalls.length}) : singleToolStage
         ? getToolActionLabel(currentCall.action)
         : stageIsCurrent
         ? getToolActionLabel(currentCall.action)
         : completedProcessSummary(visibleCalls);
-      const headingTarget = singleToolStage || stageIsCurrent ? currentCall.target : "";
+      const headingTarget = !imageGroup && (singleToolStage || stageIsCurrent) ? currentCall.target : "";
       const stageClasses = [
         processOutcome,
         toolIsActive ? "tool-active" : "",
         singleToolStage ? "single-tool" : "",
+        imageGroup ? "tool-image-stage" : "",
       ].filter(Boolean).join(" ");
       const processKey = String(options.processKey || serial);
       const firstToolCallId = String(visibleCalls.find((call) => call.id)?.id || processKey);
@@ -2138,7 +2198,7 @@
       const expandedToolItems = options.expandedToolItems instanceof Set
         ? options.expandedToolItems
         : new Set(options.expandedToolItems || []);
-      const open = (
+      const open = (imageGroup || (
         options.open
         || (
           options.allowExpanded
@@ -2148,16 +2208,18 @@
             || expandedToolProcesses.has(processKey)
           )
         )
-      ) ? " open" : "";
+      )) ? " open" : "";
 
       return `
         <article class="msg assistant tool-process" data-tool-process-block="${serial}">
           <details class="tool-process-stage ${escapeHtml(stageClasses)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}" data-tool-process-id="${escapeHtml(processId)}"${open}>
             <summary class="tool-process-stage-summary">
+              ${imageGroup ? '<svg class="tool-image-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="3" width="13" height="12" rx="2"/><path d="m3 12 4-4 3 3 2-2 3 3"/><circle cx="11.5" cy="6.5" r="1"/></svg>' : ""}
               <span class="tool-process-stage-heading"><strong>${escapeHtml(headingText)}</strong>${headingTarget ? `<code>${escapeHtml(headingTarget)}</code>` : ""}</span>
               <span class="tool-process-stage-chevron" aria-hidden="true"></span>
             </summary>
             <div class="tool-process-stage-body">
+              ${imageGroup ? renderReadImagePreviews(visibleCalls) + `<details class="tool-image-tools"><summary>${escapeHtml(t("toolImageDetails"))}</summary>` : ""}
               <div class="tool-process-list">
                 ${visibleCalls.map((call) => {
                   const action = getToolActionLabel(call.action);
@@ -2183,11 +2245,13 @@
                     </summary>
                     <div class="tool-process-body">
                       ${argumentsText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessArguments"))}</strong><pre>${escapeHtml(argumentsText)}</pre></section>` : ""}
+                      ${imageGroup ? '<section class="tool-process-detail"><code>read_file</code></section>' : ""}
                       ${resultText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessResult"))}</strong><pre>${escapeHtml(resultText)}</pre></section>` : ""}
                     </div>
                   </details>`;
                 }).join("")}
               </div>
+              ${imageGroup ? "</details>" : ""}
             </div>
           </details>
         </article>

@@ -18951,7 +18951,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('class="tool-process-stage succeeded"', data["groupedStageHtml"])
         grouped_stage_summary = data["groupedStageHtml"].split('<div class="tool-process-stage-body">', 1)[0]
         self.assertIn(
-            "<strong>toolProcessInspectedFile · toolProcessRanCommand</strong>",
+            "<strong>label:read_file · label:run_command</strong>",
             grouped_stage_summary,
         )
         self.assertNotIn("tool-process-indicator", grouped_stage_summary)
@@ -18986,7 +18986,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('class="tool-process-stage succeeded"', separated_first)
         self.assertNotIn("single-tool", separated_first.split('<div class="tool-process-stage-body">', 1)[0])
         self.assertIn(
-            "<strong>toolProcessInspectedFile · toolProcessRanCommand</strong>",
+            "<strong>label:read_file · label:run_command</strong>",
             separated_first,
         )
         self.assertIn('class="tool-process-stage succeeded single-tool"', separated_second)
@@ -19051,10 +19051,10 @@ process.stdout.write(JSON.stringify({
         self.assertIn("tool-process-indicator", data["runningStage"].split('<div class="tool-process-stage-body">', 1)[1])
         self.assertEqual(data["runningStage"].count("toolProcessRunning"), 1)
         completed_commands_summary = data["completedCommands"].split('<div class="tool-process-stage-body">', 1)[0]
-        self.assertIn("<strong>toolProcessRanCommands</strong>", completed_commands_summary)
+        self.assertIn("<strong>label:run_command ×2</strong>", completed_commands_summary)
         self.assertNotIn("<code>", completed_commands_summary)
         completed_edits_summary = data["completedEdits"].split('<div class="tool-process-stage-body">', 1)[0]
-        self.assertIn("<strong>toolProcessEditedFiles</strong>", completed_edits_summary)
+        self.assertIn("<strong>label:write_file · label:propose_edit</strong>", completed_edits_summary)
         self.assertNotIn("<code>", completed_edits_summary)
         self.assertIn('class="tool-process-stage cancelled"', data["cancelledCommand"])
         self.assertIn('class="tool-process-item cancelled"', data["cancelledCommand"])
@@ -19975,7 +19975,6 @@ const secondBound = feature.bindInteractions(root);
         self.assertIn('request_user_input:"toolRequestUserInput"', APP_SOURCE)
         self.assertIn('case "request_user_input": return t("progressUserInput");', APP_SOURCE)
         self.assertIn('/^→\\s*request_user_input$/.test(line)', MESSAGES_SOURCE)
-        self.assertIn('if (action === "request_user_input") return "questionnaire";', MESSAGES_SOURCE)
 
         script = r"""
 global.window = {Code: {ui: {}}};
@@ -20041,7 +20040,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn('class="tool-process-stage succeeded single-tool"', data["html"])
         self.assertNotIn("<strong>toolProcessAskedUser</strong>", data["html"])
         self.assertIn("<strong>label:request_user_input</strong>", data["html"])
-        self.assertIn("<strong>toolProcessAskedUserMultiple</strong>", data["multiple"])
+        self.assertIn("<strong>label:request_user_input ×2</strong>", data["multiple"])
         for expected in (
             'toolRequestUserInput: "询问用户"',
             'toolProcessAskedUser: "询问了用户"',
@@ -22792,6 +22791,125 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(duplicate_html.count('data-agent-run-id="run-b"'), 1)
         self.assertEqual(duplicate_html.count('class="tool-process-item succeeded"'), 1)
         self.assertEqual(duplicate_html.count('class="tool-process-item failed"'), 1)
+
+    def test_tool_action_names_preserve_exact_identity_across_group_outcomes(self):
+        script = r"""
+const fs = require('node:fs'), vm = require('node:vm');
+const window = {Code: {core: {}, ui: {}}};
+const context = vm.createContext({window});
+for (const path of ['src/core/i18n.js', 'src/ui/messages.js']) vm.runInContext(fs.readFileSync(path, 'utf8'), context);
+const app = fs.readFileSync('app.js', 'utf8');
+vm.runInContext(app.slice(app.indexOf('function _toolActionLabel('), app.indexOf('var _errorCodeMeta')), context);
+const output = {};
+for (const language of ['zh', 'en']) {
+  context.t = (key, params) => window.Code.core.i18n.translate(key, params, language);
+  const feature = window.Code.ui.messages.createMessagesFeature({
+    t: context.t, getToolActionLabel: context._toolActionLabel,
+    escapeHtml: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;'),
+  });
+  output[language] = {};
+  for (const [name, actions] of Object.entries({
+    files: ['read_file', 'search_files', 'list_files', 'glob_files'],
+    skills: ['use_skill', 'read_skill_resource', 'check_skill_dependencies'],
+    web: ['web_fetch', 'web_fetch'],
+    writes: ['propose_edit', 'write_file', 'apply_edit'],
+    unknown: ['old_<tool>', 'constructor', ''],
+    command: ['run_command', 'run_command'],
+  })) {
+    for (const outcome of ['succeeded', 'failed', 'running', 'cancelled', 'completed']) {
+      const items = actions.flatMap((action, index) => {
+        const tool = {action, command: 'view_image picture.png; search_web example', path: 'same.txt'};
+        const call = {msg: {role: 'tool-call', meta: {action, toolCallId: String(index), tool}}, index: index * 2};
+        return outcome === 'running' ? [call] : [call, {msg: {role: 'tool-result', content: 'fixture', meta: {action, toolCallId: String(index), outcome}}, index: index * 2 + 1}];
+      });
+      const before = JSON.stringify(items), html = feature.renderToolProcessProjection(items, 0);
+      if (before !== JSON.stringify(items)) throw new Error('history mutated');
+      output[language][`${name}-${outcome}`] = {
+        heading: html.match(/tool-process-stage-heading"><strong>(.*?)<\/strong>/)[1],
+        names: [...html.matchAll(/tool-process-row-heading"><strong>(.*?)<\/strong>/g)].map(m => m[1]),
+        html,
+      };
+    }
+  }
+}
+process.stdout.write(JSON.stringify(output));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True)
+        data = json.loads(completed.stdout)
+        expected = {
+            "zh": {"files": "读取文件 · 搜索文件 · 列出文件 · 匹配文件", "skills": "加载 Skill · 读取 Skill 资源 · 检查 Skill 依赖", "web": "抓取网页 ×2", "writes": "生成修改方案 · 写入文件 · 应用修改", "unknown": "old_&lt;tool&gt; · constructor · 工具过程", "command": "执行命令 ×2"},
+            "en": {"files": "Read File · Search Files · List Files · Glob Files", "skills": "Load Skill · Read Skill Resource · Check Skill Dependencies", "web": "Web Fetch ×2", "writes": "Propose Edit · Write File · Apply Edit", "unknown": "old_&lt;tool&gt; · constructor · Tool activity", "command": "Run Command ×2"},
+        }
+        for language, groups in expected.items():
+            for group, heading in groups.items():
+                for outcome in ("succeeded", "failed", "cancelled", "completed"):
+                    with self.subTest(language=language, group=group, outcome=outcome):
+                        result = data[language][f"{group}-{outcome}"]
+                        self.assertEqual(result["heading"], heading)
+                        for name in result["names"]:
+                            self.assertIn(name, heading)
+                        self.assertNotIn("<tool>", result["html"])
+                running = data[language][f"{group}-running"]
+                self.assertEqual(running["heading"], running["names"][0])
+                self.assertIn("tool-active", running["html"])
+
+    def test_image_read_groups_use_only_successful_visual_result_snapshots(self):
+        script = r"""
+const assert = require('node:assert/strict');
+global.window = {Code: {ui: {}, core: {}}, atob};
+require('./src/core/i18n.js');require('./src/ui/messages.js');
+const escapeHtml = value => String(value ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+const feature = window.Code.ui.messages.createMessagesFeature({escapeHtml, getToolActionLabel: action => action,
+  t: (key, params) => window.Code.core.i18n.translate(key, params, 'zh'), getSessionId: () => 'snapshot-test'});
+const png = Buffer.from('\x89PNG\r\n\x1a\nfixture', 'binary').toString('base64');
+const visual = {ok:true,action:'read_file',binary:true,visual:true,mime:'image/png',base64:png,path:'same.png'};
+function record(id, result, outcome='succeeded', action='read_file') {
+  return [{role:'tool-call',meta:{action,toolCallId:id,tool:{action,path:result.path||'same.png'}}},
+    {role:'tool-result',meta:{action,toolCallId:id,result,outcome}}];
+}
+function render(messages) { return feature.renderToolProcessProjection(messages.map((msg,index)=>({msg,index})),0); }
+const messages=[...record('a',visual),...record('b',visual),...record('text',{ok:true,path:'notes.txt',content:'text'}),...record('c',visual)];
+const before=JSON.stringify(messages), html=render(messages);
+assert.equal(JSON.stringify(messages),before);
+assert.equal((html.match(/tool-image-stage/g)||[]).length,1);
+assert.equal((html.match(/data-tool-image-preview /g)||[]).length,3);
+assert(html.includes('已查看 3 张图像'));
+assert(html.indexOf('已查看 3 张图像')<html.indexOf('notes.txt'));
+assert.equal(render(JSON.parse(before)),html);
+const interleaved=render([...record('lead',{ok:true},'succeeded','run_command'),...record('left',visual),...record('middle',{ok:true},'succeeded','run_command'),...record('right',visual),...record('failed-image',{...visual,ok:false},'failed')]);
+assert.equal((interleaved.match(/tool-image-stage/g)||[]).length,1);assert(interleaved.includes('已查看 2 张图像'));
+for(const id of ['lead','left','middle','right','failed-image'])assert.equal((interleaved.match(new RegExp(`data-tool-call-id="${id}"`,'g'))||[]).length,1);
+assert(interleaved.indexOf('data-tool-call-id="lead"')<interleaved.indexOf('已查看 2 张图像'));
+assert(interleaved.indexOf('data-tool-call-id="middle"')<interleaved.indexOf('data-tool-call-id="failed-image"'));
+assert.equal((render([...record('one',visual),...record('two',visual),...record('three',visual)]).match(/tool-image-stage/g)||[]).length,1);
+for(const [sequence, kinds] of [['IT',[true,false]],['TI',[false,true]],['ITI',[true,false]],['TIT',[false,true]],['II',[true]],['TT',[false]]]){
+  const records=[...sequence].flatMap((kind,index)=>record(`${kind}-${index}`,kind==='I'?visual:{ok:true},'succeeded',kind==='I'?'read_file':'run_command'));
+  const output=render(records),actual=[...output.matchAll(/<details class="tool-process-stage ([^"]+)"/g)].map(match=>match[1].includes('tool-image-stage'));
+  assert.deepEqual(actual,kinds);
+  const identities=[...output.matchAll(/data-tool-call-id="([^"]+)"/g)].map(match=>match[1]);
+  assert.equal(identities.length,sequence.length);assert.equal(new Set(identities).size,sequence.length);
+  for(const kind of ['I','T'])assert.deepEqual(identities.filter(id=>id.startsWith(kind)),[...sequence].flatMap((value,index)=>value===kind?[`${kind}-${index}`]:[]));
+}
+const negative = [
+  [{...visual,ok:false},'failed','read_file'], [{...visual,visual:false},'succeeded','read_file'],
+  [{...visual,binary:false},'succeeded','read_file'], [{...visual,mime:'text/plain'},'succeeded','read_file'],
+  [{ok:true,path:'photo.png',base64:png},'succeeded','read_file'],[visual,'cancelled','read_file'],
+  [visual,'running','read_file'],[visual,'succeeded','run_command'],[{...visual,action:'write_file'},'succeeded','read_file'],
+];
+for(const [result,outcome,action] of negative)assert(!render(record('negative',result,outcome,action)).includes('tool-image-stage'));
+const markup='<svg onload="alert(1)"><image href="https://example.test/private"/></svg>';
+const unavailable=[{...visual,base64:undefined},{...visual,mime:'image/svg+xml',base64:undefined,svgText:markup},
+  {...visual,base64:Buffer.from(markup).toString('base64')},{...visual,base64:'https://example.test/image.png'},
+  {...visual,base64:'bad\" onerror=\"x'},{...visual,base64:'A'.repeat(14*1024*1024)},
+  {...visual,mime:'image/jpeg'}, {...visual,mime:'image/tiff'}];
+for(const result of unavailable){const output=render(record('unavailable',result));assert(output.includes('已查看 1 张图像'));assert(output.includes('图像预览不可用'));assert(!output.includes('<img '));assert(!output.includes('https://example.test'));assert(!output.includes('onload='));}
+const history=[{role:'user',content:'task'},...record('before',visual),{role:'assistant',content:'A meaningful checkpoint.'},...record('after',visual),{role:'assistant',content:'done',_responseTime:'1s'}];
+const separated=feature.projectMessages(history,{hasActiveRun:false});
+assert.equal((separated.match(/已查看 1 张图像/g)||[]).length,2);assert(separated.includes('A meaningful checkpoint.'));assert(!separated.includes('已查看 2 张图像'));
+process.stdout.write(JSON.stringify({negative:negative.length,unavailable:unavailable.length,ordered:true,roundTrip:true,textBoundary:true}));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertEqual(json.loads(completed.stdout), {"negative": 9, "unavailable": 8, "ordered": True, "roundTrip": True, "textBoundary": True})
 
     def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
         render_start = MESSAGES_SOURCE.index("function projectMessages(")

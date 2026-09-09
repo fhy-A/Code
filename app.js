@@ -3686,7 +3686,7 @@ function _toolActionLabel(action) {
     glob_files:"toolGlobFiles", propose_edit:"toolProposeEdit", apply_edit:"toolApplyEdit",
     run_command:"toolRunCommand", write_file:"toolWriteFile", delete_file:"toolDeleteFile",
     web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory", generate_image:"toolGenerateImage", manage_generated_image:"toolManageGeneratedImage" };
-  return map[action] ? t(map[action]) : action;
+  return Object.hasOwn(map, action) ? t(map[action]) : action || t("toolProcessTitle");
 }
 
 var _errorCodeMeta = {
