@@ -13060,8 +13060,27 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 
 .settings-light-page .update-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 100%;
   align-items: center;
   justify-content: flex-end;
+}
+
+.settings-light-page .update-actions .mini-btn {
+  max-width: 100%;
+  height: auto;
+  padding: 6px 10px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.settings-light-page .update-actions a.mini-btn {
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  text-decoration: none;
 }
 
 .settings-light-page .update-progress-wrap {

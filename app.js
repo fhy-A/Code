@@ -1786,6 +1786,8 @@ const settingsFeature = createSettingsFeature({
   t,
   escapeHtml,
   apiJson,
+  onUpdatePause: (paused) => { state._updateStopping = paused; },
+  prepareUpdate: prepareCurrentPageForUpdate,
   showToast,
   applyI18n,
   setLang,
@@ -7246,7 +7248,10 @@ async function saveSessionState(sessionId, messages, stats, title, options = {})
   if (!sessionId) return;
 
   const supersedingSnapshot = restoreSupersededSessionProjection(sessionId, messages);
-  if (supersedingSnapshot) return supersedingSnapshot;
+  if (supersedingSnapshot) {
+    if (options.requireConfirmedSave === true) throw new Error("update_save_unconfirmed");
+    return supersedingSnapshot;
+  }
 
   const local = state.sessions.find((s) => s.id === sessionId);
   const sessionTitle = title
@@ -12214,6 +12219,7 @@ async function runQueuedSessionMessage(sessionId, item) {
 }
 
 async function pumpQueuedSessionMessages(sessionId) {
+  if (state._updateStopping) return false;
   if (!sessionId || state._queuedMessagePumps.has(sessionId) || isSessionStreaming(sessionId)) return false;
   const runStatus = String(getSessionRunState(sessionId)?.status || "");
   if (["running", "waiting-network", "resuming", "waiting-authorization", "waiting-user-input"].includes(runStatus)) {
@@ -12246,6 +12252,7 @@ async function pumpQueuedSessionMessages(sessionId) {
     return false;
   }
 
+  if (state._updateStopping) return false;
   // A stopped or failed foreground run is terminal once a later queued message
   // starts. Retain only detached background work and the FIFO queue so timing
   // and recovery metadata cannot leak into the next task.
@@ -12415,6 +12422,52 @@ function ensureAgentRecoveryMessage(ctx, error) {
   setSessionMessages(ctx.sessionId, ctx.messages);
   renderSessionMessages(ctx.sessionId);
   return message;
+}
+
+async function prepareCurrentPageForUpdate() {
+  const sessions = state._updatePendingSessionSaves ||= new Set();
+  for (const [sessionId, run] of Object.entries(state._sessionRuns)) {
+    if (run.isStreaming || ["waiting-authorization", "waiting-user-input", "waiting-credentials", "waiting-recovery"].includes(String(getSessionRunState(sessionId)?.status || ""))) {
+      sessions.add(sessionId);
+      cancelSessionRun(run);
+    }
+  }
+  for (const sessionId of Object.keys(state._sessionMsgs)) {
+    const queued = getQueuedMessageCheckpoints(sessionId);
+    if (!queued.length) continue;
+    sessions.add(sessionId);
+    for (const item of queued) {
+      markQueuedMessageCanceled(getSessionMessages(sessionId), item.id, Date.now());
+      const active = state._sessionRuns[sessionId]?._activeCtx?.messages;
+      if (active) markQueuedMessageCanceled(active, item.id, Date.now());
+    }
+    setQueuedMessageCheckpoints(sessionId, []);
+  }
+  for (const job of state._backgroundDispatcher.jobs) {
+    if (["completed", "failed"].includes(job.status)) continue;
+    sessions.add(job.sessionId);
+    job.abortController?.abort();
+    if (job.status !== "running") {
+      updateBackgroundJob(job, "failed", t("updateWorkCancelled"));
+      await persistBackgroundJob(job);
+      job.resolve?.({ok: false, error: "cancelled"});
+    }
+  }
+  await apiJson("/api/update-stop", {method: "POST", body: "{}"});
+  const deadline = Date.now() + 20000;
+  while ([...sessions].some(id => isSessionStreaming(id)) || state._backgroundDispatcher.activeCount) {
+    if (Date.now() >= deadline) throw new Error("update_stop_failed");
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  // Await the ordinary persistence chain after observers finish. Do not hide
+  // a save failure merely because the backend has reached a terminal status.
+  for (const sessionId of sessions) {
+    const saved = await saveSessionState(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId), undefined, {persistMessages: true, requireConfirmedSave: true});
+    if (!saved || saved._sessionRevisionConflict === true || saved.id !== sessionId || !Number.isInteger(saved.revision) || saved.revision < 0) {
+      throw new Error("update_save_unconfirmed");
+    }
+    sessions.delete(sessionId);
+  }
 }
 
 function cancelSessionRun(run) {
@@ -12703,6 +12756,7 @@ async function runBackgroundSubAgentJob(job) {
 }
 
 function pumpBackgroundDispatcher() {
+  if (state._updateStopping) return;
   const dispatcher = state._backgroundDispatcher;
   while (dispatcher.activeCount < dispatcher.globalLimit) {
     const job = dispatcher.jobs.find((candidate) => (
@@ -15473,6 +15527,7 @@ function reconcileOptimisticFirstMessage(message, content, imageRefs, model) {
 }
 
 async function sendMessage(userText, options = {}) {
+  if (state._updateStopping) { showToast(t("updateStopping"), "warning"); return false; }
 
   const model = String(options.model || getSelectedModel());
 

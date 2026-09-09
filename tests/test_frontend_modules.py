@@ -70,6 +70,48 @@ H4_CONFIG_PATH = ROOT / "tests" / "e2e" / "h4" / "playwright.config.cjs"
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_update_lifecycle_delayed_callbacks_and_confirmed_saves(self):
+        completed = subprocess.run(
+            ["node", str(ROOT / "tests/e2e/h4/code086-update-lifecycle-unit.cjs")],
+            cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertTrue(json.loads(completed.stdout)["ok"])
+
+    def test_update_preparation_cancels_queued_work_and_retries_failed_save(self):
+        start = APP_SOURCE.index("async function prepareCurrentPageForUpdate()")
+        end = APP_SOURCE.index("function cancelSessionRun(", start)
+        script = r'''
+const assert = require('node:assert/strict');
+const state = {_sessionRuns:{live:{isStreaming:true}}, _sessionMsgs:{queued:[]},
+  _backgroundDispatcher:{activeCount:0,jobs:[{sessionId:'background',status:'queued',abortController:{abort(){calls.push('abort')}}}]}};
+const calls=[], queues={queued:[{id:'queued-message'}]};let fail=true;
+function getSessionRunState(){return {status:'running'}}
+function cancelSessionRun(run){run.isStreaming=false;calls.push('cancel')}
+function getQueuedMessageCheckpoints(id){return queues[id]||[]}
+function markQueuedMessageCanceled(messages,id){calls.push(id)}
+function getSessionMessages(){return []}
+function setQueuedMessageCheckpoints(id,value){queues[id]=value}
+function updateBackgroundJob(job,status){job.status=status}
+async function persistBackgroundJob(){calls.push('background-save')}
+function t(key){return key}
+async function apiJson(url){assert.equal(url,'/api/update-stop');calls.push('stop')}
+function isSessionStreaming(id){return !!state._sessionRuns[id]?.isStreaming}
+function getSessionStats(){return {}}
+async function saveSessionState(id){calls.push('save-'+id);if(id==='queued'&&fail)throw new Error('disk full');return {id,revision:1}}
+''' + APP_SOURCE[start:end] + r'''
+(async()=>{
+  await assert.rejects(prepareCurrentPageForUpdate(),/disk full/);
+  assert.deepEqual(queues.queued,[]);
+  assert.equal(state._backgroundDispatcher.jobs[0].status,'failed');
+  assert(state._updatePendingSessionSaves.has('queued'));
+  fail=false;await prepareCurrentPageForUpdate();
+  assert.equal(calls.filter(v=>v==='cancel').length,1);
+  assert.equal(calls.filter(v=>v==='save-queued').length,2);
+  assert.equal(state._updatePendingSessionSaves.size,0);
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+        subprocess.run(["node", "-e", script], cwd=ROOT, check=True, capture_output=True, text=True)
+
     def test_code071_session_project_migration_h4_is_packaged_and_cleans_up(self):
         self.assertEqual(
             PACKAGE_JSON["scripts"]["test:h4:session-project-migration"],
@@ -360,6 +402,7 @@ process.stdout.write(JSON.stringify({{
         script = f"""
 let selectedModel = "";
 let selectedKey = "";
+const state = {{}};
 const keyLookups = [];
 const translations = {{
   createSessionFirst: "create-session-first",
@@ -13988,6 +14031,7 @@ global.window = {
   addEventListener: () => {},
   setTimeout,
   setInterval: (callback) => { const id = nextInterval++; activeIntervals.set(id, callback); return id; },
+  clearTimeout,
   clearInterval: (id) => { clearedIntervals.push(id); activeIntervals.delete(id); },
 };
 require("./src/core/namespace.js");
@@ -14005,7 +14049,7 @@ const feature = window.Code.features.settings.createSettingsFeature({
   apiJson: async (url, options = {}) => {
     calls.push({url, options});
     if (url === "/api/version") return {localVersion: "0.6.6"};
-    if (url === "/api/download-progress") return job;
+    if (url.startsWith("/api/download-progress")) return job;
     if (url === "/api/download-update") {
       retryBodies.push(JSON.parse(options.body || "{}"));
       job = {...job, status: "downloading", stage: "downloading", retryable: false, errorCode: null};
@@ -18273,10 +18317,14 @@ process.stdout.write(JSON.stringify({
                 "data-active-run-anchor" if key == "singleActive" else "data-completed-run-status",
                 summary,
             )
-            chevron = html.index('class="execution-trace-chevron"', summary)
             body = html.index('class="execution-trace-body"', summary)
-            self.assertLess(status, chevron)
-            self.assertLess(chevron, body)
+            if key == "singleCompleted":
+                chevron = html.index('class="execution-trace-chevron"', summary)
+                self.assertLess(status, chevron)
+                self.assertLess(chevron, body)
+            else:
+                self.assertNotIn('class="execution-trace-chevron"', html[summary:body])
+                self.assertLess(status, body)
         self.assertNotIn("<unsafe>", data["unsafe"])
         self.assertNotIn("execution-trace-skill-chip", data["oldRecord"])
         self.assertNotIn("execution-trace-skill-chip", data["invalid"])
@@ -21345,7 +21393,8 @@ const feature = window.Code.features.settings.createSettingsFeature({
     def test_remaining_visible_status_strings_use_i18n(self):
         self.assertIn('showToast(t("notEnoughToExtract"))', APP_SOURCE)
         self.assertIn('content: t("scanningConversation")', APP_SOURCE)
-        self.assertIn('showToast(t("restarting"), "success")', SETTINGS_SOURCE)
+        self.assertIn('status("restarting", "loading")', SETTINGS_SOURCE)
+        self.assertNotIn('showToast(t("restarting"), "success")', SETTINGS_SOURCE)
         self.assertNotIn("Not enough conversation content to extract memories", APP_SOURCE)
         self.assertNotIn("Scanning conversation...", APP_SOURCE)
         self.assertNotIn("Code is restarting...", SETTINGS_SOURCE)
@@ -23185,7 +23234,7 @@ ownerDocument.documentElement = {ownerDocument};
 const sameDocumentTarget = {ownerDocument};
 const controlClasses = new Set();
 const trace = {
-  classList: {toggle() { expanded = !expanded; return expanded; }},
+  classList: {contains() { return false; }, toggle() { expanded = !expanded; return expanded; }},
 };
 const control = {
   ownerDocument,

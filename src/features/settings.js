@@ -235,6 +235,15 @@
     let updatePanelGeneration = 0;
     let updatePollId = null;
     let updateVersionPollId = null;
+    let updateVersionAbort = null;
+    let updatePreparation = null;
+    let updateOperationPaused = false;
+    let updateVersionGeneration = 0;
+
+    function setUpdatePaused(paused) {
+      updateOperationPaused = paused;
+      options.onUpdatePause?.(paused || updatePreparation !== null);
+    }
 
     if (typeof apiJson !== "function") throw new Error("settings feature requires apiJson");
 
@@ -1277,6 +1286,10 @@
     }
 
     function disposeUpdatePanel() {
+      setUpdatePaused(false);
+      updateVersionGeneration += 1;
+      updateVersionAbort?.abort();
+      updateVersionAbort = null;
       updatePanelGeneration += 1;
       if (updatePollId !== null) global.clearInterval(updatePollId);
       if (updateVersionPollId !== null) global.clearInterval(updateVersionPollId);
@@ -1291,7 +1304,17 @@
       let currentJobId = "";
       let remoteVersion = "";
       let pollInFlight = false;
+      let jobRequestGeneration = 0;
+      let automaticInstall = false;
+      let operationBusy = false;
+      let lastJobStatus = "idle";
       const isCurrent = () => generation === updatePanelGeneration;
+      const invalidateJobPolling = () => {
+        jobRequestGeneration += 1;
+        pollInFlight = false;
+        if (updatePollId !== null) global.clearInterval(updatePollId);
+        updatePollId = null;
+      };
       const status = (key, tone = "neutral", suffix = "") => {
         if (!isCurrent()) return;
         const element = byId("updateStatus");
@@ -1318,6 +1341,8 @@
         target_conflict: "updateErrorConflict",
         publish_failed: "updateErrorFinalize",
         install_launch_failed: "updateErrorInstall",
+        update_work_busy: "updateStopFailed",
+        update_stop_failed: "updateStopFailed",
       }[code] || "updateErrorGeneric");
       const progress = (value, visible = true) => {
         if (!isCurrent()) return;
@@ -1348,44 +1373,112 @@
 
       const beginVersionPolling = () => {
         if (!fetchFn || !remoteVersion || updateVersionPollId !== null || !isCurrent()) return;
+        const deadline = Date.now() + 90000;
+        const versionGeneration = ++updateVersionGeneration;
+        const expectedVersion = remoteVersion;
+        let versionPollInFlight = false;
         updateVersionPollId = global.setInterval(() => {
-          fetchFn(`/api/version?_=${Date.now()}`, { cache: "no-store" })
+          if (!isCurrent() || versionGeneration !== updateVersionGeneration) return;
+          if (Date.now() >= deadline) {
+            updateVersionGeneration += 1;
+            updateVersionAbort?.abort();
+            updateVersionAbort = null;
+            global.clearInterval(updateVersionPollId);
+            updateVersionPollId = null;
+            operationBusy = false;
+            setUpdatePaused(false);
+            status("updateRestartUnconfirmed", "error");
+            actions(`<button id="updateRecheckBtn" class="mini-btn" type="button" data-i18n="updateRecheck">${t("updateRecheck")}</button>${manualLink()}`);
+            byId("updateRecheckBtn")?.addEventListener("click", () => { status("restarting", "loading"); actions(""); beginVersionPolling(); });
+            return;
+          }
+          if (versionPollInFlight) return;
+          versionPollInFlight = true;
+          const controller = typeof global.AbortController === "function" ? new global.AbortController() : null;
+          updateVersionAbort = controller;
+          const timeout = global.setTimeout(() => controller?.abort(), 5000);
+          fetchFn(`/api/version?_=${Date.now()}`, { cache: "no-store", ...(controller ? {signal: controller.signal} : {}) })
             .then((response) => response.json())
             .then((versionInfo) => {
-              if (!isCurrent() || versionInfo.localVersion !== remoteVersion) return;
+              if (!isCurrent() || versionGeneration !== updateVersionGeneration || Date.now() >= deadline || versionInfo.localVersion !== expectedVersion) return;
+              updateVersionGeneration += 1;
               global.clearInterval(updateVersionPollId);
               updateVersionPollId = null;
               const refreshed = new global.URL(global.location.href);
-              refreshed.searchParams.set("updated", `${remoteVersion}-${Date.now()}`);
+              refreshed.searchParams.set("updated", `${expectedVersion}-${Date.now()}`);
               global.location.replace(refreshed.toString());
             })
-            .catch(() => {});
+            .catch(() => {})
+            .finally(() => { global.clearTimeout(timeout); versionPollInFlight = false; if (updateVersionAbort === controller) updateVersionAbort = null; });
         }, 800);
       };
 
       const installUpdate = async () => {
         status("restarting", "loading");
         actions("");
+        let requestTimeout;
         try {
-          await apiJson("/api/restart", {
-            method: "POST",
-            body: JSON.stringify({ jobId: currentJobId }),
-          });
+          await Promise.race([
+            apiJson("/api/restart", {method: "POST", body: JSON.stringify({ jobId: currentJobId })}),
+            new Promise((_, reject) => { requestTimeout = global.setTimeout(() => reject(new Error("restart_response_unknown")), 30000); }),
+          ]);
         } catch (error) {
           const code = String(error?.data?.errorCode || "");
           if (code) {
             if (!isCurrent()) return;
+            automaticInstall = false;
+            operationBusy = false;
+            setUpdatePaused(false);
             status(errorKey(code), "error");
-            actions(`<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="installRestart">${t("installRestart")}</button>${manualLink()}`);
-            byId("updateRestartBtn")?.addEventListener("click", installUpdate);
+            actions(`${error?.data?.retryable === false ? "" : `<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="updateAndRestart">${t("updateAndRestart")}</button>`}${manualLink()}`);
+            byId("updateRestartBtn")?.addEventListener("click", () => startCombined(false));
             return;
           }
           // A successful verified installer can terminate the old server before
           // fetch observes its JSON response, so transport-only failure is expected.
-        }
+        } finally { global.clearTimeout(requestTimeout); }
         if (!isCurrent()) return;
-        showToast(t("restarting"), "success");
+        status("restarting", "loading");
         beginVersionPolling();
+      };
+
+      const startCombined = async (retry = false) => {
+        if (!isCurrent() || operationBusy) return;
+        operationBusy = true;
+        automaticInstall = false;
+        invalidateJobPolling();
+        setUpdatePaused(true);
+        status("updateStopping", "loading");
+        actions("");
+        try {
+          let timeout;
+          try {
+            if (!updatePreparation) {
+              updatePreparation = Promise.resolve().then(() => options.prepareUpdate?.()).finally(() => {
+                updatePreparation = null;
+                setUpdatePaused(updateOperationPaused);
+              });
+            }
+            await Promise.race([
+              updatePreparation,
+              new Promise((_, reject) => { timeout = global.setTimeout(() => reject(new Error("update_stop_failed")), 60000); }),
+            ]);
+          } finally { global.clearTimeout(timeout); }
+          if (!isCurrent()) return;
+          automaticInstall = true;
+          if (lastJobStatus === "completed" && currentJobId) {
+            automaticInstall = false;
+            await installUpdate();
+          } else await startDownload(retry);
+        } catch {
+          if (!isCurrent()) return;
+          automaticInstall = false;
+          operationBusy = false;
+          setUpdatePaused(false);
+          status("updateStopFailed", "error");
+          actions(`<button id="updateRetryBtn" class="mini-btn primary-btn" type="button" data-i18n="updateAndRestart">${t("updateAndRestart")}</button>`);
+          byId("updateRetryBtn")?.addEventListener("click", () => startCombined(retry));
+        }
       };
 
       const startDownload = async (retry = false) => {
@@ -1400,39 +1493,62 @@
           if (isCurrent()) renderJob(result);
         } catch {
           if (!isCurrent()) return;
+          automaticInstall = false;
+          operationBusy = false;
+          setUpdatePaused(false);
           status("updateErrorGeneric", "error");
-          actions(manualLink());
+          actions(`<button id="updateRecheckBtn" class="mini-btn" type="button" data-i18n="updateRecheck">${t("updateRecheck")}</button>${manualLink()}`);
+          byId("updateRecheckBtn")?.addEventListener("click", refreshJob);
         }
       };
 
       const renderJob = (job) => {
         if (!isCurrent()) return;
+        if (automaticInstall && ((currentJobId && job?.jobId !== currentJobId) || (remoteVersion && job?.version !== remoteVersion))) {
+          automaticInstall = false;
+          operationBusy = false;
+          if (updatePollId !== null) global.clearInterval(updatePollId);
+          updatePollId = null;
+          setUpdatePaused(false);
+          status("updateErrorMetadata", "error");
+          actions(manualLink());
+          return;
+        }
         currentJobId = String(job?.jobId || "");
         remoteVersion = String(job?.version || remoteVersion || "");
         const jobStatus = String(job?.status || "idle");
+        lastJobStatus = jobStatus;
         if (updatePollId !== null && jobStatus !== "downloading") {
           global.clearInterval(updatePollId);
           updatePollId = null;
         }
         if (jobStatus === "downloading") {
-          status("downloading", "loading", remoteVersion ? ` (v${remoteVersion})` : "");
+          status(job.stage === "verifying" ? "updateVerifying" : "downloading", "loading", remoteVersion ? ` (v${remoteVersion})` : "");
           progress(job.progress, true);
           actions("");
           if (updatePollId === null) updatePollId = global.setInterval(refreshJob, 500);
           return;
         }
         if (jobStatus === "failed") {
+          automaticInstall = false;
+          operationBusy = false;
+          setUpdatePaused(false);
           status(errorKey(job.errorCode), "error");
           progress(job.progress, Number(job.progress) > 0);
           actions(`${job.retryable ? `<button id="updateRetryBtn" class="mini-btn primary-btn" type="button" data-i18n="retryUpdate">${t("retryUpdate")}</button>` : ""}${manualLink()}`);
-          byId("updateRetryBtn")?.addEventListener("click", () => startDownload(true));
+          byId("updateRetryBtn")?.addEventListener("click", () => startCombined(true));
           return;
         }
         if (jobStatus === "completed") {
           progress(100, false);
-          status("readyToInstall", "success", remoteVersion ? ` (v${remoteVersion})` : "");
-          actions(`<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="installRestart">${t("installRestart")}</button>`);
-          byId("updateRestartBtn")?.addEventListener("click", installUpdate);
+          if (automaticInstall) {
+            automaticInstall = false;
+            void installUpdate();
+            return;
+          }
+          status(job.errorCode ? errorKey(job.errorCode) : "readyToInstall", job.errorCode ? "error" : "success", remoteVersion ? ` (v${remoteVersion})` : "");
+          actions(`<button id="updateRestartBtn" class="mini-btn primary-btn" type="button" data-i18n="updateAndRestart">${t("updateAndRestart")}</button>`);
+          byId("updateRestartBtn")?.addEventListener("click", () => startCombined(false));
           return;
         }
         if (jobStatus === "installing") {
@@ -1443,6 +1559,8 @@
           return;
         }
         if (jobStatus === "installed") {
+          operationBusy = false;
+          setUpdatePaused(false);
           progress(100, false);
           status("upToDate", "success");
           bindCheck("updateCheckBtn2");
@@ -1455,26 +1573,31 @@
 
       async function refreshJob() {
         if (!isCurrent() || pollInFlight) return;
+        const requestGeneration = jobRequestGeneration;
         pollInFlight = true;
         try {
-          const job = await apiJson("/api/download-progress");
-          if (isCurrent()) renderJob(job);
+          const job = await apiJson(currentJobId ? `/api/download-progress?id=${encodeURIComponent(currentJobId)}` : "/api/download-progress");
+          if (isCurrent() && requestGeneration === jobRequestGeneration) renderJob(job);
         } catch { /* a restart can briefly make the local server unavailable */ }
-        finally { pollInFlight = false; }
+        finally { if (requestGeneration === jobRequestGeneration) pollInFlight = false; }
       }
 
       async function checkUpdate() {
+        invalidateJobPolling();
+        const requestGeneration = jobRequestGeneration;
         status("checkingUpdate", "loading");
         actions("");
         try {
           const data = await checkForUpdates({ silent: false });
-          if (!isCurrent()) return;
+          if (!isCurrent() || requestGeneration !== jobRequestGeneration) return;
           if (data.updateAvailable) {
+            currentJobId = "";
+            lastJobStatus = "idle";
             remoteVersion = String(data.remoteVersion || "");
             status("updateAvailable", "success", remoteVersion ? ` (v${remoteVersion})` : "");
             if (data.isFrozen && data.assetName && data.assetSize) {
-              actions(`<button id="updateDlBtn" class="mini-btn primary-btn" type="button"><span data-i18n="downloadUpdate">${t("downloadUpdate")}</span> <span>v${escapeHtml(remoteVersion)}</span></button>`);
-              byId("updateDlBtn")?.addEventListener("click", () => startDownload(false));
+              actions(`<button id="updateDlBtn" class="mini-btn primary-btn" type="button"><span data-i18n="updateAndRestart">${t("updateAndRestart")}</span> <span>v${escapeHtml(remoteVersion)}</span></button>`);
+              byId("updateDlBtn")?.addEventListener("click", () => startCombined(false));
             } else {
               actions(manualLink());
             }
@@ -1483,7 +1606,7 @@
             bindCheck("updateCheckBtn2");
           }
         } catch {
-          if (!isCurrent()) return;
+          if (!isCurrent() || requestGeneration !== jobRequestGeneration) return;
           status("updateErrorMetadata", "error");
           actions(`${manualLink()}<button id="updateCheckBtn3" class="mini-btn primary-btn" type="button" data-i18n="checkUpdate">${t("checkUpdate")}</button>`);
           byId("updateCheckBtn3")?.addEventListener("click", checkUpdate);

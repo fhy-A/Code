@@ -7,6 +7,7 @@ import codecs
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from functools import wraps
 import ctypes
 import datetime as dt
 import difflib
@@ -322,6 +323,150 @@ _UPDATE_DOWNLOAD_CHUNK_BYTES = 256 * 1024
 _UPDATE_DOWNLOAD_ATTEMPTS = 3
 _UPDATE_RETRY_DELAYS = (0.05, 0.15)
 _UPDATE_TERMINAL_STATUSES = frozenset({"completed", "failed", "installing", "installed"})
+
+# Short-lived, process-local updater fence. No identity or durable stop epoch.
+_update_stop_lock = threading.RLock()
+_update_stop_owner = None
+_update_execution_requests = 0
+_command_termination_lock = threading.RLock()
+_command_processes = set()
+_update_pending_save_runs = {}
+_UPDATE_STOP_TIMEOUT_SECONDS = 20
+
+
+def _update_admission(function):
+    @wraps(function)
+    def admitted(*args, **kwargs):
+        with _update_stop_lock:
+            if _update_stop_owner is not None:
+                raise _UpdateFailure("update_work_busy", retryable=True, stage="stopping")
+            return function(*args, **kwargs)
+    return admitted
+
+
+def _update_execution_request(function):
+    @wraps(function)
+    def guarded(handler, *args, **kwargs):
+        global _update_execution_requests
+        route = parse.urlparse(handler.path).path
+        tracked = route.startswith(("/api/agent/runs", "/api/runtime/runs", "/api/tools/", "/api/sessions", "/proxy/chat")) or route.endswith("/goal-v2/control")
+        if not tracked:
+            return function(handler, *args, **kwargs)
+        with _update_stop_lock:
+            if _update_stop_owner is not None:
+                handler.send_json({"errorCode": "update_work_busy", "error": "Update is stopping active work.", "retryable": True}, 409)
+                return
+            _update_execution_requests += 1
+        try:
+            return function(handler, *args, **kwargs)
+        finally:
+            with _update_stop_lock:
+                _update_execution_requests -= 1
+    return guarded
+
+
+def _stop_update_work(deadline):
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+        return seconds
+
+    with _dependency_operation_lock:
+        if any(item.get("status") not in _DEPENDENCY_OPERATION_TERMINAL for item in _dependency_operations.values()):
+            raise _UpdateFailure("update_work_busy", retryable=True, stage="stopping")
+    with _agent_run_lock:
+        runs = [run for run in _agent_runs.values() if run.get("status") not in _AGENT_RUN_TERMINAL or (run.get("worker") is not None and run["worker"].is_alive())]
+        runs = list({**_update_pending_save_runs, **{run["id"]: run for run in runs}}.values())
+        _update_pending_save_runs.update({run["id"]: run for run in runs})
+    with _model_runtime_lock:
+        models = [run for run in _model_runtime_runs.values() if run.get("status") not in {"completed", "failed", "cancelled"} or (run.get("worker") is not None and run["worker"].is_alive())]
+    workers = [run.get("worker") for run in runs + models if run.get("worker") is not None]
+    with _command_termination_lock:
+        processes = list(_command_processes | {run["active_process"] for run in runs if run.get("active_process") is not None})
+    for run in runs + models:
+        run["cancel_event"].set()
+    for process in processes:
+        remaining()
+        if not _terminate_command_process(process):
+            raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+    for run in runs:
+        remaining()
+        if run.get("status") not in _AGENT_RUN_TERMINAL:
+            _cancel_agent_run(run["id"])
+    for run in models:
+        remaining()
+        _cancel_model_runtime_run(run["id"])
+    for worker in workers:
+        worker.join(timeout=remaining())
+        if worker.is_alive():
+            raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+    if any(process.poll() is None for process in processes):
+        raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+    # Legacy/direct requests have no common cancellation owner. Wait for their
+    # real return; a timeout keeps the old service alive rather than guessing.
+    while True:
+        with _update_stop_lock:
+            if not _update_execution_requests:
+                break
+        time.sleep(min(0.02, remaining()))
+    with _command_termination_lock:
+        for process in list(_command_processes):
+            if process.poll() is None or any(reader.is_alive() for reader in getattr(process, "_code_output_readers", [])):
+                raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+            _command_processes.discard(process)
+    for run in runs:
+        remaining()
+        if run.get("status") not in _AGENT_RUN_TERMINAL:
+            raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+        _persist_agent_run(run)
+        with _agent_run_lock:
+            _update_pending_save_runs.pop(run["id"], None)
+
+
+@contextmanager
+def _update_install_window():
+    global _update_stop_owner
+    owner = object()
+    if not _update_stop_lock.acquire(timeout=1):
+        raise _UpdateFailure("update_work_busy", retryable=True, stage="stopping")
+    try:
+        if _update_stop_owner is not None:
+            raise _UpdateFailure("update_work_busy", retryable=True, stage="stopping")
+        _update_stop_owner = owner
+    finally:
+        _update_stop_lock.release()
+    completed, released = threading.Event(), threading.Event()
+    outcome = {}
+
+    def release():
+        global _update_stop_owner
+        with _update_stop_lock:
+            if _update_stop_owner is owner:
+                _update_stop_owner = None
+
+    def stop():
+        try:
+            _stop_update_work(time.monotonic() + _UPDATE_STOP_TIMEOUT_SECONDS)
+        except Exception:
+            outcome["failed"] = True
+        finally:
+            completed.set()
+            if released.is_set():
+                release()
+
+    worker = threading.Thread(target=stop, name="code-update-stop", daemon=True)
+    try:
+        worker.start()
+        if not completed.wait(_UPDATE_STOP_TIMEOUT_SECONDS) or outcome.get("failed"):
+            raise _UpdateFailure("update_stop_failed", retryable=True, stage="stopping")
+        yield
+    finally:
+        released.set()
+        # If cancellation/save is still returning, it retains the fence until
+        # actually done. Never allow new work to race a late state write.
+        if completed.is_set() or worker.ident is None:
+            release()
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x0400
 _tray_thread_ref = None  # tray daemon thread reference
 _browser_heartbeat = 0   # timestamp of last browser ping
@@ -1339,6 +1484,9 @@ def _cleanup_runtime_runs():
         for run_id, run in _model_runtime_runs.items():
             age = now - run["updated_at"]
             terminal = run["status"] in {"completed", "failed", "cancelled"}
+            worker = run.get("worker")
+            if worker is not None and worker.is_alive():
+                continue
             if (terminal and age > _MODEL_RUNTIME_TERMINAL_TTL) or age > _MODEL_RUNTIME_ACTIVE_TTL:
                 expired.append(run_id)
         for run_id in expired:
@@ -1624,6 +1772,7 @@ def _model_runtime_worker(run):
         run["upstream_response"] = None
 
 
+@_update_admission
 def _create_model_runtime_run(
     session_id,
     payload,
@@ -1677,7 +1826,8 @@ def _create_model_runtime_run(
     }
     with _model_runtime_lock:
         _model_runtime_runs[run_id] = run
-    threading.Thread(target=_model_runtime_worker, args=(run,), daemon=True).start()
+    run["worker"] = threading.Thread(target=_model_runtime_worker, args=(run,), daemon=True)
+    run["worker"].start()
     return run
 
 
@@ -11428,6 +11578,7 @@ def _agent_run_worker(run):
                 run["worker"] = None
 
 
+@_update_admission
 def _start_agent_worker(run):
     if run.get("_skill_loading_persist_uncertain"):
         raise skill_loading.SkillLoadingError("skill_loading_persistence_uncertain")
@@ -11511,6 +11662,7 @@ def _agent_hydrate_protocol_history(run):
 
 
 @skill_dependency_operation.serialized
+@_update_admission
 def _create_agent_run(
     session_id,
     payload,
@@ -12078,6 +12230,7 @@ def _create_agent_run(
     return run
 
 
+@_update_admission
 def _resume_agent_run(
     run,
     keys,
@@ -12795,18 +12948,7 @@ try {{
         }}
     }}
     if ($exitCode -eq 0) {{
-        $newFullName = [System.IO.Path]::GetFullPath($newExe)
-        Get-ChildItem -LiteralPath $targetDir -Filter 'Code-v*.exe' -File | ForEach-Object {{
-            if (-not [String]::Equals(
-                [System.IO.Path]::GetFullPath($_.FullName),
-                $newFullName,
-                [StringComparison]::OrdinalIgnoreCase
-            )) {{
-                Remove-Item -LiteralPath $_.FullName -Force
-                Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) cleaned up: $($_.Name)" -Encoding utf8
-            }}
-        }}
-        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) update completed" -Encoding utf8
+        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) verified replacement ready; old versions retained" -Encoding utf8
     }}
 }} catch {{
     $exitCode = 24
@@ -12855,6 +12997,8 @@ class _UpdateFailure(Exception):
 
 
 _UPDATE_PUBLIC_ERRORS = {
+    "update_work_busy": "Work is still active. The current version was kept.",
+    "update_stop_failed": "Work could not be stopped and saved. The current version was kept.",
     "trusted_asset_unavailable": "A verified update asset is not available.",
     "invalid_update_request": "The update request does not match the verified release.",
     "target_conflict": "The update destination is not available.",
@@ -13634,6 +13778,12 @@ def _restore_update_jobs(target_dir=None, *, trusted_descriptor=None, start_work
         job["stage"] = "installed"
         job["restartStarted"] = False
         status = "installed"
+    elif status == "installing":
+        # The old version is running again: the previous handoff did not prove
+        # readiness. Keep the verified file, but require another explicit click.
+        job.update(status="completed", stage="completed", restartStarted=False,
+                   errorCode="install_launch_failed", retryable=True)
+        status = "completed"
     with _update_job_lock:
         key = _update_job_key(target, descriptor)
         existing_id = _update_jobs_by_key.get(key)
@@ -18618,6 +18768,7 @@ def _dependency_operation_worker(operation):
             operation["_process"] = None
 
 
+@_update_admission
 def create_skill_dependency_operation(name, capability, action, fingerprint):
     supplied_fingerprint = str(fingerprint or "").strip()
     with _dependency_operation_lock:
@@ -24144,24 +24295,36 @@ def execute_web_fetch_tool(body):
 
 
 def _terminate_command_process(process):
+    # Cancellation may arrive from both the command loop and its owner. Do
+    # not let a second fallback kill the parent while taskkill walks children.
+    with _command_termination_lock:
+        return _terminate_command_process_unlocked(process)
+
+
+def _terminate_command_process_unlocked(process):
     if process is None or process.poll() is not None:
-        return
+        return True
     try:
         if os.name == "nt":
-            subprocess.run(
+            terminated = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True,
                 timeout=5,
                 **_hidden_subprocess_kwargs(),
             )
+            if terminated.returncode != 0:
+                raise RuntimeError("command tree termination failed")
         else:
             process.terminate()
             process.wait(timeout=3)
+        process.wait(timeout=3)
+        return process.poll() is not None
     except Exception:
         try:
             process.kill()
         except Exception:
             pass
+        return False
 
 
 def execute_run_command_tool(
@@ -24285,12 +24448,16 @@ def execute_run_command_tool(
             **({"env": process_environment} if process_environment is not None else {}),
             **_hidden_subprocess_kwargs(),
         )
+        process._code_output_readers = []
+        with _command_termination_lock:
+            _command_processes.add(process)
         if callable(process_callback):
             process_callback(process)
         readers = [
             threading.Thread(target=consume, args=(process.stdout, "stdout"), daemon=True),
             threading.Thread(target=consume, args=(process.stderr, "stderr"), daemon=True),
         ]
+        process._code_output_readers = readers
         for reader in readers:
             reader.start()
         while process.poll() is None:
@@ -24327,6 +24494,10 @@ def execute_run_command_tool(
     finally:
         if callable(process_callback):
             process_callback(None)
+        if process is not None:
+            with _command_termination_lock:
+                if process.poll() is not None and not any(reader.is_alive() for reader in getattr(process, "_code_output_readers", [])):
+                    _command_processes.discard(process)
 
     _, stdout_text = scan_injection(output["stdout"])
     _, stderr_text = scan_injection(output["stderr"])
@@ -26324,6 +26495,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    @_update_execution_request
     def do_POST(self):
         if self.path.startswith("/proxy/chat"):
             self.proxy("POST", "/v1/chat/completions")
@@ -26838,6 +27010,14 @@ class CodeHandler(BaseHTTPRequestHandler):
             if self.path == "/api/download-update":
                 self._handle_download_update(self.read_body_json())
                 return
+            if self.path == "/api/update-stop":
+                body = self.read_body_json()
+                if body != {} or not getattr(sys, "frozen", False):
+                    self.send_json({"errorCode": "update_not_ready", "error": _public_update_error("update_not_ready")}, 400)
+                    return
+                with _update_install_window():
+                    self.send_json({"ok": True})
+                return
             if self.path == "/api/open-file":
                 self._handle_open_file()
                 return
@@ -26858,6 +27038,9 @@ class CodeHandler(BaseHTTPRequestHandler):
             return
         except SessionArchiveMutationError as exc:
             self.send_json(exc.public_payload(), exc.http_status)
+            return
+        except _UpdateFailure as exc:
+            self.send_json({"errorCode": exc.code, "error": _public_update_error(exc.code), "retryable": exc.retryable}, 409)
             return
         except ImageRuntimeError as exc:
             self.send_json(exc.public_payload(), exc.http_status)
@@ -26884,6 +27067,7 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         self.send_error(404)
 
+    @_update_execution_request
     def do_PUT(self):
         try:
             if self.path.startswith("/api/sessions/") and self.path.endswith("/project"):
@@ -29560,42 +29744,39 @@ class CodeHandler(BaseHTTPRequestHandler):
             _validate_completed_update_file(
                 job_copy["finalPath"], job_copy["descriptor"], job_copy["targetDir"],
             )
-            _persist_update_job(job_copy)
-            target_dir = Path(job_copy["targetDir"])
-            new_exe = Path(job_copy["finalPath"])
-            current_exe = _absolute_lexical_path(sys.executable)
-            if new_exe == current_exe:
-                raise _UpdateFailure("update_not_ready", stage="installing")
-            lock_path = _update_data_dir_lock_path(target_dir)
-            log_path = DATA_DIR / "update.log"
-            bat_path = _build_update_script(
-                target_dir,
-                new_exe,
-                None,
-                log_path,
-                source_pid=os.getpid(),
-                lock_path=lock_path,
-            )
-            subprocess.Popen(
-                ["cmd", "/c", str(bat_path)],
-                creationflags=0x08000000,
-                close_fds=True,
-                cwd=str(target_dir),
-            )
-        except Exception:
+            with _update_install_window():
+                _persist_update_job(job_copy)
+                target_dir = Path(job_copy["targetDir"])
+                new_exe = Path(job_copy["finalPath"])
+                current_exe = _absolute_lexical_path(sys.executable)
+                if new_exe == current_exe:
+                    raise _UpdateFailure("update_not_ready", stage="installing")
+                lock_path = _update_data_dir_lock_path(target_dir)
+                log_path = DATA_DIR / "update.log"
+                bat_path = _build_update_script(
+                    target_dir, new_exe, None, log_path,
+                    source_pid=os.getpid(), lock_path=lock_path,
+                )
+                subprocess.Popen(
+                    ["cmd", "/c", str(bat_path)],
+                    creationflags=0x08000000, close_fds=True, cwd=str(target_dir),
+                )
+                self.send_json({"ok": True, **_current_update_snapshot(job_copy["jobId"])})
+                os._exit(0)
+        except Exception as exc:
+            code = exc.code if isinstance(exc, _UpdateFailure) else "install_launch_failed"
+            invalid_file = code in {"download_size_mismatch", "download_digest_mismatch", "download_pe_invalid", "unsafe_update_path"}
             _set_update_job_state(
-                job_copy["jobId"], generation, status="completed", stage="completed",
-                errorCode="install_launch_failed", retryable=True,
+                job_copy["jobId"], generation, status="failed" if invalid_file else "completed", stage="verifying" if invalid_file else "completed",
+                errorCode=code, retryable=not invalid_file,
                 restartStarted=False, terminalCommitted=True,
             )
             self.send_json({
-                "errorCode": "install_launch_failed",
-                "error": _public_update_error("install_launch_failed"),
-                "retryable": True,
+                "errorCode": code,
+                "error": _public_update_error(code),
+                "retryable": not invalid_file,
             }, 500)
             return
-        self.send_json({"ok": True, **_current_update_snapshot(job_copy["jobId"])})
-        os._exit(0)
 
     def _handle_sync_keys(self):
         body = self.read_body_json()

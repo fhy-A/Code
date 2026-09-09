@@ -210,6 +210,7 @@ class _AgentUpstream(BaseHTTPRequestHandler):
             and message.get("content") in {
                 "run approved command",
                 "run slow command",
+                "run slow native command",
                 "install dependency in bypass",
                 "install system dependency in bypass",
             }
@@ -441,6 +442,8 @@ class _AgentUpstream(BaseHTTPRequestHandler):
                     )
                 )
             )
+            if any(message.get("content") == "run slow native command" for message in messages):
+                command = "Write-Output 'command-started'; Start-Sleep -Seconds 20"
             frames = [{
                 "choices": [{
                     "delta": {"tool_calls": [{
@@ -8240,6 +8243,79 @@ raise SystemExit(2)
         self.assertEqual(event_types[-1], "cancelled")
         persisted = server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8")
         self.assertNotIn("cancel-secret-key", persisted)
+
+    def test_update_stop_waits_for_real_parent_child_and_model_workers(self):
+        run = server_mod._create_agent_run(
+            "update-child-session",
+            {"model": "test-model", "messages": [{"role": "user", "content": "delegate slow child"}],
+             "tools": [server_mod._SERVER_TOOL_DEFINITIONS["task"]]},
+            self.base_url, ["fixture-key"], allowed_tools=["task"], permission_profile="plan",
+        )
+        self.assertTrue(_AgentUpstream.slow_started.wait(3))
+        with server_mod._agent_run_lock:
+            runs = list(server_mod._agent_runs.values())
+        with server_mod._model_runtime_lock:
+            models = list(server_mod._model_runtime_runs.values())
+        workers = [item.get("worker") for item in runs + models if item.get("worker")]
+        self.assertGreaterEqual(len(runs), 2)
+        release = threading.Timer(.15, _AgentUpstream.release_slow.set)
+        release.start()
+        try:
+            with server_mod._update_install_window():
+                self.assertTrue(all(not worker.is_alive() for worker in workers))
+                for item in runs:
+                    self.assertIn(item["status"], server_mod._AGENT_RUN_TERMINAL)
+                    persisted = json.loads(server_mod._agent_run_path(item["id"]).read_text(encoding="utf-8"))
+                    self.assertIn(persisted["status"], server_mod._AGENT_RUN_TERMINAL)
+                with self.assertRaises(server_mod._UpdateFailure):
+                    server_mod._start_agent_worker(run)
+        finally:
+            _AgentUpstream.release_slow.set()
+            release.join(2)
+
+    def test_update_stop_cancels_waiting_foreground_and_background_without_executing(self):
+        runs = []
+        for index, kind in enumerate(("foreground", "background")):
+            run = server_mod._create_agent_run(
+                f"update-waiting-{index}",
+                {"model": "test-model", "messages": [{"role": "user", "content": "run approved command"}],
+                 "tools": [server_mod._SERVER_TOOL_DEFINITIONS["run_command"]]},
+                self.base_url, ["fixture-key"], allowed_tools=["run_command"], permission_profile="accept",
+                run_kind=kind,
+            )
+            self._wait_status(run, "waiting_authorization")
+            self._wait_worker_idle(run)
+            runs.append(run)
+        with server_mod._update_install_window():
+            for run in runs:
+                self.assertEqual(run["status"], "cancelled")
+                self.assertIsNone(run.get("active_process"))
+                persisted = json.loads(server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8"))
+                self.assertEqual(persisted["status"], "cancelled")
+                self.assertFalse(persisted.get("pendingAuthorization"))
+
+    def test_update_stop_confirms_real_command_exit_before_installation(self):
+        run = server_mod._create_agent_run(
+            "update-command-session",
+            {"model": "test-model", "messages": [{"role": "user", "content": "run slow native command"}],
+             "tools": [server_mod._SERVER_TOOL_DEFINITIONS["run_command"]]},
+            self.base_url, ["fixture-key"], allowed_tools=["run_command"], permission_profile="bypass",
+        )
+        deadline = time.time() + 8
+        process = None
+        while time.time() < deadline:
+            process = run.get("active_process")
+            if process is not None and "command-started" in str(run.get("tool_executions")):
+                break
+            time.sleep(.05)
+        self.assertIsNotNone(process)
+        worker = run["worker"]
+        with server_mod._update_install_window():
+            self.assertIsNotNone(process.poll())
+            self.assertFalse(worker.is_alive())
+            self.assertIn(run["status"], server_mod._AGENT_RUN_TERMINAL)
+            persisted = json.loads(server_mod._agent_run_path(run["id"]).read_text(encoding="utf-8"))
+            self.assertIn(persisted["status"], server_mod._AGENT_RUN_TERMINAL)
 
     def test_content_filter_stops_immediately_without_empty_response_retry(self):
         with _AgentUpstream.scripted_lock:

@@ -60,7 +60,7 @@ async function createContext(browser, host, runtime, audit, view = {}) {
     acceptDownloads: false,
   });
   await installNetworkFence(context, runtime, audit);
-  await context.addInitScript(({ platformToken, language, theme }) => {
+  await context.addInitScript(({ platformToken, language, theme, preserveLanguage }) => {
     class OfflineRenderer {}
     window.marked = {
       Renderer: OfflineRenderer,
@@ -74,7 +74,7 @@ async function createContext(browser, host, runtime, audit, view = {}) {
       username: "skill-model-reminder-selfcheck",
     }));
     localStorage.setItem("code-permission-profile", "read");
-    localStorage.setItem("code-lang", language);
+    if (!preserveLanguage || !localStorage.getItem("code-lang")) localStorage.setItem("code-lang", language);
     localStorage.setItem("code-theme-mode", theme);
     localStorage.setItem("code-sidebar-hidden", "1");
     localStorage.removeItem("code-model");
@@ -82,6 +82,7 @@ async function createContext(browser, host, runtime, audit, view = {}) {
   }, {
     platformToken: host.platformToken,
     language: view.language || (runtime === "bundle" ? "zh" : "en"),
+    preserveLanguage: Boolean(view.preserveLanguage),
     theme: view.theme || (runtime === "bundle" ? "dark" : "light"),
   });
   if (view.language) await context.addInitScript(() => {

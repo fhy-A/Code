@@ -1410,6 +1410,62 @@ class TestUpdaterHelpers(unittest.TestCase):
                 )
                 self.assertEqual(server._current_update_snapshot(completed["jobId"])["status"], "installing")
 
+    def test_restart_stop_failure_and_corrupt_file_do_not_launch_or_exit(self):
+        payload = _fake_pe_bytes(8192)
+        identity = {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}
+        with _update_http_fixture(payload, ["normal"]) as (url, _fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=identity):
+                target = Path(temp_dir)
+                started = server._start_or_attach_update_job(descriptor, target_dir=target)
+                self._wait_for_terminal(started["jobId"])
+                handler = object.__new__(server.CodeHandler)
+                handler.read_body_json = mock.Mock(return_value={"jobId": started["jobId"]})
+                handler.send_json = mock.Mock()
+                with mock.patch.object(server.sys, "frozen", True, create=True), \
+                     mock.patch.object(server.subprocess, "Popen") as popen, \
+                     mock.patch.object(server.os, "_exit") as exit_process:
+                    with mock.patch.object(server, "_stop_update_work", side_effect=OSError("disk full")):
+                        handler._handle_restart()
+                    failed = server._current_update_snapshot(started["jobId"])
+                    self.assertEqual(failed["status"], "completed")
+                    self.assertEqual(failed["errorCode"], "update_stop_failed")
+                    self.assertEqual((target / descriptor["name"]).read_bytes(), payload)
+                    (target / descriptor["name"]).write_bytes(b"corrupt")
+                    handler._handle_restart()
+                    failed = server._current_update_snapshot(started["jobId"])
+                    self.assertEqual(failed["status"], "failed")
+                    self.assertFalse(failed["retryable"])
+                    popen.assert_not_called()
+                    exit_process.assert_not_called()
+
+    def test_old_installing_sidecar_restores_as_explicit_retry_without_schema_change(self):
+        payload = _fake_pe_bytes(8192)
+        identity = {"version": "0.6.7", "originalFilename": "Code-v0.6.7.exe", "productName": "Code"}
+        with _update_http_fixture(payload, ["normal"]) as (url, _fixture):
+            descriptor = self._descriptor(url, payload)
+            with tempfile.TemporaryDirectory() as temp_dir, self._allow_local_descriptor(), \
+                 mock.patch.object(server, "_read_windows_file_identity", return_value=identity):
+                target = Path(temp_dir)
+                started = server._start_or_attach_update_job(descriptor, target_dir=target)
+                self._wait_for_terminal(started["jobId"])
+                job = server._active_downloads[started["jobId"]]
+                job.update(status="installing", stage="installing", restartStarted=True)
+                server._persist_update_job(job)
+                metadata = json.loads(server._update_metadata_path(target, descriptor).read_text(encoding="utf-8"))
+                self.assertEqual(metadata["schema"], "code-update-job/v1")
+                self.assertNotIn("restartStarted", metadata)
+                server._reset_update_runtime_state_for_tests()
+                with mock.patch.object(server, "_read_version_file", return_value="0.6.6"), \
+                     mock.patch.object(server, "_launch_update_worker") as launch:
+                    restored = server._restore_update_jobs(target, trusted_descriptor=descriptor)
+                self.assertEqual(restored[0]["status"], "completed")
+                self.assertEqual(restored[0]["errorCode"], "install_launch_failed")
+                self.assertFalse(server._active_downloads[started["jobId"]]["restartStarted"])
+                launch.assert_not_called()
+                self.assertEqual((target / descriptor["name"]).read_bytes(), payload)
+
     def test_remote_version_selects_matching_code_asset(self):
         download_url = "https://github.com/fhy-A/Code/releases/download/v0.5.4/Code-v0.5.4.exe"
         payload = {
@@ -1529,7 +1585,7 @@ class TestUpdaterHelpers(unittest.TestCase):
         )
         log_at = payload.index("Add-Content -LiteralPath $logPath")
         move_at = payload.index("Move-Item -LiteralPath")
-        delete_at = payload.index("Remove-Item -LiteralPath")
+        retained_at = payload.index("old versions retained")
         unlock_at = payload.index("$lockStream.Unlock($lockOffset, $lockLength)")
         dispose_at = payload.index("$lockStream.Dispose()")
         self.assertLess(wait_at, lock_at)
@@ -1539,8 +1595,9 @@ class TestUpdaterHelpers(unittest.TestCase):
         self.assertLess(locked_identity_at, log_at)
         self.assertLess(lock_at, log_at)
         self.assertLess(log_at, move_at)
-        self.assertLess(move_at, delete_at)
-        self.assertLess(delete_at, unlock_at)
+        self.assertLess(move_at, retained_at)
+        self.assertLess(retained_at, unlock_at)
+        self.assertNotIn("Remove-Item -LiteralPath", payload)
         self.assertLess(unlock_at, dispose_at)
         self.assertLess(script.index("powershell.exe"), script.index('start "" "'))
         self.assertLess(
@@ -2270,9 +2327,9 @@ public static class ReplacementSentinel {{
             with self.assertRaises(data_dir_owner.DataDirInUseError):
                 data_dir_owner.acquire_data_dir_owner(data_dir)
 
-            self.assertFalse(older.exists())
+            self.assertTrue(older.exists())
             self.assertIn(
-                "update completed",
+                "old versions retained",
                 (data_dir / "update.log").read_text(encoding="utf-8"),
             )
             replacement["release"].write_text("release", encoding="utf-8")
