@@ -3489,6 +3489,41 @@ raise SystemExit(2)
         }}
         self.assertEqual(server_mod._agent_identical_tool_failure_count(run, new["fingerprint"], signature), 2)
 
+    def test_bounded_late_text_window_reaches_agent_tool_result_without_mutation(self):
+        target = self.project_dir / "late-window.txt"
+        source = ("前段内容\n" * 80000 + "目标甲\r\n目标乙\n目标丙\n").encode("utf-8")
+        target.write_bytes(source)
+        before = target.stat()
+        arguments = json.dumps({"path": target.name, "startLine": 80001, "endLine": 80003})
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "late-window", "type": "function", "function": {"name": "read_file", "arguments": arguments}}]}, "finish_reason": "tool_calls"}]}],
+                [{"choices": [{"delta": {"content": "window read"}, "finish_reason": "stop"}]}],
+            ]
+        with mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:
+            run = server_mod._create_agent_run(
+                "session-late-window", {"model": "test-model", "messages": [{"role": "user", "content": "read the late lines"}]},
+                self.base_url, ["fixture-window-key"], allowed_tools=["read_file"], max_rounds=3,
+            )
+            self._wait_terminal(run)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(execute_mock.call_count, 1)
+        self.assertEqual(len(snapshot["toolExecutions"]), 1)
+        result = snapshot["toolExecutions"][0]["result"]
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["content"], "目标甲\n目标乙\n目标丙")
+        self.assertEqual(result["lineRange"], {"start": 80001, "end": 80003})
+        self.assertFalse(result["truncated"])
+        self.assertEqual(result["size"], len(source))
+        tool_message = next(message for message in _AgentUpstream.payloads[1]["messages"] if message.get("role") == "tool")
+        delivered = json.loads(tool_message["content"])
+        self.assertEqual(delivered["content"], result["content"])
+        self.assertEqual(delivered["lineRange"], result["lineRange"])
+        self.assertEqual(target.read_bytes(), source)
+        self.assertEqual(target.stat().st_mtime_ns, before.st_mtime_ns)
+
     def test_budget_truncated_arguments_use_existing_correction_round_without_extra_execution(self):
         def frame(call_id, arguments, finish):
             return {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": {"name": "write_file", "arguments": arguments}}]}, "finish_reason": finish}]}

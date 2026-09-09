@@ -7880,7 +7880,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "ade692bbb643d72470087a2d60f008c4fc31be706b322ad9b1bba96bc364832a",
+            "68220d9d10ce668504827059c85eb6d70eb7bad3ce6716d30fba6f98d5b4a755",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])

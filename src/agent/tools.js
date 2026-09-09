@@ -245,7 +245,7 @@ const nativeTools = [
 
       name: "read_file",
 
-      description: "读取项目或attachments/文件的文本，或图片/二进制信息。文本按UTF-8解码；当前先截前512KiB再按行筛选，后段行与空范围可能不可用。行号从1开始且两端包含，结束不能早于开始；图片/二进制另有视觉上限。例：{\"path\":\"src/main.py\",\"startLine\":1,\"endLine\":40}。",
+      description: "读取项目或attachments/文件的文本，或图片/二进制信息。UTF-8文本最多返回512KiB且保留完整字符；无行范围时返回保留原换行的前缀。行范围从1开始且两端包含，可扫描初始文件大小内的后段行，结果以LF连接。truncated表示请求文本被省略，不代表文件本身较大；lineRange为实际返回行，末行可不完整。检测到读取期间文件变化会失败并提示重新读取；图片/二进制另有视觉上限。例：{\"path\":\"src/main.py\",\"startLine\":1,\"endLine\":40}。",
 
       parameters: {
 
@@ -265,7 +265,7 @@ const nativeTools = [
 
             type: "integer",
 
-            description: "可选、从1开始且包含该行；指定范围时默认1。超出前512KiB预览的行可能不可用。",
+            description: "可选、从1开始且包含该行；指定范围时默认1。开始超过EOF会失败并报告实际末行；空文件仅首行窗口成功，返回空content和null lineRange。",
 
           },
 
@@ -273,7 +273,7 @@ const nativeTools = [
 
             type: "integer",
 
-            description: "可选且包含该行，省略则取预览末行；不要反向指定范围，不要从截断推断后续文件内容。",
+            description: "可选且包含该行，省略则读取到EOF或输出上限；超过EOF截到实际末行，早于开始行则失败。请求窗口完整返回时truncated=false，即使文件较大。",
 
           },
 

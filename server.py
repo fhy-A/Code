@@ -23983,6 +23983,106 @@ def execute_list_files_tool(body):
     }
 
 
+_TEXT_READ_CHUNK_BYTES = 64 * 1024
+_TEXT_LINE_ENDINGS = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _read_text_window(stream, initial_size, prefix=b"", *, start_line=None, end_line=None):
+    """Scan a finite file snapshot with fixed buffers and a bounded UTF-8 result."""
+    ranged = start_line is not None or end_line is not None
+    start, end = 1, None
+    if ranged:
+        try:
+            start = max(1, int(start_line or 1))
+            end = int(end_line) if end_line else None
+        except (TypeError, ValueError):
+            raise ValueError("startLine/endLine 必须是数字") from None
+        if end is not None and end < start:
+            raise ValueError("endLine 不能小于 startLine")
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    output = bytearray()
+    remaining = max(0, initial_size - len(prefix))
+    line_number, last_line, selected_last = 1, 0, None
+    previous_cr = False
+
+    def append_text(text):
+        encoded = text.encode("utf-8")
+        available = MAX_TOOL_READ_BYTES - len(output)
+        if len(encoded) <= available:
+            output.extend(encoded)
+            return True
+        output.extend(encoded[:available].decode("utf-8", errors="ignore").encode("utf-8"))
+        return False
+
+    def result(truncated=False):
+        line_range = {"start": start, "end": selected_last} if selected_last is not None else None
+        return output.decode("utf-8"), truncated, line_range
+
+    chunk = prefix
+    while True:
+        text = decoder.decode(chunk, final=remaining == 0)
+        if not ranged:
+            if not append_text(text):
+                return result(True)
+        else:
+            decoded_nonempty = bool(text)
+            if previous_cr and text.startswith("\n"):
+                text = text[1:]
+            # Only a decoder-buffered empty chunk preserves the pending CR;
+            # consuming its LF must clear it even when no text remains.
+            if decoded_nonempty:
+                previous_cr = text.endswith("\r")
+            for piece in text.splitlines(keepends=True):
+                terminated = piece[-1] in _TEXT_LINE_ENDINGS
+                body = piece[:-2] if piece.endswith("\r\n") else (piece[:-1] if terminated else piece)
+                last_line = line_number
+                if line_number >= start:
+                    if selected_last != line_number:
+                        separator = 1 if selected_last is not None else 0
+                        first_character = len(body[0].encode("utf-8")) if body else 0
+                        if len(output) + separator + first_character > MAX_TOOL_READ_BYTES:
+                            return result(True)
+                        if separator:
+                            append_text("\n")
+                        selected_last = line_number
+                    if not append_text(body):
+                        return result(True)
+                if terminated:
+                    if end is not None and line_number >= end:
+                        return result()
+                    line_number += 1
+        if remaining == 0:
+            break
+        chunk = stream.read(min(_TEXT_READ_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise ValueError("文件读取期间发生变化，请重新读取")
+        remaining -= len(chunk)
+    if ranged and selected_last is None:
+        if last_line == 0 and start == 1:
+            return result()
+        if last_line == 0:
+            raise ValueError(f"文件为空，不存在第 {start} 行，请确认 startLine")
+        raise ValueError(f"startLine {start} 超出文件范围，实际末行是 {last_line}，请重新选择行范围")
+    return result()
+
+
+def _read_file_snapshot_identity(stat):
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+def _verify_text_read_snapshot(target, stream, initial_stat):
+    try:
+        unchanged = (
+            _read_file_snapshot_identity(initial_stat)
+            == _read_file_snapshot_identity(os.fstat(stream.fileno()))
+            == _read_file_snapshot_identity(target.stat())
+        )
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise ValueError("文件读取期间发生变化，请重新读取")
+
+
 def execute_read_file_tool(body):
     body = dict(body or {})
     path = body.get("path") or ""
@@ -23992,106 +24092,101 @@ def execute_read_file_tool(body):
         root, target = resolve_project_path(path)
     if not target.exists() or not target.is_file():
         raise ValueError("文件不存在")
-    data = target.read_bytes()
-    size = len(data)
-    preview = data[:MAX_TOOL_READ_BYTES]
     ext = target.suffix.lower().lstrip(".")
     mime_map = {
         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "gif": "image/gif",
         "webp": "image/webp", "bmp": "image/bmp", "ico": "image/x-icon", "svg": "image/svg+xml",
     }
     image_mime = mime_map.get(ext)
-    truncated = size > (MAX_TOOL_IMAGE_BYTES if image_mime else MAX_TOOL_READ_BYTES)
     display_path = display_attachment_path(root, target) if is_attachment else to_project_relative(root, target)
-    if image_mime or not is_probably_text(preview):
-        import base64 as b64
-        mime = image_mime or "application/octet-stream"
-        if ext == "svg":
-            try:
-                svg_text = data.decode("utf-8")
+    if not image_mime:
+        with target.open("rb") as stream:
+            initial_stat = os.fstat(stream.fileno())
+            # The existing text classifier inspects BOM and at most 4096 bytes.
+            prefix = stream.read(min(4096, initial_stat.st_size))
+            if is_probably_text(prefix):
+                try:
+                    content, truncated, line_range = _read_text_window(
+                        stream, initial_stat.st_size, prefix,
+                        start_line=body.get("startLine"), end_line=body.get("endLine"),
+                    )
+                except ValueError:
+                    _verify_text_read_snapshot(target, stream, initial_stat)
+                    raise
+                _verify_text_read_snapshot(target, stream, initial_stat)
                 return {
-                    "ok": True,
-                    "action": "read_file",
-                    "path": display_path,
-                    "content": f"[Image file: {target.name} ({size} bytes, {mime}); visual content attached separately]",
-                    "size": size,
-                    "truncated": False,
-                    "binary": True,
-                    "mime": mime,
-                    "visual": True,
-                    "svgText": svg_text,
+                    "ok": True, "action": "read_file", "path": display_path,
+                    "content": content, "size": initial_stat.st_size,
+                    "truncated": truncated, "lineRange": line_range,
                 }
-            except Exception:
-                pass
-
-        img_data = data
-        if image_mime and size > MAX_TOOL_IMAGE_BYTES:
-            try:
-                from PIL import Image as PILImage
-                import io as _io
-                pil_img = PILImage.open(_io.BytesIO(data))
-                for scale in [0.5, 0.25, 0.15]:
-                    width, height = pil_img.size
-                    new_width, new_height = int(width * scale), int(height * scale)
-                    if max(new_width, new_height) < 256:
-                        break
-                    resized = pil_img.resize((new_width, new_height), PILImage.LANCZOS)
-                    buffer = _io.BytesIO()
-                    save_format = pil_img.format or ext.upper()
-                    if save_format == "JPG":
-                        save_format = "JPEG"
-                    resized.save(buffer, format=save_format, quality=80, optimize=True)
-                    compressed = buffer.getvalue()
-                    if len(compressed) <= MAX_TOOL_IMAGE_BYTES:
-                        img_data = compressed
-                        break
-            except Exception:
-                pass
-
-        can_attach = bool(image_mime) and len(img_data) <= MAX_TOOL_IMAGE_BYTES
-        payload = {
-            "ok": True,
-            "action": "read_file",
-            "path": display_path,
-            "content": (
-                f"[Image file: {target.name} ({size} bytes, {mime}); visual content attached separately]"
-                if can_attach else
-                f"[Binary file: {target.name} ({size} bytes, {mime}) — too large for visual attachment]"
-            ),
-            "size": size,
-            "truncated": truncated,
-            "binary": True,
-            "mime": mime,
-            "visual": can_attach,
-        }
-        if can_attach:
-            payload["base64"] = b64.b64encode(img_data).decode("ascii")
-        return payload
-
-    content = preview.decode("utf-8", errors="replace")
-    line_range = None
-    start_line = body.get("startLine")
-    end_line = body.get("endLine")
-    if start_line is not None or end_line is not None:
-        lines = content.splitlines()
+    # Image and binary handling retains its existing visual and size behavior.
+    data = target.read_bytes()
+    size = len(data)
+    truncated = size > (MAX_TOOL_IMAGE_BYTES if image_mime else MAX_TOOL_READ_BYTES)
+    import base64 as b64
+    mime = image_mime or "application/octet-stream"
+    if ext == "svg":
         try:
-            start = max(1, int(start_line or 1))
-            end = min(len(lines), int(end_line or len(lines)))
-        except (TypeError, ValueError):
-            raise ValueError("startLine/endLine 必须是数字")
-        if end < start:
-            raise ValueError("endLine 不能小于 startLine")
-        content = "\n".join(lines[start - 1:end])
-        line_range = {"start": start, "end": end}
-    return {
+            svg_text = data.decode("utf-8")
+            return {
+                "ok": True,
+                "action": "read_file",
+                "path": display_path,
+                "content": f"[Image file: {target.name} ({size} bytes, {mime}); visual content attached separately]",
+                "size": size,
+                "truncated": False,
+                "binary": True,
+                "mime": mime,
+                "visual": True,
+                "svgText": svg_text,
+            }
+        except Exception:
+            pass
+
+    img_data = data
+    if image_mime and size > MAX_TOOL_IMAGE_BYTES:
+        try:
+            from PIL import Image as PILImage
+            import io as _io
+            pil_img = PILImage.open(_io.BytesIO(data))
+            for scale in [0.5, 0.25, 0.15]:
+                width, height = pil_img.size
+                new_width, new_height = int(width * scale), int(height * scale)
+                if max(new_width, new_height) < 256:
+                    break
+                resized = pil_img.resize((new_width, new_height), PILImage.LANCZOS)
+                buffer = _io.BytesIO()
+                save_format = pil_img.format or ext.upper()
+                if save_format == "JPG":
+                    save_format = "JPEG"
+                resized.save(buffer, format=save_format, quality=80, optimize=True)
+                compressed = buffer.getvalue()
+                if len(compressed) <= MAX_TOOL_IMAGE_BYTES:
+                    img_data = compressed
+                    break
+        except Exception:
+            pass
+
+    can_attach = bool(image_mime) and len(img_data) <= MAX_TOOL_IMAGE_BYTES
+    payload = {
         "ok": True,
         "action": "read_file",
         "path": display_path,
-        "content": content,
+        "content": (
+            f"[Image file: {target.name} ({size} bytes, {mime}); visual content attached separately]"
+            if can_attach else
+            f"[Binary file: {target.name} ({size} bytes, {mime}) — too large for visual attachment]"
+        ),
         "size": size,
         "truncated": truncated,
-        "lineRange": line_range,
+        "binary": True,
+        "mime": mime,
+        "visual": can_attach,
     }
+    if can_attach:
+        payload["base64"] = b64.b64encode(img_data).decode("ascii")
+    return payload
+
 
 
 def execute_search_files_tool(body):
@@ -24613,13 +24708,13 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read text or image/binary metadata from a project or attachments/ file. Text is decoded as UTF-8. Current line slicing applies to only the first 512 KiB preview, not the whole file; later or empty ranges can be unavailable. Ranges are one-based/inclusive; end must not precede start. Images/binary use separate visual limits. Example: {\"path\":\"src/main.py\",\"startLine\":1,\"endLine\":40}.",
+            "description": "Read text or image/binary metadata from a project or attachments/ file. UTF-8 text output is bounded to 512 KiB at complete characters. Without a range, return a prefix preserving line endings. One-based inclusive ranges can scan later lines up to the initially observed file size; join selected lines with LF. truncated means requested text was omitted, not merely that the file is large; lineRange covers returned lines (last may be partial). An observed file change fails and asks for a reread. Images/binary use separate visual limits. Example: {\"path\":\"src/main.py\",\"startLine\":1,\"endLine\":40}.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Required file path; attachments/ references are also supported. Use path; Server Agent legacy file_path is normalized only when it does not conflict with path. Prefer project-relative paths. The current shared resolver can accept user-home paths or redirect other paths into project output/<name>; do not assume a strict project sandbox or rely on redirection."},
-                    "startLine": {"type": "integer", "description": "Optional one-based inclusive start; default 1 when a range is requested. Lines beyond the 512 KiB preview can be unavailable."},
-                    "endLine": {"type": "integer", "description": "Optional inclusive end within the preview; omit to use its end. Do not reverse the range or infer missing content from truncation."},
+                    "startLine": {"type": "integer", "description": "Optional one-based inclusive start; default 1 for a range. A start past EOF fails and reports the actual last line. An empty file succeeds only for the first-line window, with empty content and null lineRange."},
+                    "endLine": {"type": "integer", "description": "Optional inclusive end; omit to read to EOF or the output limit. Ends past EOF clip to the actual last line; end before start fails. A complete requested window has truncated=false even for a large file."},
                 },
                 "required": ["path"],
                 "additionalProperties": False,
