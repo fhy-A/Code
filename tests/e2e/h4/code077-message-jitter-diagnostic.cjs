@@ -32,7 +32,39 @@ function verifyStableSummaryHeight(cases) {
   return {updates,frames,summaryHeight:32};
 }
 
+function verifyHorizontalGeometry(cases) {
+  let comparisons=0;
+  const near=(a,b,label)=>assert(Math.abs(a-b)<=0.5,label);
+  for(const scenario of cases)for(const update of scenario.cases) {
+    const before=update.before.summaries[0].parts,after=update.frames.at(-1).summaries[0].parts;
+    const label=`${scenario.runtime}/${scenario.width}/${update.mode}/${update.kind}`;
+    if(update.kind==='tool-complete') {
+      for(const selector of ['strong','code','.tool-process-stage-chevron']) {
+        assert.equal(before[selector].text,after[selector].text,`${label}: same-content precondition`);
+        near(before[selector].left,after[selector].left,`${label}/${selector}: left moved`);
+        near(before[selector].width,after[selector].width,`${label}/${selector}: width moved`);comparisons++;
+      }
+    }
+    if(update.kind==='tool-next') {
+      near(before.strong.left,after.strong.left,`${label}: title left moved`);
+      for(const p of [before,after])near(p.code.left-p.strong.left-p.strong.width,6,`${label}: heading gap`);
+      // A different tool/path may legitimately change the arrow's absolute left.
+      const gap=p=>p['.tool-process-stage-chevron'].left-p.code.left-p.code.width;
+      near(gap(before),gap(after),`${label}: arrow gap changed`);comparisons+=3;
+    }
+    if(['output','same-redraw','delayed-image'].includes(update.kind)) {
+      const imageBefore=update.before.summaries.find(s=>s.parts['.tool-image-icon']);
+      const imageAfter=update.frames.at(-1).summaries.find(s=>s.parts['.tool-image-icon']);
+      assert(imageBefore && imageAfter,`${label}: image icon missing`);
+      near(imageBefore.parts['.tool-image-icon'].left,imageAfter.parts['.tool-image-icon'].left,`${label}: image icon moved`);comparisons++;
+    }
+  }
+  return {comparisons};
+}
+
 async function exercise(browser, host, runtime, width, evidenceDir) {
+  const traceLayout=process.argv.includes('--trace-layout');
+  const expectBefore=process.argv.includes('--expect-before');
   const audit = createAudit(), context = await createContext(browser, host, runtime, audit, {language:'zh', theme:'light', width});
   await context.addInitScript(() => {
     let api;
@@ -68,7 +100,8 @@ async function exercise(browser, host, runtime, width, evidenceDir) {
         return {label,time:performance.now(),scrollTop:area.scrollTop,scrollHeight:area.scrollHeight,clientHeight:area.clientHeight,
           anchorTop:rect?.top,anchorHeight:rect?.height,containerTop:area.getBoundingClientRect().top,
           state:scroller.snapshot(),groups:list.querySelectorAll('.tool-process-stage').length,
-          summaries:[...list.querySelectorAll('.tool-process-stage-summary')].map(el=>({height:el.getBoundingClientRect().height,minHeight:getComputedStyle(el).minHeight,padding:getComputedStyle(el).padding,parent:el.parentElement.className})),
+          summaries:[...list.querySelectorAll('.tool-process-stage-summary')].map(el=>({height:el.getBoundingClientRect().height,minHeight:getComputedStyle(el).minHeight,padding:getComputedStyle(el).padding,parent:el.parentElement.className,
+            parts:Object.fromEntries(['strong','code','.tool-process-stage-chevron','.tool-image-icon'].map(selector=>{const part=el.querySelector(selector),r=part?.getBoundingClientRect();return[selector,part?{left:r.left,width:r.width,text:part.textContent}:null];}))})),
           images:[...list.querySelectorAll('img')].map(img=>({complete:img.complete,width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height}))};
       };
       window.__frames = async (label,count=18) => {
@@ -132,8 +165,53 @@ async function exercise(browser, host, runtime, width, evidenceDir) {
       }
       await page.screenshot({path:path.join(evidenceDir,`${runtime}-${width}-${mode}.png`)});
     }
+    let traceControls=null;
+    if(traceLayout) {
+      await page.evaluate(()=>window.__messageScroller.navigateToMessage(window.__traceAppState.sessionId,14));
+      const active=page.locator('.execution-trace.active').last(), summary=active.locator(':scope > .execution-trace-summary');
+      const expanded=()=>active.evaluate(el=>el.classList.contains('is-expanded'));
+      const semantics=await summary.evaluate(el=>({role:el.getAttribute('role'),tabindex:el.getAttribute('tabindex'),toggle:el.hasAttribute('data-execution-trace-toggle'),arrow:!!el.querySelector('.execution-trace-chevron'),cursor:getComputedStyle(el).cursor}));
+      await summary.click(); const afterClick=await expanded();
+      await page.evaluate(()=>window.__diagnosticRender()); const afterRedraw=await expanded();
+      if(!await expanded())await summary.click();
+      const keyboard={};
+      for(const key of ['Enter',' ']) {
+        if(await summary.getAttribute('tabindex')!==null){await summary.focus();await page.keyboard.press(key===' '?'Space':key);}
+        else await summary.dispatchEvent('keydown',{key,bubbles:true});
+        keyboard[key]=await expanded(); if(!await expanded())await summary.click();
+      }
+      await active.evaluate(el=>el.classList.remove('is-expanded'));
+      await page.evaluate(()=>{window.__traceAppState._lastRenderedHtml=null;window.__diagnosticRender();});
+      const staleCollapseRepaired=await expanded();
+      if(!await expanded())await summary.click();
+      const internal={};
+      for(const [name,selector] of [['tool','details.tool-process-stage:not(.tool-image-stage)'],['image','details.tool-image-stage']]) {
+        const group=active.locator(selector).first(),toggle=group.locator(':scope > summary');
+        const before=await group.evaluate(el=>el.open);await toggle.click();
+        const after=await group.evaluate(el=>el.open);await page.evaluate(()=>window.__diagnosticRender());
+        const redrawn=await group.evaluate(el=>el.open);internal[name]={before,after,redrawn};
+        assert.equal(after,!before);assert.equal(redrawn,after);
+      }
+      await page.screenshot({path:path.join(evidenceDir,`${runtime}-${width}-active-controls.png`)});
+      await page.evaluate(()=>{
+        const state=window.__traceAppState;state._sessionRuns[state.sessionId].isStreaming=false;
+        state.messages.at(-1)._responseTime='1s';window.__diagnosticRender();
+      });
+      const complete=page.locator('.execution-trace.completed[data-execution-trace="14"]'),toggle=complete.locator(':scope > .execution-trace-summary');
+      await expect(toggle).toHaveAttribute('role','button');await expect(toggle).toHaveAttribute('tabindex','0');
+      const ended=await complete.evaluate(el=>el.classList.contains('is-expanded'));
+      await toggle.click();const clicked=await complete.evaluate(el=>el.classList.contains('is-expanded'));
+      await toggle.focus();await page.keyboard.press('Space');const keyed=await complete.evaluate(el=>el.classList.contains('is-expanded'));
+      assert.equal(clicked,!ended);assert.equal(keyed,ended);
+      traceControls={semantics,afterClick,afterRedraw,keyboard,staleCollapseRepaired,internal,completed:{ended,clicked,keyed}};
+      await fs.writeFile(path.join(evidenceDir,`${runtime}-${width}-controls.json`),JSON.stringify(traceControls,null,2));
+      if(!expectBefore) {
+        assert.deepEqual(semantics,{role:null,tabindex:null,toggle:false,arrow:false,cursor:'default'});
+        assert(afterClick && afterRedraw && Object.values(keyboard).every(Boolean) && staleCollapseRepaired);
+      }
+    }
     assert.deepEqual(errors,[]); assert.deepEqual(audit.blockedWrites,[]);
-    return {runtime,width,cases,errors,audit};
+    return {runtime,width,cases,traceControls,errors,audit};
   } finally { await context.close(); }
 }
 
@@ -156,6 +234,7 @@ async function main() {
     for(const key of ['agentRuns','runtimeRuns'])assert.equal(after.production[key].length-before.production[key].length,0);
     result.sideEffects={chat:0,tools:0,modelRoutes:0,agentRuns:0,runtimeRuns:0,writes:0};
     if(verifyHeight)result.heightRegression=verifyStableSummaryHeight(result.cases);
+    if(process.argv.includes('--trace-layout')&&!process.argv.includes('--expect-before'))result.horizontalRegression=verifyHorizontalGeometry(result.cases);
     result.ok=true;
   } catch(error) {result.ok=false;result.error=String(error.stack);process.exitCode=1;}
   finally {

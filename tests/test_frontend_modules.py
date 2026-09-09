@@ -18899,11 +18899,13 @@ process.stdout.write(JSON.stringify({
         self.assertLess(active_commentary, active_tools)
         self.assertLess(active_tools, active_trace_end)
         self.assertLess(active_trace_end, active_final)
-        self.assertIn('class="execution-trace active"', data["collapsedActiveAnswerHtml"])
-        self.assertNotIn(
+        self.assertIn(
             'class="execution-trace active is-expanded"',
             data["collapsedActiveAnswerHtml"],
         )
+        active_summary = data["collapsedActiveAnswerHtml"].split('class="execution-trace active is-expanded"', 1)[1].split('class="execution-trace-body"', 1)[0]
+        for control in ('data-execution-trace-toggle', 'role="button"', 'tabindex=', 'execution-trace-chevron'):
+            self.assertNotIn(control, active_summary)
         self.assertIn(
             'class="execution-trace active is-expanded"',
             data["activeThinkingHtml"],
@@ -26819,8 +26821,8 @@ async function scenario(conflicts, options = {{}}) {{
         self.assertIn('data-active-run-anchor', MESSAGES_SOURCE)
         self.assertIn("const expandedExecutionTraces = new Set(", render)
         self.assertIn('.execution-trace.completed.is-expanded[data-execution-trace]', render)
-        self.assertIn("const collapsedExecutionTraces = hasActiveRun", render)
-        self.assertIn(
+        self.assertNotIn("collapsedExecutionTraces", render)
+        self.assertNotIn(
             '.execution-trace.active:not(.is-expanded)[data-execution-trace]',
             render,
         )
@@ -26830,7 +26832,6 @@ async function scenario(conflicts, options = {{}}) {{
         self.assertIn('details.tool-process-item[open][data-tool-process-item-key]', render)
         self.assertIn("const html = projectMessages(msgs, {", render)
         self.assertIn("expandedExecutionTraces,", render)
-        self.assertIn("collapsedExecutionTraces,", render)
         self.assertIn("expandedToolProcesses,", render)
         self.assertIn("reconcileToolProcessNodes(els.messageList, projectedMessageList);", render)
         self.assertIn(
@@ -34256,7 +34257,6 @@ class Code043CompactDisclosureTests(unittest.TestCase):
             self.assertIn(fragment, MESSAGES_SOURCE)
         for fragment in (
             'querySelectorAll(".execution-trace.completed.is-expanded[data-execution-trace]")',
-            'querySelectorAll(".execution-trace.active:not(.is-expanded)[data-execution-trace]")',
             'querySelectorAll("details.tool-process-stage[open][data-tool-process-id]")',
             'querySelectorAll("details.tool-process-item[open][data-tool-process-item-key]")',
         ):
@@ -34432,13 +34432,13 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
         stage_summary = self.rule(source, f"{self.COMPLETED_STAGE} > .tool-process-stage-summary {{")
         for declaration in (
             "min-height: 32px;",
-            "padding: 1px 0;",
-            "gap: 5px;",
+            "padding: 1px 1px;",
+            "gap: 7px;",
             "color: color-mix(in srgb, var(--muted) 82%, var(--text));",
         ):
             self.assertIn(declaration, stage_summary)
         stage_heading = self.rule(source, f"{self.COMPLETED_STAGE} .tool-process-stage-heading {{")
-        self.assertIn("gap: 4px;", stage_heading)
+        self.assertIn("gap: 6px;", stage_heading)
         self.assertNotIn("font-size:", stage_heading)
         self.assertNotIn("line-height:", stage_heading)
         stage_body = self.rule(source, f"{self.COMPLETED_STAGE} > .tool-process-stage-body {{")

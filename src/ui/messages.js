@@ -1463,6 +1463,7 @@
         const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
         if (traceToggle && (!root.contains || root.contains(traceToggle))) {
           const trace = traceToggle.closest("[data-execution-trace]");
+          if (!trace || trace.classList.contains("active")) return;
           const expanded = Boolean(trace?.classList.toggle("is-expanded"));
           traceToggle.setAttribute("aria-expanded", String(expanded));
           onLayoutChange();
@@ -1551,6 +1552,7 @@
         if (!["Enter", " "].includes(event.key)) return;
         const traceToggle = event.target?.closest?.("[data-execution-trace-toggle]");
         if (!traceToggle || (root.contains && !root.contains(traceToggle))) return;
+        if (traceToggle.closest("[data-execution-trace]")?.classList.contains("active")) return;
         event.preventDefault();
         traceToggle.click();
       });
@@ -2525,9 +2527,6 @@
       const expandedExecutionTraces = projection.expandedExecutionTraces instanceof Set
         ? projection.expandedExecutionTraces
         : new Set(projection.expandedExecutionTraces || []);
-      const collapsedExecutionTraces = projection.collapsedExecutionTraces instanceof Set
-        ? projection.collapsedExecutionTraces
-        : new Set(projection.collapsedExecutionTraces || []);
       const expandedToolProcesses = projection.expandedToolProcesses instanceof Set
         ? projection.expandedToolProcesses
         : new Set(projection.expandedToolProcesses || []);
@@ -2668,11 +2667,9 @@
         openExecutionTraceUserIndex = userIndex;
       };
       const openActiveExecutionTrace = (userIndex) => {
-        const expanded = !collapsedExecutionTraces.has(String(userIndex));
-        rows.push(`<section class="execution-trace active${expanded ? " is-expanded" : ""}" data-execution-trace="${userIndex}">
-          <div class="execution-trace-summary" role="button" tabindex="0" aria-expanded="${expanded}" data-execution-trace-toggle>
+        rows.push(`<section class="execution-trace active is-expanded" data-execution-trace="${userIndex}">
+          <div class="execution-trace-summary">
             ${takeActiveRunAnchor()}
-            <span class="execution-trace-chevron" aria-hidden="true"></span>
           </div>
           <div class="execution-trace-body">`);
         openExecutionTraceUserIndex = userIndex;

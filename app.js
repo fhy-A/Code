@@ -4755,14 +4755,6 @@ function renderMessages() {
       (trace) => trace.dataset.executionTrace,
     ).filter(Boolean),
   );
-  const collapsedExecutionTraces = hasActiveRun
-    ? new Set(
-      Array.from(
-        els.messageList.querySelectorAll(".execution-trace.active:not(.is-expanded)[data-execution-trace]"),
-        (trace) => trace.dataset.executionTrace,
-      ).filter(Boolean),
-    )
-    : new Set();
   const expandedToolProcesses = hasActiveRun
     ? new Set(
       Array.from(
@@ -4784,7 +4776,6 @@ function renderMessages() {
     runState: getSessionRunState(state.sessionId),
     branchMarker,
     expandedExecutionTraces,
-    collapsedExecutionTraces,
     expandedToolProcesses,
     expandedToolItems,
   });

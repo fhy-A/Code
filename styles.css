@@ -5368,6 +5368,10 @@ body.theme-dark .syn-fn { color: #61afef; }
   margin: 0;
 }
 
+.execution-trace.active > .execution-trace-summary {
+  cursor: default;
+}
+
 .execution-trace-chevron {
   width: 8px;
   height: 8px;
@@ -14844,13 +14848,13 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) > .tool-process-stage-summary {
   min-height: 32px;
-  padding: 1px 0;
-  gap: 5px;
+  padding: 1px 1px;
+  gap: 7px;
   color: color-mix(in srgb, var(--muted) 82%, var(--text));
 }
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading {
-  gap: 4px;
+  gap: 6px;
 }
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) .tool-process-stage-heading strong {
