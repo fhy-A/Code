@@ -1542,6 +1542,17 @@ messagesFeature = createMessagesFeature({
   onImagePreview: showImageOverlay,
   onImageLoad: () => messageScrollController?.onContentChanged(state.sessionId),
   onLayoutChange: () => messageScrollController?.onContentChanged(state.sessionId),
+  onFollowUpRetry: async (messageId) => {
+    const sessionId = state.sessionId;
+    if (autoPermissionGate.requiresDispatchConfirmation()) {
+      if (autoPermissionDispatchConfirmationPending) return false;
+      autoPermissionDispatchConfirmationPending = true;
+      try {
+        if (!await autoPermissionGate.ensureDispatchConfirmed()) return false;
+      } finally { autoPermissionDispatchConfirmationPending = false; }
+    }
+    return retryFailedFollowUpMessage(sessionId, messageId).catch(error => reportFollowUpSubmissionError(sessionId, error));
+  },
   onManualCompactionRetry: (compactionId) => (
     retryManualCompactionPersistence(state.sessionId, compactionId)
   ),
@@ -4687,6 +4698,7 @@ function renderMessages() {
   // Ensure state.messages reflects current session (syncs ctx.messages changes)
   const curMsgs = getSessionMessages(state.sessionId);
   if (curMsgs && curMsgs !== state.messages) state.messages = curMsgs;
+  recoverUnadmittedFollowUpMessages(state.sessionId);
   pruneStaleStreamingNodes(state.sessionId);
 
   const isBlankWelcome = state.messages.length === 0 && !state.sessionId;
@@ -11913,183 +11925,261 @@ async function resumeDispatchesWaitingForRoute(route) {
   return changed;
 }
 
+const followUpSubmissions = new Set();
+const followUpSteerRequests = new Map();
+
+function recoverUnadmittedFollowUpMessages(sessionId) {
+  const queuedIds = new Set(getQueuedMessageCheckpoints(sessionId).map(item => item.id));
+  for (const message of getSessionMessages(sessionId)) {
+    const dispatch = message?.meta?.queuedDispatch;
+    if (dispatch?.status !== "pending" || queuedIds.has(dispatch.id)) continue;
+    if ([...followUpSubmissions].some(entry => entry.sessionId === sessionId && entry.message === message)) continue;
+    // Refresh can preserve the visible message before qualification finishes.
+    // Keep it recoverable, but do not invent an executable queue checkpoint.
+    dispatch.status = "failed";
+    dispatch.failureCode = "followup_submission_failed";
+  }
+}
+
+function followUpMessageText(message) {
+  if (!Array.isArray(message?.content)) return String(message?.content || "");
+  return String(message.content.find(item => item?.type === "text")?.text || "");
+}
+
+function followUpContent(userText, images) {
+  return images.length ? [{type: "text", text: userText}, ...images.map(image => ({
+    type: "image_url", image_url: {url: `data:${image.mime};base64,${image.base64}`},
+  }))] : userText;
+}
+
+async function followUpImageRefs(message, images) {
+  const pending = message?._images || images;
+  return pending.some(image => image.base64 && !image.path)
+    ? uploadImagesForStorage(pending) : pending;
+}
+
+async function retryFailedFollowUpMessage(sessionId, messageId) {
+  const message = getSessionMessages(sessionId).find(item => (
+    String(item?.id || item?.meta?.queuedDispatch?.id || item?.meta?.steerDispatch?.clientRequestId || "") === messageId
+  ));
+  const dispatch = message?.meta?.queuedDispatch || message?.meta?.steerDispatch;
+  if (!message || dispatch?.failureCode !== "followup_submission_failed"
+      || [...followUpSubmissions].some(entry => entry.message === message)) return false;
+  const retry = message.meta?.steerDispatch ? steerSessionMessage : enqueueSessionMessage;
+  return retry(sessionId, followUpMessageText(message), [], {existingMessage: message});
+}
+
+function reportFollowUpSubmissionError(sessionId, error) {
+  appendSessionMessages(sessionId, {
+    role: "assistant", content: `**${t("errorPrefix")}：${escapeHtml(error.message || String(error))}**`,
+    meta: {kind: "error-recovery"}, _time: new Date().toISOString(),
+  });
+  renderSessionMessages(sessionId);
+  void saveSessionState(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId), undefined, {persistMessages: true}).catch(() => {});
+}
+
+function beginFollowUpSubmission(sessionId, message) {
+  const entry = {sessionId, message};
+  followUpSubmissions.add(entry);
+  const messages = getSessionMessages(sessionId);
+  if (!messages.includes(message)) messages.push(message);
+  setSessionMessages(sessionId, messages);
+  renderSessionMessages(sessionId);
+  return entry;
+}
+
+function endFollowUpSubmission(entry) {
+  followUpSubmissions.delete(entry);
+  if (![...followUpSubmissions].some(item => item.sessionId === entry.sessionId)
+      && !isSessionStreaming(entry.sessionId)) {
+    queueMicrotask(() => { void pumpQueuedSessionMessages(entry.sessionId); });
+  }
+}
+
+async function saveFollowUpMessages(sessionId, messages, stats) {
+  let saved;
+  try {
+    saved = await saveSessionState(sessionId, messages, stats, undefined, {
+      persistMessages: true, requireConfirmedSave: true,
+    });
+  } catch (error) {
+    if (error?.message === "update_save_unconfirmed") throw new Error(t("followUpSaveFailed"));
+    throw error;
+  }
+  if (!saved || saved.id !== sessionId || saved._sessionRevisionConflict === true
+      || !Number.isInteger(saved.revision) || saved.revision < 0) {
+    throw new Error(t("followUpSaveFailed"));
+  }
+  return saved;
+}
+
+function preserveFailedFollowUp(sessionId, message) {
+  const dispatch = message.meta?.queuedDispatch || message.meta?.steerDispatch;
+  if (!dispatch || dispatch.status === "accepted") return;
+  dispatch.failureCode = "followup_submission_failed";
+  if (message.meta.queuedDispatch) {
+    dispatch.status = "failed";
+    setQueuedMessageCheckpoints(sessionId, getQueuedMessageCheckpoints(sessionId).map(item => (
+      item.id === dispatch.id ? {...item, status: "failed"} : item
+    )));
+  }
+  message.meta.detachedFromMain = true;
+  const messages = getSessionMessages(sessionId);
+  if (!messages.some(item => item === message || (message.id && item?.id === message.id))) messages.push(message);
+  setSessionMessages(sessionId, messages);
+  renderSessionMessages(sessionId);
+  void saveSessionState(sessionId, messages, getSessionStats(sessionId), undefined, {persistMessages: true}).catch(() => {});
+}
+
 async function enqueueSessionMessage(sessionId, userText, images = [], options = {}) {
   if (!sessionId) throw new Error(t("createSessionFirst"));
   const existingMessage = options.existingMessage || null;
   const model = String(existingMessage?._model || getSelectedModel());
   if (!model) throw new Error(t("selectModelFirst"));
-  const reasoningSelection = existingMessage
-    ? structuredClone(existingMessage.meta?.queuedDispatch?.reasoningSelection ?? null)
+  const reasoningSelection = existingMessage?.meta?.queuedDispatch
+    ? structuredClone(existingMessage.meta.queuedDispatch.reasoningSelection ?? null)
     : getReasoningSelectionForModel(model, options.routeRef || "");
   const thinkingLevel = existingMessage?.meta?.queuedDispatch?.thinkingLevel || getThinkingLevel();
-  const dispatchRoute = await getModelDispatchCredentials(model, {
-    routeRef: reasoningSelection?.routeRef || options.routeRef || existingMessage?.meta?.queuedDispatch?.routeRef || "",
-    catalogRevision: options.catalogRevision || existingMessage?.meta?.queuedDispatch?.catalogRevision || 0,
-  });
-  const imageRoute = normalizeImageRouteDispatch(getSelectedImageRoute?.());
-
-  const queuedAt = Date.now();
-  const id = `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
-  const permissionProfile = getPermissionProfile();
-  const toolPreset = els.toolPreset.value || "default";
-  const temperature = Number(els.temperature.value || 0.2);
-  const maxTokens = getEffectiveMaxTokens(model);
-  const contextResolution = getModelContextResolution(model, maxTokens);
-  const imageRefs = existingMessage
-    ? (Array.isArray(existingMessage._images) ? existingMessage._images : [])
-    : await uploadImagesForStorage(images || []);
-  const content = existingMessage?.content ?? (images.length
-    ? [
-        { type: "text", text: userText },
-        ...images.map((image) => ({
-          type: "image_url",
-          image_url: { url: `data:${image.mime};base64,${image.base64}` },
-        })),
-      ]
-    : userText);
-  const item = queuedMessageCheckpoint({
-    id,
-    clientRequestId: id,
-    status: "pending",
-    userText,
-    model,
-    routeRef: dispatchRoute.routeRef,
-    catalogRevision: dispatchRoute.catalogRevision,
-    imageRoute,
-    permissionProfile,
-    toolPreset,
-    thinkingLevel,
-    reasoningSelection,
-    temperature,
-    maxTokens,
-    ...contextResolution,
-    queuedAt,
-  });
+  const retryCheckpoint = existingMessage?.meta?.queuedDispatch?.id
+    ? getQueuedMessageCheckpoints(sessionId).find(item => item.id === existingMessage.meta.queuedDispatch.id) : null;
+  const imageRoute = normalizeImageRouteDispatch(retryCheckpoint?.imageRoute || getSelectedImageRoute?.());
+  const queuedAt = existingMessage?.meta?.queuedDispatch?.queuedAt || Date.now();
+  const id = existingMessage?.meta?.queuedDispatch?.id || `queued-${queuedAt}-${Math.random().toString(16).slice(2)}`;
+  const permissionProfile = retryCheckpoint?.permissionProfile || getPermissionProfile();
+  const toolPreset = retryCheckpoint?.toolPreset || els.toolPreset.value || "default";
+  const temperature = Number(retryCheckpoint?.temperature ?? els.temperature.value ?? 0.2);
+  const maxTokens = retryCheckpoint?.maxTokens || getEffectiveMaxTokens(model);
+  const contextResolution = retryCheckpoint ? {
+    contextLimit: retryCheckpoint.contextLimit, contextWindowTokens: retryCheckpoint.contextWindowTokens,
+    contextBudgetTokens: retryCheckpoint.contextBudgetTokens, inputBudgetInsufficient: retryCheckpoint.inputBudgetInsufficient,
+  } : getModelContextResolution(model, maxTokens);
   const userMessage = existingMessage || {
-    role: "user",
-    content,
-    _images: imageRefs.length ? imageRefs : undefined,
-    _model: model,
+    id, role: "user", content: followUpContent(userText, images), _model: model,
+    _images: images.length ? images : undefined,
     _time: new Date(queuedAt).toISOString(),
   };
-  userMessage.content = content;
-  userMessage._images = imageRefs.length ? imageRefs : undefined;
-  userMessage._model = model;
-  userMessage.meta = {
-    ...(userMessage.meta || {}),
-    queuedDispatch: {
-      id,
-      status: "pending",
-      queuedAt,
-      thinkingLevel,
-      reasoningSelection: structuredClone(reasoningSelection),
-      ...(dispatchRoute.routeRef ? {
-        routeRef: dispatchRoute.routeRef,
-        catalogRevision: dispatchRoute.catalogRevision,
-      } : {}),
-      ...(imageRoute ? { imageRoute } : {}),
-    },
-    detachedFromMain: true,
-  };
+  userMessage.meta = {...(userMessage.meta || {}), detachedFromMain: true,
+    queuedDispatch: {...(userMessage.meta?.queuedDispatch || {}), id, status: "pending", queuedAt,
+      thinkingLevel, reasoningSelection: structuredClone(reasoningSelection)}};
   delete userMessage.meta.steerDispatch;
-
-  const queuedMessages = [...getQueuedMessageCheckpoints(sessionId), item];
-  setQueuedMessageCheckpoints(sessionId, queuedMessages);
-  const messages = getSessionMessages(sessionId);
-  if (!messages.includes(userMessage)) messages.push(userMessage);
-  setSessionMessages(sessionId, messages);
-  await saveSessionState(sessionId, messages, getSessionStats(sessionId), undefined, {
-    persistMessages: true,
-  });
-  renderSessionMessages(sessionId);
-  if (!isSessionStreaming(sessionId)) void pumpQueuedSessionMessages(sessionId);
-  return id;
-}
-
-function followUpMessageText(message) {
-  if (!Array.isArray(message?.content)) return String(message?.content || "");
-  return String(message.content.find((item) => item?.type === "text")?.text || "");
+  delete userMessage.meta.queuedDispatch.failureCode;
+  const submission = beginFollowUpSubmission(sessionId, userMessage);
+  try {
+    const dispatchRoute = await getModelDispatchCredentials(model, {
+      routeRef: reasoningSelection?.routeRef || options.routeRef || userMessage.meta.queuedDispatch.routeRef || "",
+      catalogRevision: options.catalogRevision || userMessage.meta.queuedDispatch.catalogRevision || 0,
+    });
+    const imageRefs = await followUpImageRefs(userMessage, images);
+    userMessage._images = imageRefs.length ? imageRefs : undefined;
+    if (dispatchRoute.routeRef) Object.assign(userMessage.meta.queuedDispatch, {
+      routeRef: dispatchRoute.routeRef, catalogRevision: dispatchRoute.catalogRevision,
+    });
+    if (imageRoute) userMessage.meta.queuedDispatch.imageRoute = {...imageRoute};
+    const item = queuedMessageCheckpoint({
+      id, clientRequestId: id, status: "pending", userText, model,
+      routeRef: dispatchRoute.routeRef, catalogRevision: dispatchRoute.catalogRevision,
+      imageRoute, permissionProfile, toolPreset, thinkingLevel, reasoningSelection,
+      temperature, maxTokens, ...contextResolution, queuedAt,
+    });
+    const messages = getSessionMessages(sessionId);
+    const queued = [...getQueuedMessageCheckpoints(sessionId).filter(candidate => candidate.id !== id), item];
+    // Qualification may finish out of order; preserve the user's arrival order.
+    const positions = new Map(messages.map((message, index) => [message.meta?.queuedDispatch?.id, index]));
+    queued.sort((a, b) => (positions.get(a.id) ?? -1) - (positions.get(b.id) ?? -1));
+    setQueuedMessageCheckpoints(sessionId, queued);
+    await saveFollowUpMessages(sessionId, messages, getSessionStats(sessionId));
+    renderSessionMessages(sessionId);
+    return id;
+  } catch (error) {
+    preserveFailedFollowUp(sessionId, userMessage);
+    throw error;
+  } finally { endFollowUpSubmission(submission); }
 }
 
 async function submitSessionSteer(ctx, userMessage, options = {}) {
   const dispatch = userMessage?.meta?.steerDispatch;
   const targetAgentRunId = String(dispatch?.agentRunId || ctx?.agentRunId || "");
   if (!targetAgentRunId || !dispatch?.clientRequestId) return null;
-  const response = await agentRuntime.steerAgentRun(targetAgentRunId, {
-    message: { role: "user", content: userMessage.content },
-    clientRequestId: dispatch.clientRequestId,
-    signal: ctx.run?.abortController?.signal,
-  });
-  dispatch.status = "accepted";
-  dispatch.agentRunId = targetAgentRunId;
-  dispatch.steerId = String(response?.result?.steerId || dispatch.steerId || "");
-  dispatch.acceptedAt = Date.now();
-  await saveSessionState(ctx.sessionId, ctx.messages, ctx.stats, undefined, {
-    persistMessages: true,
-  });
-  renderSessionMessages(ctx.sessionId);
-  if (options.createReadingAnchor !== false && ctx.sessionId === state.sessionId) {
-    messageScrollController?.beginReadingAnchor(
-      ctx.sessionId,
-      ctx.messages.indexOf(userMessage),
-    );
-  }
-  return response;
+  const requestKey = `${targetAgentRunId}:${dispatch.clientRequestId}`;
+  if (followUpSteerRequests.has(requestKey)) return followUpSteerRequests.get(requestKey);
+  const task = (async () => {
+    if (dispatch.status === "accepted") delete dispatch.failureCode;
+    try {
+      await saveFollowUpMessages(ctx.sessionId, ctx.messages, ctx.stats);
+    } catch (error) {
+      if (dispatch.status === "accepted") dispatch.failureCode = "followup_submission_failed";
+      throw error;
+    }
+    if (dispatch.status === "accepted") {
+      delete dispatch.failureCode;
+      return {result: {steerId: dispatch.steerId}};
+    }
+    const response = await agentRuntime.steerAgentRun(targetAgentRunId, {
+      message: {role: "user", content: userMessage.content},
+      clientRequestId: dispatch.clientRequestId, signal: ctx.run?.abortController?.signal,
+    });
+    dispatch.status = "accepted";
+    delete dispatch.failureCode;
+    delete userMessage.meta.detachedFromMain;
+    dispatch.agentRunId = targetAgentRunId;
+    dispatch.steerId = String(response?.result?.steerId || dispatch.steerId || "");
+    dispatch.acceptedAt = Date.now();
+    try {
+      await saveFollowUpMessages(ctx.sessionId, ctx.messages, ctx.stats);
+    } catch {
+      dispatch.failureCode = "followup_submission_failed";
+      throw new Error(t("followUpReceiptSaveFailed"));
+    }
+    renderSessionMessages(ctx.sessionId);
+    if (options.createReadingAnchor !== false && ctx.sessionId === state.sessionId) {
+      messageScrollController?.beginReadingAnchor(ctx.sessionId, ctx.messages.indexOf(userMessage));
+    }
+    return response;
+  })();
+  followUpSteerRequests.set(requestKey, task);
+  try { return await task; }
+  finally { if (followUpSteerRequests.get(requestKey) === task) followUpSteerRequests.delete(requestKey); }
 }
 
-async function steerSessionMessage(sessionId, userText, images = []) {
+async function steerSessionMessage(sessionId, userText, images = [], options = {}) {
   if (!sessionId) throw new Error(t("createSessionFirst"));
   const run = ensureSessionRun(sessionId);
-  const ctx = run?._activeCtx;
+  let ctx = run?._activeCtx;
+  const existingMessage = options.existingMessage || null;
+  const model = String(existingMessage?._model || ctx?.model || getSelectedModel());
+  if (existingMessage?.meta?.queuedDispatch) return enqueueSessionMessage(sessionId, userText, images, {existingMessage});
   if (!ctx || !ownsActiveRunContext(ctx) || !ctx.agentRunId || !agentRuntime?.steerAgentRun) {
-    return enqueueSessionMessage(sessionId, userText, images);
+    if (!existingMessage?.meta?.steerDispatch) return enqueueSessionMessage(sessionId, userText, images);
+    // A refreshed failed submission keeps its original target and request ID.
+    // A terminal target can return its receipt or the existing 409 queue path.
+    ctx = {sessionId, messages: getSessionMessages(sessionId), stats: getSessionStats(sessionId),
+      model, run, agentRunId: existingMessage.meta.steerDispatch.agentRunId};
+    if (!run.abortController || run.abortController.signal.aborted) run.abortController = new AbortController();
   }
-
-  const model = String(ctx.model || getSelectedModel());
-  const submittedAt = Date.now();
-  const clientRequestId = `steer-${submittedAt}-${Math.random().toString(16).slice(2)}`;
-  const imageRefs = await uploadImagesForStorage(images || []);
-  const content = images.length
-    ? [
-        { type: "text", text: userText },
-        ...images.map((image) => ({
-          type: "image_url",
-          image_url: { url: `data:${image.mime};base64,${image.base64}` },
-        })),
-      ]
-    : userText;
-  const userMessage = {
-    role: "user",
-    content,
-    _images: imageRefs.length ? imageRefs : undefined,
-    _model: model,
-    _time: new Date(submittedAt).toISOString(),
-    meta: {
-      steerDispatch: {
-        agentRunId: ctx.agentRunId,
-        clientRequestId,
-        status: "submitting",
-        submittedAt,
-      },
-    },
+  const submittedAt = existingMessage?.meta?.steerDispatch?.submittedAt || Date.now();
+  const clientRequestId = existingMessage?.meta?.steerDispatch?.clientRequestId || `steer-${submittedAt}-${Math.random().toString(16).slice(2)}`;
+  const userMessage = existingMessage || {
+    id: clientRequestId, role: "user", content: followUpContent(userText, images),
+    _images: images.length ? images : undefined,
+    _model: model, _time: new Date(submittedAt).toISOString(),
+    meta: {detachedFromMain: true, steerDispatch: {
+      agentRunId: ctx.agentRunId, clientRequestId, status: "submitting", submittedAt,
+    }},
   };
-
-  ctx.messages.push(userMessage);
-  setSessionMessages(sessionId, ctx.messages);
-  await saveSessionState(sessionId, ctx.messages, ctx.stats, undefined, {
-    persistMessages: true,
-  });
-  renderSessionMessages(sessionId);
-
+  delete userMessage.meta.steerDispatch.failureCode;
+  const submission = beginFollowUpSubmission(sessionId, userMessage);
   try {
+    const imageRefs = await followUpImageRefs(userMessage, images);
+    userMessage._images = imageRefs.length ? imageRefs : undefined;
     await submitSessionSteer(ctx, userMessage);
     return clientRequestId;
   } catch (error) {
-    if (Number(error?.status || 0) === 409) {
-      return enqueueSessionMessage(sessionId, userText, [], { existingMessage: userMessage });
+    if (Number(error?.status || 0) === 409 && error?.data?.errorCode !== "session_revision_conflict") {
+      return await enqueueSessionMessage(sessionId, userText, [], {existingMessage: userMessage});
     }
+    preserveFailedFollowUp(sessionId, userMessage);
     throw error;
-  }
+  } finally { endFollowUpSubmission(submission); }
 }
 
 async function resumePendingSessionSteers(ctx) {
@@ -12098,6 +12188,7 @@ async function resumePendingSessionSteers(ctx) {
     message?.role === "user"
     && message.meta?.steerDispatch?.status === "submitting"
     && String(message.meta.steerDispatch.agentRunId || "") === String(ctx.agentRunId)
+    && ![...followUpSubmissions].some(entry => entry.message === message)
   ));
   for (const message of pending) {
     try {
@@ -12167,12 +12258,12 @@ async function runQueuedSessionMessage(sessionId, item) {
     return false;
   }
   updateQueuedMessageItem(sessionId, item.id, { status: "running" });
-  await saveSessionState(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId), undefined, {
-    persistMessages: true,
-  });
 
   let ok = false;
+  let dispatchStarted = false;
   try {
+    await saveFollowUpMessages(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId));
+    dispatchStarted = true;
     await sendMessage(item.userText, {
       sessionId,
       existingMessage: userMessage,
@@ -12198,6 +12289,7 @@ async function runQueuedSessionMessage(sessionId, item) {
     ok = true;
   } catch (error) {
     console.error("Queued message failed:", error);
+    if (!dispatchStarted) preserveFailedFollowUp(sessionId, userMessage);
     const messages = getSessionMessages(sessionId);
     const userIndex = messages.indexOf(userMessage);
     const hasLaterAssistant = userIndex >= 0 && messages.slice(userIndex + 1).some((message) => message?.role === "assistant");
@@ -12211,6 +12303,7 @@ async function runQueuedSessionMessage(sessionId, item) {
     }
   } finally {
     finishQueuedSessionMessage(sessionId, item.id, ok);
+    if (!dispatchStarted && userMessage?.meta) userMessage.meta.detachedFromMain = true;
     await saveSessionState(sessionId, getSessionMessages(sessionId), getSessionStats(sessionId), undefined, {
       persistMessages: true,
     }).catch(() => {});
@@ -12219,7 +12312,7 @@ async function runQueuedSessionMessage(sessionId, item) {
 }
 
 async function pumpQueuedSessionMessages(sessionId) {
-  if (state._updateStopping) return false;
+  if (state._updateStopping || [...followUpSubmissions].some(entry => entry.sessionId === sessionId)) return false;
   if (!sessionId || state._queuedMessagePumps.has(sessionId) || isSessionStreaming(sessionId)) return false;
   const runStatus = String(getSessionRunState(sessionId)?.status || "");
   if (["running", "waiting-network", "resuming", "waiting-authorization", "waiting-user-input"].includes(runStatus)) {
@@ -12252,7 +12345,7 @@ async function pumpQueuedSessionMessages(sessionId) {
     return false;
   }
 
-  if (state._updateStopping) return false;
+  if (state._updateStopping || [...followUpSubmissions].some(entry => entry.sessionId === sessionId)) return false;
   // A stopped or failed foreground run is terminal once a later queued message
   // starts. Retain only detached background work and the FIFO queue so timing
   // and recovery metadata cannot leak into the next task.
@@ -17320,7 +17413,7 @@ els.chatForm.addEventListener("submit", async (event) => {
       const dispatch = followUpBehavior === "queue" ? enqueueSessionMessage : steerSessionMessage;
       dispatch(sessionId, taskText, imgs).catch((err) => {
         console.error("Failed to dispatch follow-up message:", err);
-        appendSystemError(err.message || String(err));
+        reportFollowUpSubmissionError(sessionId, err);
       });
     }
     return;
@@ -17347,7 +17440,6 @@ els.chatForm.addEventListener("submit", async (event) => {
     ? findRetryableForegroundDispatch(state.sessionId, text, getSelectedModel())
     : null;
   try {
-
     await sendMessage(text, {
       retryMessage,
       onSessionResolved: (sessionId) => {

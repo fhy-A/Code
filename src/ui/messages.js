@@ -1231,6 +1231,7 @@
     const onImageLoad = options.onImageLoad || (() => {});
     const onLayoutChange = options.onLayoutChange || (() => {});
     const onManualCompactionRetry = options.onManualCompactionRetry || (() => false);
+    const onFollowUpRetry = options.onFollowUpRetry || (() => false);
     const boundInteractionRoots = new WeakSet();
     const expandedUserInputSummaries = new Set();
     const terminalAgentRunStatuses = new Set(["completed", "failed", "cancelled", "canceled"]);
@@ -1472,6 +1473,14 @@
         const copyButton = event.target?.closest?.(".msg-copy-btn");
         if (copyButton && (!root.contains || root.contains(copyButton))) {
           void copyMessageText(copyButton);
+          return;
+        }
+        const followUpRetry = event.target?.closest?.("[data-follow-up-retry]");
+        if (followUpRetry && (!root.contains || root.contains(followUpRetry))) {
+          event.preventDefault?.();
+          followUpRetry.disabled = true;
+          Promise.resolve(onFollowUpRetry(followUpRetry.dataset.followUpRetry || ""))
+            .finally(() => { followUpRetry.disabled = false; });
           return;
         }
         const compactionRetry = event.target?.closest?.("[data-manual-compaction-retry]");
@@ -1721,6 +1730,10 @@
           ? `<span class="background-dispatch-status running"><span class="background-dispatch-dot"></span>${t("backgroundRunning")}</span>`
           : "";
       const dispatchStatus = backgroundStatus;
+      const followUpDispatch = msg.meta?.queuedDispatch || msg.meta?.steerDispatch;
+      const followUpRetryId = String(msg.id || followUpDispatch?.id || followUpDispatch?.clientRequestId || "");
+      const followUpRetry = followUpDispatch?.failureCode === "followup_submission_failed" && followUpRetryId
+        ? `<button class="mini-btn" type="button" data-follow-up-retry="${escapeHtml(followUpRetryId)}" data-i18n="retry">${escapeHtml(t("retry"))}</button>` : "";
       const goalOrigin = msg.meta?.goalOrigin;
       const confirmedGoalOrigin = Boolean(
         goalOrigin?.confirmed === true
@@ -1754,14 +1767,14 @@
         const imageGroup = `<div class="bubble bubble-img msg-image-group">${imageItems}</div>`;
         const textBubble = renderUserTextProjection(text, index);
         const batchMeta = text
-          ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${renderCopyButton(text)}</div>`
-          : (goalMarker || dispatchStatus)
-            ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}</div>`
+          ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${renderCopyButton(text)}${followUpRetry}</div>`
+          : (goalMarker || dispatchStatus || followUpRetry)
+            ? `<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${followUpRetry}</div>`
             : "";
         return `<article class="msg user msg-image-batch${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area user-message-batch">${imageGroup}${textBubble}${batchMeta}</div></article>`;
       }
       const textArticle = text
-        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${renderCopyButton(text)}</div></div></article>`
+        ? `<article class="msg user${traceClass}" data-msg-index="${index}"${dispatchAttr}><div class="user-message-hover-area">${renderUserTextProjection(text, index)}<div class="msg-meta">${goalMarker}${dispatchStatus}${time}${renderCopyButton(text)}${followUpRetry}</div></div></article>`
         : "";
       return textArticle;
     }

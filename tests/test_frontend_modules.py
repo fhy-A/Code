@@ -70,6 +70,13 @@ H4_CONFIG_PATH = ROOT / "tests" / "e2e" / "h4" / "playwright.config.cjs"
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_followup_immediate_projection_and_dispatch_guards(self):
+        completed = subprocess.run(
+            ["node", str(ROOT / "tests/e2e/h4/code081-followup-unit.cjs")],
+            cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertTrue(json.loads(completed.stdout)["ok"])
+
     def test_update_lifecycle_delayed_callbacks_and_confirmed_saves(self):
         completed = subprocess.run(
             ["node", str(ROOT / "tests/e2e/h4/code086-update-lifecycle-unit.cjs")],
@@ -413,6 +420,16 @@ function t(key) {{ return translations[key] || key; }}
 function getSelectedModel() {{ return selectedModel; }}
 function getReasoningSelectionForModel() {{ return null; }}
 function getThinkingLevel() {{ return "auto"; }}
+const els = {{toolPreset: {{value: "default"}}, temperature: {{value: .2}}}};
+function normalizeImageRouteDispatch() {{ return null; }}
+function getSelectedImageRoute() {{ return null; }}
+function getPermissionProfile() {{ return "read"; }}
+function getEffectiveMaxTokens() {{ return 1024; }}
+function getModelContextResolution() {{ return {{}}; }}
+function followUpContent(text) {{ return text; }}
+function beginFollowUpSubmission(_id, message) {{ return message; }}
+function endFollowUpSubmission() {{}}
+function preserveFailedFollowUp() {{}}
 async function getFallbackKeys(model) {{
   keyLookups.push(model);
   if (selectedKey) return [selectedKey];
@@ -2654,13 +2671,13 @@ process.stdout.write(JSON.stringify({{
         self.assertIsNone(data["missingModel"])
 
         enqueue_start = APP_SOURCE.index("async function enqueueSessionMessage(")
-        enqueue_end = APP_SOURCE.index("function followUpMessageText", enqueue_start)
+        enqueue_end = APP_SOURCE.index("async function submitSessionSteer", enqueue_start)
         enqueue_source = APP_SOURCE[enqueue_start:enqueue_end]
         self.assertIn(
-            "const imageRoute = normalizeImageRouteDispatch(getSelectedImageRoute?.())",
+            "const imageRoute = normalizeImageRouteDispatch(retryCheckpoint?.imageRoute || getSelectedImageRoute?.())",
             enqueue_source,
         )
-        self.assertIn("...(imageRoute ? { imageRoute } : {})", enqueue_source)
+        self.assertIn("userMessage.meta.queuedDispatch.imageRoute = {...imageRoute}", enqueue_source)
         queued_run_start = APP_SOURCE.index("async function runQueuedSessionMessage(")
         queued_run_end = APP_SOURCE.index("async function pumpQueuedSessionMessages", queued_run_start)
         self.assertIn(
@@ -6226,6 +6243,8 @@ eval(source);
         script = f"""
 let capturedRunId = "";
 let saveCount = 0;
+const followUpSteerRequests = new Map();
+const saveFollowUpMessages = (...args) => saveSessionState(...args);
 const agentRuntime = {{
   async steerAgentRun(agentRunId) {{
     capturedRunId = String(agentRunId);
@@ -6272,7 +6291,7 @@ eval({json.dumps(helper_source)});
         )
         data = json.loads(completed.stdout)
         self.assertEqual(data["capturedRunId"], "run-at-click")
-        self.assertEqual(data["saveCount"], 1)
+        self.assertEqual(data["saveCount"], 2)
         self.assertEqual(data["dispatch"]["agentRunId"], "run-at-click")
         self.assertEqual(data["dispatch"]["status"], "accepted")
         self.assertEqual(data["dispatch"]["steerId"], "steer-1")
@@ -32197,10 +32216,7 @@ process.stdout.write(JSON.stringify({
             "messageScrollController?.beginReadingAnchor(sessionId, snapshotIndex - 1);",
             APP_SOURCE,
         )
-        self.assertIn(
-            "messageScrollController?.beginReadingAnchor(\n      ctx.sessionId,\n      ctx.messages.indexOf(userMessage),",
-            APP_SOURCE,
-        )
+        self.assertRegex(APP_SOURCE, r"messageScrollController\?\.beginReadingAnchor\(\s*ctx\.sessionId,\s*ctx\.messages\.indexOf\(userMessage\)")
         self.assertIn(
             "await submitSessionSteer(ctx, message, { createReadingAnchor: false });",
             APP_SOURCE,
@@ -32229,7 +32245,7 @@ process.stdout.write(JSON.stringify({
             send_source.index("setStreaming(true, sessionId);"),
         )
         self.assertIn("if (options.createReadingAnchor !== false && ctx.sessionId === state.sessionId)", APP_SOURCE)
-        self.assertIn("if (Number(error?.status || 0) === 409)", APP_SOURCE)
+        self.assertIn('if (Number(error?.status || 0) === 409 && error?.data?.errorCode !== "session_revision_conflict")', APP_SOURCE)
 
     def test_scroll_controller_preserves_position_and_coalesces_following_updates(self):
         script = r"""

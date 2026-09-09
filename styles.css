@@ -2317,6 +2317,8 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
 .user-message-hover-area:hover .msg-meta { pointer-events: auto; }
 .msg.user:has(.background-dispatch-status) .msg-meta { opacity: 1; }
 .msg.user:has(.goal-message-marker) .msg-meta { opacity: 1; pointer-events: auto; }
+.chat-pane:not(.empty-chat) .msg.user:has([data-follow-up-retry]) .msg-meta { opacity: 1; pointer-events: auto; }
+.msg.user [data-follow-up-retry] { position: relative; z-index: 2; pointer-events: auto; }
 .background-dispatch-status {
   display: inline-flex;
   align-items: center;
