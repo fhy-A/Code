@@ -493,7 +493,7 @@ _FAVICON_COMPOUND_SUFFIXES = frozenset({
     "com.hk", "com.tw", "com.au", "com.br", "com.mx", "co.jp", "co.za",
 })
 _FAVICON_PROVIDER_HOSTS = frozenset({
-    "api.faviconkit.com", "www.google.com", "icons.duckduckgo.com",
+    "www.google.com", "icons.duckduckgo.com",
 })
 _FAVICON_ALLOWED_MIMES = frozenset({
     "image/png", "image/jpeg", "image/gif", "image/webp", "image/x-icon",
@@ -577,7 +577,6 @@ def _favicon_candidate_urls(scheme, canonical_host):
     for candidate in candidates:
         quoted = parse.quote(candidate, safe="")
         urls.extend((
-            f"https://api.faviconkit.com/{quoted}/64",
             f"https://www.google.com/s2/favicons?domain={quoted}&sz=64",
             f"https://icons.duckduckgo.com/ip3/{quoted}.ico",
         ))

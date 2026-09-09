@@ -203,6 +203,13 @@ class TestFaviconProxySecurity(unittest.TestCase):
         )
         urls = server._favicon_candidate_urls("https", "www.example.com")
         self.assertEqual(urls[0], "https://www.example.com/favicon.ico")
+        self.assertFalse(any("faviconkit" in url for url in urls))
+        self.assertEqual(urls[2:], (
+            "https://www.google.com/s2/favicons?domain=www.example.com&sz=64",
+            "https://icons.duckduckgo.com/ip3/www.example.com.ico",
+            "https://www.google.com/s2/favicons?domain=example.com&sz=64",
+            "https://icons.duckduckgo.com/ip3/example.com.ico",
+        ))
         direct_urls = [url for url in urls if server.parse.urlsplit(url).path == "/favicon.ico"]
         self.assertEqual(direct_urls, [
             "https://www.example.com/favicon.ico",

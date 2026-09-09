@@ -25424,20 +25424,13 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
     await expect(links.nth(1).locator("img.ext-favicon")).toHaveCount(1);
     await expect(links.nth(1).locator(".link-ext-icon > svg")).toHaveCount(0);
     await expect(links.nth(2).locator("img.ext-favicon")).toHaveCount(1);
-    const imageSources = await links.locator("img.ext-favicon").evaluateAll((images) => images.map((image) => {
-      const url = new URL(image.src);
-      return {
-        sameOrigin: url.origin === window.location.origin,
-        path: url.pathname,
-        scheme: url.searchParams.get("scheme"),
-        host: url.searchParams.get("host"),
-      };
-    }));
-    expect(imageSources).toEqual([
-      { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "yuanbao.tencent.com" },
-      { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "xinghuo.xfyun.cn" },
-      { sameOrigin: true, path: "/api/favicon", scheme: "https", host: "mistral.ai" },
-    ]);
+    const imageSources = await links.locator("img.ext-favicon").evaluateAll((images) => images.map((image) => ({
+      sameOrigin: new URL(image.src).origin === location.origin,
+      protocol: new URL(image.src).protocol,
+      host: new URL(image.closest("a.ext-link").href).hostname,
+      decoded: image.naturalWidth > 1 && image.naturalHeight > 1,
+    })));
+    expect(imageSources).toEqual(expectedHrefs.map(href => ({sameOrigin: true, protocol: "blob:", host: new URL(href).hostname, decoded: true})));
   };
   await assertFaviconProjection();
 
@@ -25470,7 +25463,7 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
   }
 
   const faviconMetricsBeforeReload = await h4.metrics();
-  expect(faviconMetricsBeforeReload.faviconFetches).toHaveLength(10);
+  expect(faviconMetricsBeforeReload.faviconFetches).toHaveLength(8);
   expect(faviconMetricsBeforeReload.faviconFetches.every(
     (request) => request.scheme === "https" && request.deadlinePresent === true,
   )).toBe(true);
@@ -25489,24 +25482,20 @@ async function exerciseCjkBareUrlBoundaries(h4, runtime) {
   const xingParentDirectIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
     (request) => request.host === "xfyun.cn" && request.path === "/favicon.ico",
   );
-  const xingProviderIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
-    (request) => request.host === "api.faviconkit.com" && request.path.includes("xinghuo.xfyun.cn"),
-  );
   const xingRecoveryIndex = faviconMetricsBeforeReload.faviconFetches.findIndex(
     (request) => request.host === "www.google.com"
       && request.query.includes("domain=xinghuo.xfyun.cn"),
   );
   expect(xingExactDirectIndex).toBeGreaterThanOrEqual(0);
   expect(xingParentDirectIndex).toBeGreaterThan(xingExactDirectIndex);
-  expect(xingProviderIndex).toBeGreaterThan(xingParentDirectIndex);
-  expect(xingRecoveryIndex).toBeGreaterThan(xingProviderIndex);
+  expect(xingRecoveryIndex).toBeGreaterThan(xingParentDirectIndex);
+  expect(faviconMetricsBeforeReload.faviconFetches.some(request => request.host.includes("faviconkit"))).toBe(false);
   expect(new Set(faviconMetricsBeforeReload.faviconFetches.map((request) => request.host))).toEqual(
     new Set([
       "yuanbao.tencent.com",
       "xinghuo.xfyun.cn",
       "xfyun.cn",
       "mistral.ai",
-      "api.faviconkit.com",
       "www.google.com",
       "icons.duckduckgo.com",
     ]),

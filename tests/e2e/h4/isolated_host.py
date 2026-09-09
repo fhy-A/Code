@@ -4232,14 +4232,6 @@ def main() -> int:
                     raise code_server._FaviconTransientError("H4 deterministic transient favicon miss")
                 return code_server._validated_favicon_asset(FAVICON_PNG, "image/png")
             if (
-                parsed_url.hostname == "api.faviconkit.com"
-                and "xinghuo.xfyun.cn" in parsed_url.path
-            ):
-                return code_server._validated_favicon_asset(
-                    FAVICON_PLACEHOLDER_PNG,
-                    "image/png",
-                )
-            if (
                 parsed_url.hostname == "www.google.com"
                 and "domain=xinghuo.xfyun.cn" in parsed_url.query
             ):
