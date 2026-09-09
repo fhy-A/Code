@@ -16091,7 +16091,10 @@ function showModelPickerPane(pane = "root", restorePane = "model") {
   els.modelPillWrap.classList.add("open");
   els.modelPillBtn.setAttribute("aria-expanded", "true");
   document.getElementById("modelPickerRoot").classList.toggle("hidden", pane !== "root");
-  document.getElementById("modelPickerBack").classList.toggle("hidden", pane === "root");
+  document.getElementById("modelPickerHeader").classList.toggle("hidden", pane === "root");
+  const title = document.getElementById("modelPickerTitle");
+  title.dataset.i18n = pane === "model" ? "modelPickerModel" : "reasoningEffort";
+  title.textContent = t(title.dataset.i18n);
   els.modelPillDropdown.classList.toggle("hidden", pane !== "model");
   els.thinkingPillDropdown.classList.toggle("hidden", pane !== "effort");
   updateReasoningPicker();

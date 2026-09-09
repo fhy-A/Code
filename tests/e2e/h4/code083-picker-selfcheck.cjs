@@ -16,7 +16,7 @@ async function main(){
  try{
   const before=await host.metrics();browser=await chromium.launch({headless:true});
   for(const runtime of ['bundle','classic'])for(const language of ['zh','en'])for(const theme of ['light','dark'])for(const width of [1280,390]){
-   const context=await browser.newContext({viewport:{width,height:850},serviceWorkers:'block',colorScheme:theme});
+   const context=await browser.newContext({viewport:{width,height:850},serviceWorkers:'block',colorScheme:theme,hasTouch:width===390});
    try{
     await context.route('**/*',async route=>{
       const request=route.request(),url=new URL(request.url()),method=request.method();
@@ -48,6 +48,44 @@ async function main(){
     await page.goto(new URL(runtime==='bundle'?'/':'/dist/frontend/index.classic.html',host.ready.codeUrl).href);
     await page.waitForFunction(()=>document.documentElement.getAttribute('data-code-phase-one-shell-ready')==='true');
     const trigger=page.locator('#modelPillBtn'),menu=page.locator('#modelReasoningDropdown');
+    const header=page.locator('#modelPickerHeader'),back=page.locator('#modelPickerBack'),title=page.locator('#modelPickerTitle');
+    const headerChecks=[];
+    async function checkHeader(pane){
+      const label=lang=>pane==='model'?(lang==='zh'?'模型':'Model'):(lang==='zh'?'推理强度':'Reasoning effort');
+      await expect(header).toBeVisible();await expect(title).toHaveText(label(language));
+      await expect(back).toHaveAttribute('aria-label',language==='zh'?'返回':'Back');
+      await expect(header.locator('button')).toHaveCount(1);
+      assert(await title.evaluate(el=>el.tagName==='SPAN'&&el.tabIndex===-1&&!el.closest('button')));
+      await title.click();await expect(menu).toHaveAttribute('data-pane',pane);
+      await page.keyboard.press('Tab');await expect(menu.locator('button:focus')).toHaveCount(1);
+      await page.mouse.move(width-8,8);await page.keyboard.press('End');
+      const geometry=await header.evaluate(el=>{
+        const b=el.querySelector('button'),t=el.querySelector('span'),bs=getComputedStyle(b),hs=getComputedStyle(el);
+        const r=b.getBoundingClientRect(),tr=t.getBoundingClientRect(),hr=el.getBoundingClientRect();
+        return{width:r.width,height:r.height,backBackground:bs.backgroundColor,headerBackground:hs.backgroundColor,
+          border:bs.borderBottomWidth,headerBorder:hs.borderBottomWidth,titleFits:tr.right<=hr.right&&tr.left>=hr.left};
+      });
+      assert(geometry.width>=40&&geometry.width<=44&&geometry.height>=40&&geometry.height<=44);
+      assert.equal(geometry.border,'0px');assert.equal(geometry.headerBorder,'0px');assert(geometry.titleFits);
+      assert.equal(geometry.backBackground,'rgba(0, 0, 0, 0)');assert.equal(geometry.headerBackground,'rgba(0, 0, 0, 0)');
+      const representative=(runtime==='bundle'&&language==='zh'&&theme==='light'&&width===1280)||(runtime==='classic'&&language==='en'&&theme==='dark'&&width===390);
+      if(representative)await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-${pane}-header-default.png`)});
+      await back.hover();await expect(back).not.toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+      await expect(header).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+      if(representative)await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-${pane}-header-hover.png`)});
+      await page.mouse.move(width-8,8);await page.keyboard.press('Home');await expect(back).toBeFocused();
+      await expect(back).toHaveCSS('outline-style','solid');await expect(back).toHaveCSS('outline-width','2px');
+      if(representative)await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-${pane}-header-focus.png`)});
+      await page.evaluate(next=>window.__code083Lang(next),language==='zh'?'en':'zh');
+      await expect(title).toHaveText(label(language==='zh'?'en':'zh'));
+      await expect(back).toHaveAttribute('aria-label',language==='zh'?'Back':'返回');
+      await page.evaluate(next=>window.__code083Lang(next),language);await expect(title).toHaveText(label(language));
+      await page.keyboard.press('Home');await page.keyboard.press('Enter');
+      await expect(header).toBeHidden();await expect(page.locator(`[data-picker-pane=${pane}]`)).toBeFocused();
+      await page.locator(`[data-picker-pane=${pane}]`).click();await expect(title).toHaveText(label(language));
+      await page.mouse.move(width-8,8);await page.keyboard.press('End');
+      headerChecks.push({pane,...geometry,hover:true,focus:true,keyboardReturn:true,liveTranslation:true});
+    }
     await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===5);
     await page.waitForLoadState('networkidle');
     await expect(trigger).toHaveText(language==='zh'?'选择模型':'Select model',{useInnerText:true});
@@ -62,6 +100,7 @@ async function main(){
     await page.locator('[data-route-ref=mr1_synthetic_gpt]').click();
     await expect(trigger).toContainText('gpt-5.5');await trigger.click();
     await expect(page.locator('#modelPickerRoot')).toBeVisible();
+    await expect(header).toBeHidden();
     await expect(page.locator('#thinkingPillLabel')).toHaveText(initialPreference==='legacy'?(language==='zh'?'旧设置待切换':'Legacy setting'):(language==='zh'?'高':'High'));
     await page.locator('#thinkingPillBtn').click();await expect(page.locator('#thinkingPillDropdown [data-value]')).toHaveCount(4);
     await expect(page.locator('#thinkingPillDropdown [data-value=off]')).toHaveCount(0);
@@ -80,10 +119,12 @@ async function main(){
     await page.evaluate(next=>window.__code083Lang(next),language==='zh'?'en':'zh');
     await expect(page.locator('#thinkingPillDropdown [data-value=default]')).toHaveText(language==='zh'?'Default':'默认');
     await page.evaluate(next=>window.__code083Lang(next),language);
+    await checkHeader('effort');
     const geometry=await menu.evaluate(el=>{const box=el.getBoundingClientRect(),dot=getComputedStyle(el.querySelector('.selected'),'::after');return{width:box.width,contained:box.left>=0&&box.right<=innerWidth&&box.top>=0&&box.bottom<=innerHeight,dotWidth:dot.width,dotHeight:dot.height}});
     assert.equal(geometry.width,168);assert(geometry.contained);assert.equal(geometry.dotWidth,'8px');
     await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-effort.png`)});
     await page.locator('#modelPickerBack').click();await page.locator('[data-picker-pane=model]').click();
+    await checkHeader('model');
     const modelGeometry=await menu.boundingBox(),composer=await page.locator('#chatForm').boundingBox();assert(modelGeometry.width<=420);assert(modelGeometry.x>=composer.x-1);await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-models.png`)});
     await page.locator('[data-route-ref=mr1_synthetic_astra]').click();await expect(page.locator('#thinkingPillDropdown button:disabled')).toHaveCount(4);
     await page.locator('#modelPickerBack').click();await page.locator('[data-picker-pane=model]').click();await page.locator('[data-route-ref=mr1_synthetic_gpt]').click();
@@ -102,7 +143,7 @@ async function main(){
     await page.locator('#maxTokens').evaluate(el=>{el.value='8192';el.dispatchEvent(new Event('change',{bubbles:true}))});
     await expect(page.locator('#thinkingPillDropdown [data-value=high]')).toBeEnabled();
     await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-budget.png`)});
-    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true,budgetGuard:true});
+    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true,budgetGuard:true,headerChecks});
    }finally{await context.close()}
   }
   const after=await host.metrics();assert.equal(after.chatRequests.length-before.chatRequests.length,0);assert.equal(after.toolExecutions.length-before.toolExecutions.length,0);assert.deepEqual(blockedWrites,[]);assert.deepEqual(errors,[]);result={ok:true,cases,evidenceDir};

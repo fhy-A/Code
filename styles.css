@@ -14925,11 +14925,17 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 }
 #modelPillWrap .model-picker-value { flex: 1; min-width: 0; text-align: right; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 #modelPillWrap .model-picker-entry > span:first-child { flex: none; }
-#modelPillWrap .model-picker-back {
-  flex: none; width: 100%; min-height: 40px; border: 0; border-bottom: 1px solid var(--line);
-  padding: 8px 10px; color: var(--muted); background: transparent; text-align: left; font: inherit; cursor: pointer;
+#modelPillWrap .model-picker-header {
+  display: flex; align-items: center; gap: 2px; flex: none; margin-bottom: 4px;
 }
-#modelPillWrap .model-picker-back::before { content: "‹ "; }
+#modelPillWrap .model-picker-back {
+  display: grid; place-items: center; flex: none; width: 40px; height: 40px;
+  border: 0; border-radius: 7px; padding: 0; color: var(--muted);
+  background: transparent; font: inherit; cursor: pointer;
+}
+#modelPillWrap .model-picker-back:hover { background: var(--panel-2); color: var(--text); }
+#modelPillWrap .model-picker-back:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#modelPillWrap .model-picker-title { color: var(--text); font-size: 13px; font-weight: 500; line-height: 20px; white-space: nowrap; }
 #modelPillWrap .model-picker-menu .model-pill-option {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   min-height: 40px; padding: 8px 10px; border-radius: 7px;
@@ -14951,5 +14957,6 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 #modelPillLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #modelReasoningLabel, #modelPillBtn > .model-pill-chevron { flex: none; }
 @media (pointer: coarse) {
-  #modelPillWrap .model-picker-menu .model-pill-option, #modelPillWrap .model-picker-back { min-height: 44px; }
+  #modelPillWrap .model-picker-menu .model-pill-option { min-height: 44px; }
+  #modelPillWrap .model-picker-back { width: 44px; height: 44px; }
 }
