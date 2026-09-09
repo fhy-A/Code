@@ -20289,7 +20289,24 @@ resizeCallback();
 const restoredViewportMarkerCount = markers.length;
 messages = [{role: "user", content: "only one"}];
 feature.renderTimeline();
+const navigationIndices=[];let allowNavigation=false;
+const delegated=createTimelineFeature({
+  escapeHtml,t,getMessages:()=>[{role:'user',content:'a'},{role:'user',content:'b'}],
+  getTimelineElement:()=>timeline,getMessageContainer:()=>messageContainer,
+  requestAnimationFrame:callback=>callback(),
+  onNavigateToMessage:index=>{navigationIndices.push(index);return allowNavigation;},
+});
+delegated.renderTimeline();
+const activeBeforeDenied=markerStates.get('1').active;
+clickListeners[0]();
+const deniedPreserved=markerStates.get('1').active===activeBeforeDenied;
+const oldQuery=messageContainer.querySelector;messageContainer.querySelector=()=>null;
+clickListeners[0]();const missingSkipped=navigationIndices.length===1;
+messageContainer.querySelector=oldQuery;allowNavigation=true;clickListeners[0]();
+const delegatedActive=markerStates.get('0').active;
+delegated.clearTimeline();
 process.stdout.write(JSON.stringify({
+  navigationIndices,deniedPreserved,missingSkipped,delegatedActive,
   defaultMinTimelineWidth: DEFAULT_MIN_TIMELINE_WIDTH,
   timelineMarkerPitch: TIMELINE_MARKER_PITCH,
   timelineMaxViewportRatio: TIMELINE_MAX_VIEWPORT_RATIO,
@@ -20378,6 +20395,10 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(data["secondVisibleAfterScroll"])
         self.assertEqual(data["scrolled"]["selector"], '[data-msg-index="3"]')
         self.assertEqual(data["scrolled"]["options"], {"behavior": "smooth", "block": "start"})
+        self.assertEqual(data["navigationIndices"], [0, 0])
+        self.assertTrue(data["deniedPreserved"])
+        self.assertTrue(data["missingSkipped"])
+        self.assertTrue(data["delegatedActive"])
         self.assertTrue(data["hiddenWhenNarrow"])
         self.assertEqual(data["narrowAriaHidden"], "true")
         self.assertTrue(data["restoredWhenWide"])
@@ -31371,6 +31392,37 @@ process.stdout.write(JSON.stringify({full, plain, withImage, imageOnly}));
 
 
 class MessageScrollControllerTests(unittest.TestCase):
+    def test_explicit_navigation_cancels_following_without_weakening_scroll_guards(self):
+        script = r"""
+const assert=require('node:assert/strict');global.window=global;global.Code={ui:{}};require('./src/ui/messages.js');
+const frames=new Map();let frameId=0,top=1600,reserve=0,realHeight=2000;
+const target={};const anchors={0:50,2:950,4:1700};
+const container={clientHeight:400,get scrollHeight(){return realHeight+reserve},get scrollTop(){return top},set scrollTop(value){top=Math.max(0,Math.min(value,this.scrollHeight-this.clientHeight))}};
+const controller=Code.ui.messages.createMessageScrollController({container,
+  requestAnimationFrame:callback=>{frames.set(++frameId,callback);return frameId},cancelAnimationFrame:id=>frames.delete(id),
+  findAnchorElement:index=>Object.hasOwn(anchors,index)?{...target,index}:null,measureAnchorTop:target=>target?anchors[target.index]:null,
+  applyAnchorReserve:value=>{reserve=value},isCompactViewport:()=>false,
+});
+controller.setSession('s1');controller.onContentChanged('s1');
+const before=controller.snapshot();const lateFrame=[...frames.values()][0];
+for(const [owner,index] of [['old',0],['s1',99],['s1',-1],['s1',NaN],['s1','2']]){assert.equal(controller.navigateToMessage(owner,index),false);assert.deepEqual(controller.snapshot(),before);assert.equal(top,1600);}
+assert(controller.navigateToMessage('s1',2));assert.equal(top,950);assert.equal(frames.size,0);assert.equal(controller.snapshot().following,false);
+lateFrame();assert.equal(top,950);controller.onUserScroll();
+realHeight+=300;controller.onContentChanged('s1');controller.onViewportChanged('s1');assert.equal(top,950);
+controller.onUserScroll(); // Acknowledge the controller's own write before an unrelated layout scroll.
+top=1100;controller.onUserScroll();assert.equal(top,950);
+assert(controller.beginReadingAnchor('s1',2));const anchored=controller.snapshot();
+assert.equal(controller.navigateToMessage('s1',99),false);assert.deepEqual(controller.snapshot(),anchored);
+assert(controller.navigateToMessage('s1',0));assert.equal(top,50);assert.equal(controller.snapshot().readingAnchor,null);assert.equal(reserve,0);
+controller.forceToLatest('s1');assert.equal(top,1900);assert(controller.snapshot().following);
+controller.setSession('s2');const switched=controller.snapshot();assert.equal(controller.navigateToMessage('s1',2),false);assert.deepEqual(controller.snapshot(),switched);
+assert(controller.navigateToMessage('s2',4));assert.equal(top,1700);
+controller.disconnect();assert.equal(frames.size,0);
+process.stdout.write(JSON.stringify({missingPreserved:true,lateFollowCancelled:true,redrawStable:true,guardsKept:true,anchorCleared:true,latest:true,sessionSafe:true}));
+"""
+        completed = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True)
+        self.assertTrue(all(json.loads(completed.stdout).values()))
+
     def test_reading_anchor_consumes_space_and_releases_on_downward_intent(self):
         script = r"""
 global.window = global;

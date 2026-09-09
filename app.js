@@ -1511,6 +1511,7 @@ const timelineFeature = createTimelineFeature({
   getSessionId: () => state.sessionId,
   getTimelineElement: () => document.getElementById("chatTimeline"),
   getMessageContainer: () => els.messages,
+  onNavigateToMessage: (messageIndex) => messageScrollController?.navigateToMessage(state.sessionId, messageIndex),
 });
 const {
   clearTimeline,

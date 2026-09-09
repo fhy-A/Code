@@ -274,6 +274,23 @@
       return true;
     }
 
+    function navigateToMessage(ownerSessionId, messageIndex) {
+      if (!container || String(ownerSessionId || "") !== sessionId
+        || !Number.isInteger(messageIndex) || messageIndex < 0) return false;
+      const target = findAnchorElement(messageIndex);
+      const top = target ? measureAnchorTop(target) : null;
+      if (!Number.isFinite(top)) return false;
+      cancelScheduledFrame();
+      clearUserScrollIntent();
+      clearTouchIntent();
+      clearPointerIntent();
+      clearReadingAnchor();
+      following = false;
+      writeScrollTop(Math.min(Math.max(0, top), maxScrollTop()));
+      reconcile();
+      return true;
+    }
+
     function beginDownwardUserScroll() {
       renewUserScrollIntent(1);
       if (!readingAnchor && distanceToBottom() <= bottomTolerance) return false;
@@ -667,6 +684,7 @@
     return Object.freeze({
       connect,
       beginReadingAnchor,
+      navigateToMessage,
       disconnect,
       forceToLatest,
       jumpToLatest,

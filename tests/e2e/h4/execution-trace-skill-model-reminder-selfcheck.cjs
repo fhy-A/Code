@@ -93,7 +93,17 @@ async function createContext(browser, host, runtime, audit, view = {}) {
         const feature = api.createMessagesFeature(options);
         window.__toolNameFeature = feature;
         return feature;
+      }, createMessageScrollController(options) {
+        const controller=api.createMessageScrollController(options);window.__messageScroller=controller;return controller;
       }};
+    }});
+    let stateApi;
+    Object.defineProperty(Code.core,'state',{configurable:true,get:()=>stateApi,set(api){
+      stateApi={...api,createAppState(...args){const state=api.createAppState(...args);window.__traceAppState=state;return state;}};
+    }});
+    let timelineApi;
+    Object.defineProperty(Code.ui,'timeline',{configurable:true,get:()=>timelineApi,set(api){
+      timelineApi={...api,createTimelineFeature(options){const feature=api.createTimelineFeature(options);window.__timelineFeature=feature;return feature;}};
     }});
     let i18nApi;
     Object.defineProperty(Code.core, 'i18n', {configurable: true, get: () => i18nApi, set(api) {
@@ -517,6 +527,86 @@ async function exerciseTraceArrows(browser, host, evidenceDir) {
   assert.deepEqual(audit.blockedWrites,[]);return {cases};
 }
 
+async function exerciseTimelineNavigation(browser,host,evidenceDir,expectBlocked=false){
+  const audit=createAudit(),cases=[];
+  for(const runtime of expectBlocked?['bundle']:['bundle','classic'])for(const running of expectBlocked?[false]:[false,true]){
+    const context=await createContext(browser,host,runtime,audit,{language:runtime==='bundle'?'zh':'en',theme:runtime==='bundle'?'light':'dark',width:1280}),page=await context.newPage(),errors=[];
+    page.on('pageerror',error=>errors.push(String(error)));
+    try{
+      await page.goto(new URL(runtime==='bundle'?'/':'/dist/frontend/index.classic.html',host.ready.codeUrl).href);await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');
+      await page.evaluate(running=>{
+        const state=window.__traceAppState,scroller=window.__messageScroller,feature=window.__toolNameFeature,timeline=window.__timelineFeature;
+        if(!state||!scroller||!feature||!timeline)throw new Error('actual application wiring unavailable');
+        window.__timelineInstall=(session,active)=>{
+          state.sessionId=session;state.messages=Array.from({length:6},(_,index)=>[
+            {role:'user',content:`${session} message ${index}`},
+            {role:'assistant',content:('Synthetic answer paragraph for stable scroll geometry. ').repeat(65),_responseTime:'1s'},
+          ]).flat();
+          document.querySelector('.chat-pane').classList.remove('empty-chat');
+          scroller.setSession(session);scroller.setRunning(active,session);
+          window.__timelineRedraw=()=>{
+            document.getElementById('messageList').innerHTML=feature.projectMessages(state.messages,{hasActiveRun:active});
+            timeline.renderTimeline();scroller.onContentChanged(state.sessionId);
+          };
+          window.__timelineRedraw();scroller.forceToLatest(session);
+        };
+        window.__timelinePosition=(index=0)=>{
+          const area=document.getElementById('messages'),target=area.querySelector(`[data-msg-index="${index}"]`);
+          return{scrollTop:area.scrollTop,scrollHeight:area.scrollHeight,clientHeight:area.clientHeight,targetTop:target?.getBoundingClientRect().top,containerTop:area.getBoundingClientRect().top,state:scroller.snapshot()};
+        };
+        window.__timelineInstall('timeline-fixture',running);window.__timelineClicks=0;window.__nativeJumps=[];
+        document.getElementById('chatTimeline').addEventListener('click',()=>window.__timelineClicks++,true);
+        const native=Element.prototype.scrollIntoView;
+        Element.prototype.scrollIntoView=function(options){if(this.matches('.msg.user'))window.__nativeJumps.push({index:this.dataset.msgIndex,options});return native.call(this,options);};
+      },running);
+      const marker=page.locator('#chatTimeline .tl-marker[data-index="0"]');await expect(marker).toBeVisible();
+      await expect.poll(()=>page.evaluate(()=>{const p=window.__timelinePosition();return p.scrollHeight-p.clientHeight-p.scrollTop;})).toBe(0);
+      const before=await page.evaluate(()=>window.__timelinePosition());assert(before.scrollTop>500);
+      await marker.click();
+      const frames=await page.evaluate(async()=>{const frames=[];for(let index=0;index<45;index++){await new Promise(requestAnimationFrame);frames.push(window.__timelinePosition());}return frames;});
+      const last=frames[frames.length-1],clicks=await page.evaluate(()=>window.__timelineClicks),nativeJumps=await page.evaluate(()=>window.__nativeJumps);
+      assert.equal(clicks,1);
+      if(expectBlocked){assert(Math.abs(last.scrollTop-before.scrollTop)<=2);assert(last.targetTop<last.containerTop-100);assert.equal(nativeJumps.length,1);assert(last.state.following);}
+      else{assert(last.targetTop>=last.containerTop-2);assert(last.targetTop<last.containerTop+50);assert(!last.state.following);}
+      const checks={};
+      if(!expectBlocked){
+        assert.equal(nativeJumps.length,0);
+        await page.evaluate(()=>{window.__traceAppState.messages.at(-1).content+=' More streamed output.'.repeat(40);window.__timelineRedraw();});
+        await expect.poll(()=>page.evaluate(()=>window.__timelinePosition().scrollTop)).toBe(last.scrollTop);
+        await page.evaluate(png=>new Promise(resolve=>{
+          const image=document.createElement('img');image.width=160;image.height=80;image.setAttribute('data-message-scroll-on-load','');
+          document.querySelector('#messages [data-msg-index="0"]').appendChild(image);
+          image.addEventListener('load',()=>requestAnimationFrame(()=>requestAnimationFrame(resolve)),{once:true});
+          requestAnimationFrame(()=>{image.src=`data:image/png;base64,${png}`;});
+        }),fixturePng(160,80));
+        assert.equal((await page.evaluate(()=>window.__timelinePosition())).scrollTop,last.scrollTop);checks.redrawAndImageLoad=true;
+        async function latest(){await page.locator('#scrollToBottomBtn').click();await expect.poll(()=>page.evaluate(()=>{const p=window.__timelinePosition();return p.scrollHeight-p.clientHeight-p.scrollTop;})).toBe(0);assert(await page.evaluate(()=>window.__messageScroller.snapshot().following));}
+        await latest();
+        for(const [index,key] of [[2,'Enter'],[4,'Space']]){
+          const node=page.locator(`#chatTimeline .tl-marker[data-index="${index}"]`);await node.focus();await page.keyboard.press(key);
+          await expect.poll(()=>page.evaluate(index=>{const p=window.__timelinePosition(index);return Math.abs(p.targetTop-p.containerTop);},index)).toBeLessThanOrEqual(2);
+          assert.equal(await page.evaluate(()=>window.__messageScroller.snapshot().following),false);await latest();
+        }
+        checks.keyboard=true;checks.latest=true;
+        await page.locator('#chatTimeline .tl-marker[data-index="2"]').click();
+        await expect.poll(()=>page.evaluate(()=>window.__messageScroller.snapshot().following)).toBe(false);
+        await marker.click();await expect.poll(()=>page.evaluate(()=>{const p=window.__timelinePosition();return Math.abs(p.targetTop-p.containerTop);})).toBeLessThanOrEqual(2);
+        checks.readingModeJump=true;
+        const missingBefore=await page.evaluate(async()=>{document.querySelector('#messages [data-msg-index="2"]').remove();await new Promise(requestAnimationFrame);await new Promise(requestAnimationFrame);return window.__timelinePosition();});
+        await page.locator('#chatTimeline .tl-marker[data-index="2"]').click();
+        const missingAfter=await page.evaluate(()=>window.__timelinePosition());assert.equal(missingAfter.scrollTop,missingBefore.scrollTop);assert.deepEqual(missingAfter.state,missingBefore.state);checks.missingTarget=true;
+        await page.evaluate(()=>window.__timelineInstall('timeline-second',false));
+        await expect.poll(()=>page.evaluate(()=>{const p=window.__timelinePosition();return p.scrollHeight-p.clientHeight-p.scrollTop;})).toBe(0);
+        await marker.click();await expect.poll(()=>page.evaluate(()=>{const p=window.__timelinePosition();return Math.abs(p.targetTop-p.containerTop);})).toBeLessThanOrEqual(2);
+        assert.equal(await page.evaluate(()=>window.__messageScroller.snapshot().sessionId),'timeline-second');checks.sessionSwitch=true;
+      }
+      await page.screenshot({path:path.join(evidenceDir,`${runtime}-${running?'running':'completed'}-timeline.png`)});
+      assert.deepEqual(errors,[]);cases.push({runtime,running,before,after:last,frames,clicks,nativeJumps,blocked:expectBlocked,checks});
+    }finally{await context.close();}
+  }
+  assert.deepEqual(audit.blockedWrites,[]);return{cases};
+}
+
 function startupIsolation(audit) {
   const result = {};
   for (const runtime of ["bundle", "classic"]) {
@@ -538,6 +628,7 @@ async function main() {
   const toolNamesOnly = process.argv.includes('--tool-names-only');
   const imageReadsOnly = process.argv.includes('--image-reads-only');
   const traceArrowsOnly = process.argv.includes('--trace-arrows-only');
+  const timelineOnly = process.argv.includes('--timeline-only');
   const evidenceDir = await fs.mkdtemp(path.join(os.tmpdir(), 'code079-tool-names-'));
   const host = await startIsolatedHost({ disableRoutingV2: true });
   const audit = createAudit();
@@ -548,13 +639,14 @@ async function main() {
     const before = await host.metrics();
     browser = await chromium.launch({ headless: true });
     const runtimes = [];
-    if (!toolNamesOnly && !imageReadsOnly && !traceArrowsOnly) {
+    if (!toolNamesOnly && !imageReadsOnly && !traceArrowsOnly && !timelineOnly) {
       runtimes.push(await exerciseRuntime(browser, host, 'bundle', audit));
       runtimes.push(await exerciseRuntime(browser, host, 'classic', audit));
     }
-    const toolNames = imageReadsOnly || traceArrowsOnly ? null : await exerciseToolNames(browser, host, evidenceDir, toolNamesOnly);
-    const imageReads = toolNamesOnly || traceArrowsOnly ? null : await exerciseImageReads(browser, host, evidenceDir);
-    const traceArrows = toolNamesOnly || imageReadsOnly ? null : await exerciseTraceArrows(browser, host, evidenceDir);
+    const toolNames = imageReadsOnly || traceArrowsOnly || timelineOnly ? null : await exerciseToolNames(browser, host, evidenceDir, toolNamesOnly);
+    const imageReads = toolNamesOnly || traceArrowsOnly || timelineOnly ? null : await exerciseImageReads(browser, host, evidenceDir);
+    const traceArrows = toolNamesOnly || imageReadsOnly || timelineOnly ? null : await exerciseTraceArrows(browser, host, evidenceDir);
+    const timelineNavigation = timelineOnly ? await exerciseTimelineNavigation(browser,host,evidenceDir,process.argv.includes('--expect-timeline-blocked')) : null;
     const after = await host.metrics();
     assert.deepEqual(audit.blockedWrites, []);
     assert.equal(after.chatRequests.length - before.chatRequests.length, 0);
@@ -569,8 +661,9 @@ async function main() {
       toolNames,
       imageReads,
       traceArrows,
+      timelineNavigation,
       evidenceDir,
-      startupIsolation: toolNamesOnly || imageReadsOnly || traceArrowsOnly ? {} : startupIsolation(audit),
+      startupIsolation: toolNamesOnly || imageReadsOnly || traceArrowsOnly || timelineOnly ? {} : startupIsolation(audit),
       sideEffects: { agentRuns: 0, runtimeRuns: 0, chat: 0, tools: 0, modelRoutes: 0, writes: 0 },
     };
   } finally {

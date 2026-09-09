@@ -166,6 +166,8 @@
     const getSessionId = options.getSessionId || (() => "");
     const getTimelineElement = options.getTimelineElement || (() => null);
     const getMessageContainer = options.getMessageContainer || (() => null);
+    const onNavigateToMessage = typeof options.onNavigateToMessage === "function"
+      ? options.onNavigateToMessage : null;
     const isInternalMessage = options.isInternalMessage
       || Code.ui.messages?.isInternalMessage
       || isTimelineInternalMessage;
@@ -384,6 +386,15 @@
             syncTimelineHoverCascade();
           });
           marker.addEventListener("click", () => {
+            const messageIndex = Number(marker.dataset.index);
+            const currentTarget = getMessageContainer()
+              ?.querySelector(`[data-msg-index="${marker.dataset.index}"]`);
+            if (!currentTarget) return;
+            if (onNavigateToMessage) {
+              if (onNavigateToMessage(messageIndex) === false) return;
+            } else {
+              currentTarget.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
             const position = timelineEntries.findIndex(
               (entry) => String(entry.node.index) === String(marker.dataset.index),
             );
@@ -392,9 +403,6 @@
               visibleTimelinePositions.add(position);
             }
             syncTimelineMarkerStates();
-            const currentTarget = getMessageContainer()
-              ?.querySelector(`[data-msg-index="${marker.dataset.index}"]`);
-            currentTarget?.scrollIntoView({ behavior: "smooth", block: "start" });
           });
         });
       }
