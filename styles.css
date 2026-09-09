@@ -9837,7 +9837,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: tool-process-stage-text-shimmer 5.2s ease-in-out infinite;
+  animation: tool-process-stage-text-shimmer 3s ease-in-out infinite;
 }
 
 @keyframes tool-process-stage-text-shimmer {
@@ -9846,7 +9846,7 @@ body.theme-dark .chat-pane.empty-chat .composer {
     background-position: -58% 0;
   }
 
-  40%,
+  60.5%,
   100% {
     background-position: 158% 0;
   }

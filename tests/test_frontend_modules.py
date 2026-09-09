@@ -23044,7 +23044,7 @@ process.stdout.write(JSON.stringify({negative:negative.length,unavailable:unavai
         self.assertIn("background-clip: text", rule)
         self.assertIn("-webkit-background-clip: text", rule)
         self.assertIn("-webkit-text-fill-color: transparent", rule)
-        self.assertIn("animation: tool-process-stage-text-shimmer 5.2s ease-in-out infinite", rule)
+        self.assertIn("animation: tool-process-stage-text-shimmer 3s ease-in-out infinite", rule)
         self.assertNotRegex(
             rule,
             r"(?m)^\s*(?:color|opacity|width|height|padding|border(?:-[\w-]+)?|transform|pointer-events)\s*:",
@@ -23058,11 +23058,11 @@ process.stdout.write(JSON.stringify({negative:negative.length,unavailable:unavai
         keyframes = STYLE_SOURCE[keyframes_start:reduced_start]
         self.assertIn("0%,\n  12%", keyframes)
         self.assertIn("background-position: -58% 0", keyframes)
-        self.assertIn("40%,\n  100%", keyframes)
+        self.assertIn("60.5%,\n  100%", keyframes)
         self.assertIn("background-position: 158% 0", keyframes)
-        self.assertAlmostEqual(5.2 * 0.12, 0.6, delta=0.03)
-        self.assertAlmostEqual(5.2 * (0.40 - 0.12), 1.46, delta=0.03)
-        self.assertAlmostEqual(5.2 * (1 - 0.40), 3.12, delta=0.03)
+        self.assertAlmostEqual(3 * 0.12, 0.36, delta=0.001)
+        self.assertAlmostEqual(3 * (0.605 - 0.12), 1.46, delta=0.01)
+        self.assertAlmostEqual(3 * (1 - 0.605), 1.185, delta=0.001)
         self.assertNotRegex(keyframes, r"(?m)^\s*(?:color|opacity|transform)\s*:")
 
         reduced_rule_start = STYLE_SOURCE.index(reduced_heading_selector, reduced_start)
