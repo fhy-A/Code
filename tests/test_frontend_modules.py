@@ -34377,7 +34377,7 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
         ):
             self.assertIn(declaration, inline_code)
 
-    def test_completed_stage_and_items_use_compact_twenty_eight_pixel_targets(self):
+    def test_completed_stage_keeps_stable_height_and_items_keep_compact_targets(self):
         source = self.scoped_source()
         run_status = self.rule(
             source,
@@ -34431,7 +34431,7 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
         self.assertIn("margin-bottom: 16px;", process)
         stage_summary = self.rule(source, f"{self.COMPLETED_STAGE} > .tool-process-stage-summary {{")
         for declaration in (
-            "min-height: 28px;",
+            "min-height: 32px;",
             "padding: 1px 0;",
             "gap: 5px;",
             "color: color-mix(in srgb, var(--muted) 82%, var(--text));",

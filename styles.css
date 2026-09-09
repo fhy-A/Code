@@ -14843,7 +14843,7 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 }
 
 .chat-pane:not(.empty-chat) .tool-process-stage:is(.succeeded, .completed) > .tool-process-stage-summary {
-  min-height: 28px;
+  min-height: 32px;
   padding: 1px 0;
   gap: 5px;
   color: color-mix(in srgb, var(--muted) 82%, var(--text));

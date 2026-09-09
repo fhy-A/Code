@@ -686,7 +686,9 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-main().catch((error) => {
+module.exports = {createAudit, createContext, waitForRuntime, exerciseTimelineNavigation};
+
+if (require.main === module) main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
