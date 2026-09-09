@@ -6143,6 +6143,9 @@ process.stdout.write(JSON.stringify({{
         self.assertEqual(H4_SMOKE_SOURCE.count(".tool-edit-target"), 2)
         self.assertEqual(H4_SMOKE_SOURCE.count(".path-file-card"), 2)
 
+    def test_failed_edit_tools_keep_failure_trace_without_false_pending_proposal(self):
+        subprocess.run(["node", "tests/e2e/h4/code087-tool-failure-unit.cjs"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
+
     def test_server_agent_uses_profile_tools_and_projects_all_authorized_actions(self):
         for expected in (
             "const profileAllowedToolNames = getAllowedToolNamesForProfile(",

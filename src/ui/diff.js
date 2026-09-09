@@ -31,6 +31,12 @@
     const meta = msg.meta || {};
     const action = meta.action || meta.tool?.action || "";
     if (action === "delete_file") return false;
+    // Old snapshots may contain a synthetic pendingEditId for a failed call.
+    // Filter that projection at display time without rewriting saved history.
+    const failed = meta.result?.ok === false || meta.outcome === "failed";
+    if (meta.serverManaged && failed && !meta.authorizationId
+        && !meta.result?.proposalId && !meta.applied && !meta.result?.applied
+        && !(meta.path && /(^|\n)(--- |\+\+\+ |@@ )/.test(normalizeDiffText(msg.content)))) return false;
     return !!meta.pendingEditId && (["propose_edit", "apply_edit", "write_file", "manage_generated_image"].includes(action) || !!meta.newContent);
   }
 
@@ -174,19 +180,22 @@
       const action = meta.action || meta.tool?.action || "propose_edit";
       const target = meta.path || meta.tool?.path || "";
       const content = getMessageText(msg).trim();
-      if (!pendingId || action === "delete_file" || !content) return "";
+      if (!isEditSuggestionMessage(msg) || !pendingId || action === "delete_file" || !content) return "";
 
       const pendingEdits = getPendingEdits() || {};
       const authorizationRequests = getAuthorizationRequests() || [];
       const permissionProfile = getPermissionProfile();
       const editState = pendingEdits[editInstanceId] || {};
-      const applied = !!(meta.applied || editState.applied);
-      const rejected = !!(meta.rejected || editState.rejected || editState.resolved && !editState.applied);
-      const serverExecuting = Boolean(meta.serverManaged && meta.authorizationDecision === "approved" && !applied && !rejected);
+      const applied = !!(meta.applied || editState.applied || meta.result?.applied === true);
+      const resultFailed = meta.result?.ok === false || meta.outcome === "failed";
+      const rejected = Boolean(meta.result?.rejected || meta.authorizationDecision === "rejected"
+        || (!resultFailed && (meta.rejected || editState.rejected || editState.resolved && !editState.applied)));
+      const failed = resultFailed && !applied && !rejected;
+      const serverExecuting = Boolean(meta.serverManaged && meta.authorizationDecision === "approved" && !applied && !rejected && !failed);
       const isPending = authorizationRequests.some((item) => item.status === "pending" && item.editId === editInstanceId);
       // Server-managed edits that were approved: treat as applied (model handles retries).
-      const autoApplied = Boolean(meta.serverManaged && meta.authorizationDecision === "approved" && !applied && !rejected);
-      const queued = isPending || Boolean(meta.serverManaged && !serverExecuting && !applied && !rejected && !autoApplied);
+      const autoApplied = Boolean(meta.serverManaged && meta.authorizationDecision === "approved" && !applied && !rejected && !failed);
+      const queued = !failed && (isPending || Boolean(meta.serverManaged && !serverExecuting && !applied && !rejected && !autoApplied));
       const proposalOnly = permissionProfile === "plan" || !!meta.proposalOnly;
       const diffText = normalizeDiffText(content);
       if (/^\(no changes\)$/i.test(diffText.trim())) return "";
@@ -212,15 +221,15 @@
       const stats = isDiff ? getDiffStats(diffText) : { additions: 0, removals: 0 };
       const canReject = permissionProfile !== "bypass";
       const effectiveApplied = applied || autoApplied;
-      const status = effectiveApplied ? t("appliedLabel") : (rejected ? t("rejectedLabel") : (proposalOnly ? t("proposalOnly") : (serverExecuting ? t("processingLabel") : (queued ? t("waitingApproval") : t("pendingConfirmation")))));
-      const statusClass = effectiveApplied ? "is-applied" : (rejected ? "is-rejected" : "is-review");
+      const status = effectiveApplied ? t("appliedLabel") : (rejected ? t("rejectedLabel") : (failed ? t("toolProcessFailed") : (proposalOnly ? t("proposalOnly") : (serverExecuting ? t("processingLabel") : (queued ? t("waitingApproval") : t("pendingConfirmation"))))));
+      const statusClass = effectiveApplied ? "is-applied" : (rejected || failed ? "is-rejected" : "is-review");
       const disclosureKey = diffExpanded ? "collapseEditDiff" : "expandEditDiff";
       const disclosureLabel = t(disclosureKey);
       const safeEditInstanceId = String(editInstanceId).replace(/[^A-Za-z0-9_-]/g, "-");
       const diffContentId = `edit-diff-${safeEditInstanceId}-${index}`;
 
       let actions = "";
-      if (!applied && !rejected && !queued && !proposalOnly && !meta.serverManaged) {
+      if (!applied && !rejected && !failed && !queued && !proposalOnly && !meta.serverManaged) {
         actions = `
           <div class="apply-edit-bar">
             <button class="apply-edit-btn" type="button" data-edit-id="${escapeHtml(pendingId)}">${t("applyEdit")}</button>

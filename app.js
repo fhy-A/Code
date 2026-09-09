@@ -13996,6 +13996,10 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
     && message.meta?.pendingEditId
   ));
   const delegatedEditCompletion = toolAction === "task" && Boolean(projection);
+  // A failed invocation without an actual proposal is a tool result, not a
+  // new edit awaiting approval. Keep its error in the ordinary tool trace.
+  if (result?.ok === false && !projection && !result?.proposalId
+      && !result?.applied && !(result?.path && result?.diff)) return false;
   if (!delegatedEditCompletion && !editActions.includes(toolAction) && !editActions.includes(resultAction)) return false;
   const displayAction = delegatedEditCompletion
     ? String(projection.meta?.action || "propose_edit")
@@ -14007,9 +14011,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
     || (delegatedEditCompletion && result?.ok !== false && !projection?.meta?.rejected)
     || (["write_file", "delete_file", "manage_generated_image"].includes(resultAction) && result?.ok !== false && !result?.rejected);
   const rejected = Boolean(projection?.meta?.rejected)
-    || result?.rejected === true
-    || (delegatedEditCompletion && result?.ok === false && !projection?.meta?.applied)
-    || (result?.ok === false && result?.applied === false);
+    || result?.rejected === true;
   const diff = String(result?.diff || "");
 
   if (!projection) {
