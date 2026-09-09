@@ -18,12 +18,12 @@ def native_url(model):
     return {"openai": "https://api.openai.com", "deepseek": "https://api.deepseek.com", "anthropic": "https://api.anthropic.com"}[rc.MODELS[model]["provider"]]
 
 
-def compile_model(model, intent, url=None, route="mr1_fixture", contract=None, budget=8192):
+def compile_model(model, intent, url=None, route="mr1_fixture", contract=None, budget=8192, connection_source=""):
     url = url or native_url(model)
-    cap = rc.projection(model, route, url, contract=contract)
+    cap = rc.projection(model, route, url, contract=contract, connection_source=connection_source)
     selection = dict(schemaVersion=2, modelId=model, routeRef=route, intent=intent, capabilityRevision=cap["capabilityRevision"])
     wire, snapshot = rc.compile_request(dict(model=model, max_tokens=budget, temperature=.2, top_p=.9), selection,
-                                       model_id=model, route_ref=route, base_url=url, contract=contract)
+                                       model_id=model, route_ref=route, base_url=url, contract=contract, connection_source=connection_source)
     return wire, snapshot, selection
 
 
@@ -58,10 +58,12 @@ def test_sonnet_budget_never_expands(intent, budget):
     assert wire["max_tokens"] == budget + 1
 
 
-def register(registry, url, model):
-    catalog = registry.refresh([{"connectionId": "workbar_fixture", "source": "workbar", "key": "synthetic-only",
+def register(registry, url, model, *, source="workbar", reviewed=True):
+    catalog = registry.refresh([{"connectionId": "workbar_fixture", "source": source, "key": "synthetic-only",
                                  "baseUrl": url}], lambda _: [model])
     route = catalog["routes"][0]
+    if not reviewed:
+        return route, None
     raw = registry._catalog["routes"][0]
     contract = {k: raw[k] for k in ("connectionId", "baseUrlId", "modelId")}
     contract.update(upstreamModelId=model, adapterProfile=rc.MODELS[model]["adapter"], revision="fixture-v1",
@@ -71,7 +73,7 @@ def register(registry, url, model):
     return route, contract
 
 
-def test_proxy_requires_exact_reviewed_binding_and_survives_reload(tmp_path):
+def test_review_evidence_is_exact_and_expiry_keeps_static_capability(tmp_path):
     registry = ModelRouteRegistry(tmp_path / "routes.json")
     route, contract = register(registry, "https://proxy.invalid", "deepseek-v4-pro")
     assert registry.snapshot()["routes"][0]["reasoning"]["intents"] == list(rc.INTENTS)
@@ -82,8 +84,15 @@ def test_proxy_requires_exact_reviewed_binding_and_survives_reload(tmp_path):
     for field, value in [("baseUrlId", "other"), ("connectionId", "other"), ("modelId", "other"), ("headers", {})]:
         with pytest.raises(ValueError):
             registry.register_reasoning_contract(route["routeRef"], {**contract, field: value})
-    registry.register_reasoning_contract(route["routeRef"], {**contract, "expiresAt": "2020-01-01T00:00:00Z"})
-    assert registry.snapshot()["routes"][0]["reasoning"]["intents"] == ["default"]
+    original_revision = registry.snapshot()["routes"][0]["reasoning"]["capabilityRevision"]
+    registry.register_reasoning_contract(route["routeRef"], {**contract, "routeVerified": True, "routeEvidence": "synthetic-verification"})
+    assert registry.snapshot()["routes"][0]["reasoning"]["routeVerified"] is True
+    assert registry.snapshot()["routes"][0]["reasoning"]["capabilityRevision"] == original_revision
+    registry.register_reasoning_contract(route["routeRef"], {**contract, "routeVerified": True,
+        "routeEvidence": "synthetic-past-verification", "expiresAt": "2020-01-01T00:00:00Z"})
+    assert registry.snapshot()["routes"][0]["reasoning"]["intents"] == list(rc.INTENTS)
+    assert registry.snapshot()["routes"][0]["reasoning"]["routeVerified"] is False
+    assert registry.snapshot()["routes"][0]["reasoning"]["capabilityRevision"] == original_revision
 
 
 def claude_frames(content="complete", tool=False):
@@ -162,13 +171,13 @@ def upstream():
         assert not thread.is_alive()
 
 
-def create_run(runtime, upstream, model, intent="high", messages=None, session="protocol-session"):
+def create_run(runtime, upstream, model, intent="high", messages=None, session="protocol-session", source="workbar", reviewed=True):
     fixture, harness = runtime
     handler, url = upstream
     server = harness.server_mod
     registry = ModelRouteRegistry(fixture.data_dir / "protocol-routes.json")
-    route, contract = register(registry, url, model)
-    _, _, selection = compile_model(model, intent, url, route["routeRef"], contract)
+    route, contract = register(registry, url, model, source=source, reviewed=reviewed)
+    _, _, selection = compile_model(model, intent, url, route["routeRef"], contract, connection_source=source)
     with mock.patch.object(server, "_model_route_registry", registry):
         run = server._create_agent_run(session, {"model": model, "max_tokens": 8192,
             "messages": messages or [{"role": "user", "content": "list then finish"}]}, url, ["synthetic-only"],
@@ -533,3 +542,85 @@ def test_strict_deepseek_history_handoff_completes_tools(runtime, upstream, mode
     assert len(assistants) == 1 and assistants[0]["reasoning_content"] == "private thinking"
     assert "prior" in json.dumps(first["messages"])
     assert len(run["tool_executions"]) == 1 and "call_fixture" in run["tool_executions"]
+
+
+@pytest.mark.parametrize("source", ["manual", "workbar"])
+@pytest.mark.parametrize("model", rc.MODELS)
+def test_admitted_static_models_need_no_review_contract(tmp_path, source, model):
+    registry = ModelRouteRegistry(tmp_path / "routes.json")
+    route, contract = register(registry, "https://compatible.invalid", model, source=source, reviewed=False)
+    assert contract is None and registry.reasoning_contract(route["routeRef"]) is None
+    cap = registry.snapshot()["routes"][0]["reasoning"]
+    assert cap["intents"] == list(rc.INTENTS) and cap["routeVerified"] is False
+    resolved = registry.resolve(route["routeRef"], registry.snapshot()["catalogRevision"], model)
+    for intent in rc.INTENTS:
+        choice = dict(schemaVersion=2, modelId=model, routeRef=route["routeRef"], intent=intent, capabilityRevision=cap["capabilityRevision"])
+        wire, snapshot = rc.compile_request({"model": model, "max_tokens": 8192}, choice, model_id=model,
+            route_ref=route["routeRef"], base_url=resolved.base_url, contract=resolved.reasoning_contract, connection_source=resolved.source)
+        assert snapshot["protocolProfile"] == rc.MODELS[model]["adapter"]
+        assert snapshot["routeVerified"] is False
+        assert snapshot["schemaVersion"] == (3 if rc.MODELS[model].get("replay") else 2)
+        if intent == "default":
+            assert not rc.MANAGED_FIELDS.intersection(wire)
+
+
+@pytest.mark.parametrize("source", ["manual", "workbar"])
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "claude-opus-4-6", "gpt-5.5"])
+@pytest.mark.parametrize("intent", rc.INTENTS)
+def test_static_unverified_routes_compile_and_complete_real_local_http(runtime, upstream, source, model, intent):
+    fixture, harness = runtime
+    server = harness.server_mod
+    frames = claude_frames if model.startswith("claude") else deep_frames
+    upstream[0].scripts = [frames("checking", True), frames("complete")]
+    run = create_run(runtime, upstream, model, intent=intent, source=source, reviewed=False)
+    assert run["reasoning_snapshot"]["routeVerified"] is False
+    server._start_agent_worker(run)
+    fixture._wait_terminal(run)
+    fixture._wait_worker_idle(run)
+    assert run["status"] == "completed", run["error"]
+    assert len(upstream[0].calls) == 2 and not upstream[0].protocol_errors
+    wire = upstream[0].calls[0][1]
+    if intent == "default":
+        assert not rc.MANAGED_FIELDS.intersection(wire)
+    elif model.startswith("deepseek"):
+        assert wire["reasoning_effort"] == {"low": "low", "medium": "high", "high": "max"}[intent]
+    elif model.startswith("claude"):
+        assert wire["output_config"]["effort"] == intent
+    else:
+        assert wire["reasoning_effort"] == intent
+    if not model.startswith("gpt"):
+        assert len(run["protocol_replay"]["entries"]) == 2
+
+
+def test_static_enablement_does_not_admit_disabled_stale_or_incompatible_routes(tmp_path):
+    from code_runtime.model_route_registry import ModelRouteError
+    registry = ModelRouteRegistry(tmp_path / "routes.json")
+    route, _ = register(registry, "https://compatible.invalid", "deepseek-v4-pro", reviewed=False)
+    revision = registry.snapshot()["catalogRevision"]
+    with pytest.raises(ModelRouteError, match="stale"):
+        registry.resolve(route["routeRef"], revision - 1, "deepseek-v4-pro")
+    registry._catalog["routes"][0]["enabled"] = False
+    assert registry.snapshot()["routes"][0]["reasoning"]["intents"] == []
+    with pytest.raises(ModelRouteError, match="disabled"):
+        registry.resolve(route["routeRef"], revision, "deepseek-v4-pro")
+    registry._catalog["routes"][0]["enabled"] = True
+    registry.revoke_runtime_bindings()
+    with pytest.raises(ModelRouteError, match="Credentials"):
+        registry.resolve(route["routeRef"], revision, "deepseek-v4-pro")
+    assert rc.projection("unlisted-deepseek", "r", "https://compatible.invalid", connection_source="workbar")["intents"] == ["default"]
+    assert rc.projection("gpt-6-astra", "r", "https://compatible.invalid", connection_source="workbar")["intents"] == []
+    assert rc.projection("claude-opus-4-6", "r", "https://api.openai.com", connection_source="manual")["intents"] == []
+    assert rc.projection("deepseek-v4-pro", "r", "https://api.anthropic.com", connection_source="workbar")["intents"] == []
+
+
+def test_static_enablement_keeps_old_snapshots_and_queued_intent_unchanged():
+    payload = {"model": "deepseek-v4-pro", "max_tokens": 4096}
+    old_cap = rc.projection("deepseek-v4-pro", "r", "https://compatible.invalid")
+    queued = dict(schemaVersion=2, intent="default", modelId="deepseek-v4-pro", routeRef="r", capabilityRevision=old_cap["capabilityRevision"])
+    saved_queue = copy.deepcopy(queued)
+    old_wire, frozen = rc.compile_request(payload, queued, model_id="deepseek-v4-pro", route_ref="r", base_url="https://compatible.invalid")
+    assert frozen["schemaVersion"] == 2 and frozen["protocolProfile"] == "unknown"
+    assert rc.restore_snapshot(frozen, model_id="deepseek-v4-pro", route_ref="r") == frozen
+    with pytest.raises(rc.ReasoningError, match="selection_stale"):
+        rc.compile_request(payload, queued, model_id="deepseek-v4-pro", route_ref="r", base_url="https://compatible.invalid", connection_source="workbar")
+    assert queued == saved_queue and old_wire == payload

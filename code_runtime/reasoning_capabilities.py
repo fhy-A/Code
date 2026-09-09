@@ -15,7 +15,7 @@ MANAGED_FIELDS = frozenset({
     "reasoning_effort", "reasoning", "thinking", "output_config",
     "enable_thinking", "thinking_budget",
 })
-# Exact public IDs only. Additional o-models await an exact parameter contract.
+# Exact public IDs only; connection evidence never adds or guesses models.
 
 
 class ReasoningError(ValueError):
@@ -40,7 +40,16 @@ def transport_profile(base_url):
     return "openai-chat-native-v1" if native else "unknown"
 
 
-def reviewed_profile(model_id, base_url, contract):
+def current_contract(model_id, contract):
+    try:
+        return bool(contract and contract["modelId"] == model_id
+                    and contract["adapterProfile"] == MODELS.get(model_id, {}).get("adapter")
+                    and datetime.fromisoformat(contract["expiresAt"].replace("Z", "+00:00")) > datetime.now(timezone.utc))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def reviewed_profile(model_id, base_url, contract, *, connection_source=""):
     model = MODELS.get(model_id)
     if not model:
         return "unknown"
@@ -49,30 +58,44 @@ def reviewed_profile(model_id, base_url, contract):
         return native
     try:
         url = urlsplit(base_url)
+        native_provider = {"api.openai.com": "openai", "api.deepseek.com": "deepseek", "api.anthropic.com": "anthropic"}.get(url.hostname)
+        if connection_source in {"workbar", "manual"} and native_provider and native_provider != model["provider"]:
+            return "unsupported"
         host = {"deepseek": "api.deepseek.com", "anthropic": "api.anthropic.com"}.get(model["provider"])
         if (host and url.scheme == "https" and url.hostname == host and url.port in (None, 443)
                 and not url.username and not url.password and not url.query and not url.fragment
                 and url.path.rstrip("/") in ("", "/v1")):
             return model["adapter"]
-        if (contract and contract["adapterProfile"] == model["adapter"]
-                and contract["modelId"] == model_id
-                and datetime.fromisoformat(contract["expiresAt"].replace("Z", "+00:00")) > datetime.now(timezone.utc)):
+        if current_contract(model_id, contract):
+            return model["adapter"]
+        # The route registry has already admitted this connection. Choose the
+        # exact bundled adapter without treating that choice as a live probe.
+        if (connection_source in {"workbar", "manual"} and url.scheme in {"http", "https"}
+                and url.hostname and not url.username and not url.password and not url.query and not url.fragment):
+            if contract and contract.get("adapterProfile") != model["adapter"]:
+                return "unsupported"
             return model["adapter"]
     except (ValueError, TypeError, KeyError):
         pass
     return "unknown"
 
 
-def projection(model_id, route_ref="", base_url="", *, enabled=None, contract=None):
+def projection(model_id, route_ref="", base_url="", *, enabled=None, contract=None, connection_source=""):
     if enabled is None:
         enabled = os.environ.get("CODE_REASONING_V2_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
-    profile = reviewed_profile(model_id, base_url, contract)
+    profile = reviewed_profile(model_id, base_url, contract, connection_source=connection_source)
     model = MODELS.get(model_id)
-    blocked = model_id == "gpt-6-astra"
+    blocked = model_id == "gpt-6-astra" or profile == "unsupported"
     available = list(INTENTS if model and profile != "unknown" else ("default",))
     if blocked or not enabled:
         available = []
     identity = [REVISION, str(model_id), str(route_ref), profile, bool(enabled), contract]
+    if connection_source in {"workbar", "manual"}:
+        # Updating or expiring live evidence must not stale an otherwise
+        # identical static selection. Only transport/adapter changes do.
+        identity[-1] = None
+        if reviewed_profile(model_id, base_url, None) == "unknown":
+            identity.extend([connection_source, transport_identity(base_url)])
     revision = hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:24]
     return {
         "schemaVersion": 2, "capabilityRevision": revision,
@@ -80,8 +103,8 @@ def projection(model_id, route_ref="", base_url="", *, enabled=None, contract=No
         "candidate": model is not None,
         **({"minimumOutputTokens": {intent: budget + model["answerReserve"] for intent, budget in zip(INTENTS[1:], model["efforts"])}}
            if model and model.get("answerReserve") else {}),
-        "evidence": "adapter-tested" if model and profile != "unknown" else "unknown",
-        "routeVerified": bool(contract and contract.get("routeVerified") and profile != "unknown"),
+        "evidence": "adapter-tested" if model and profile in PROFILES else "unknown",
+        "routeVerified": bool(current_contract(model_id, contract) and contract.get("routeVerified") and profile not in {"unknown", "unsupported"}),
         "sourceUrl": model["source"] if model else "",
         "reason": ("reasoning_disabled" if not enabled else
                    "reasoning_protocol_unsupported" if blocked else
@@ -90,7 +113,7 @@ def projection(model_id, route_ref="", base_url="", *, enabled=None, contract=No
     }
 
 
-def compile_request(payload, selection, *, model_id, route_ref, base_url, enabled=None, contract=None):
+def compile_request(payload, selection, *, model_id, route_ref, base_url, enabled=None, contract=None, connection_source=""):
     """Compile once at admission. Existing runs and retries never call this again."""
     if not isinstance(selection, dict) or set(selection) != {
         "schemaVersion", "intent", "modelId", "routeRef", "capabilityRevision",
@@ -98,7 +121,7 @@ def compile_request(payload, selection, *, model_id, route_ref, base_url, enable
         raise ReasoningError("reasoning_selection_invalid")
     if selection["modelId"] != model_id or selection["routeRef"] != route_ref:
         raise ReasoningError("reasoning_target_mismatch")
-    cap = projection(model_id, route_ref, base_url, enabled=enabled, contract=contract)
+    cap = projection(model_id, route_ref, base_url, enabled=enabled, contract=contract, connection_source=connection_source)
     if selection["capabilityRevision"] != cap["capabilityRevision"]:
         raise ReasoningError("reasoning_selection_stale")
     intent = selection["intent"]

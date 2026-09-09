@@ -11621,6 +11621,7 @@ def _create_agent_run(
             route_ref=resolved_reasoning_route.route_ref,
             base_url=resolved_reasoning_route.base_url,
             contract=resolved_reasoning_route.reasoning_contract,
+            connection_source=resolved_reasoning_route.source,
         )
     management_plain = False
     if _immutable_skill_reader is None:
@@ -26700,6 +26701,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                         payload, body["reasoningSelection"], model_id=resolved_route.model_id,
                         route_ref=resolved_route.route_ref, base_url=resolved_route.base_url,
                         contract=resolved_route.reasoning_contract,
+                        connection_source=resolved_route.source,
                     )
                     if protocol_replay.kind(_reasoning_snapshot):
                         raise reasoning_capabilities.ReasoningError("reasoning_client_upgrade_required")

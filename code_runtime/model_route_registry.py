@@ -209,6 +209,8 @@ class ModelRouteRegistry:
                         route["modelId"], route["routeRef"],
                         self._base_urls.get(route["connectionId"], ""),
                         contract=self.reasoning_contract(route["routeRef"]),
+                        connection_source=route["source"],
+                        enabled=False if route.get("enabled") is False else None,
                     ),
                     "credentialsAvailable": bool(
                         route.get("enabled") and self._credentials.get(route["routeRef"])

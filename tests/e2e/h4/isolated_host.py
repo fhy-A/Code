@@ -26,6 +26,8 @@ import uuid
 
 
 MODEL_ID = "h4-e2e-model"
+STATIC_REASONING_GATE = threading.Event()
+STATIC_REASONING_MODELS = ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp")
 TRUSTED_ROUTE_MODEL_ID = "h4-deepseek-trusted-route-model"
 TRUSTED_ROUTE_USER = "H4_TRUSTED_MODEL_ROUTE_USER"
 TRUSTED_ROUTE_FINAL = "H4_TRUSTED_MODEL_ROUTE_FINAL"
@@ -2215,6 +2217,9 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             return
         if route == "/v1/models":
             self._record("models")
+            if STATIC_REASONING_GATE.is_set():
+                self._send_json({"object": "list", "data": [{"id": model, "object": "model"} for model in STATIC_REASONING_MODELS]})
+                return
             if not MODEL_CATALOG_GATE.reach_and_wait():
                 self._send_json({"error": "model catalog gate timeout"}, 504)
                 return
@@ -2384,6 +2389,18 @@ class FakeUpstreamHandler(BaseHTTPRequestHandler):
             return
 
         scenario, has_tool_result = _scenario_for(payload)
+        if STATIC_REASONING_GATE.is_set() and payload.get("model") in STATIC_REASONING_MODELS:
+            METRICS.append("chatRequests", {"scenario": "static-reasoning", "payload": payload})
+            if payload.get("tools") and any(m.get("role") == "assistant" and "reasoning_content" not in m for m in payload.get("messages", [])):
+                self._send_json({"error": "missing reasoning_content"}, 400)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.end_headers()
+            frame = {"choices": [{"delta": {"reasoning_content": "H4_STATIC_REASONING_THOUGHT", "content": "H4_STATIC_REASONING_DONE"}, "finish_reason": "stop"}]}
+            self.wfile.write(("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode())
+            self.wfile.flush()
+            return
         self._record("agent-chat")
         chat_metric = {
             "scenario": scenario,
@@ -5770,6 +5787,10 @@ def main() -> int:
                 continue
             request_id = command.get("id")
             operation = command.get("command")
+            if operation == "enable-static-reasoning":
+                STATIC_REASONING_GATE.set()
+                _json_line({"type": "response", "id": request_id, "ok": True})
+                continue
             if operation == "release-model-response":
                 MODEL_GATE.set()
                 _json_line({

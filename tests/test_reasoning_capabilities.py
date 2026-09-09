@@ -73,7 +73,8 @@ def test_registry_projection_changes_with_route_binding_not_name(tmp_path):
     first = registry.refresh([base], lambda _: ["gpt-5.5"])["routes"][0]
     second = registry.refresh([{**base, "baseUrl": "https://api.openai.com"}], lambda _: ["gpt-5.5"])["routes"][0]
     assert first["routeRef"] == second["routeRef"]
-    assert first["reasoning"]["intents"] == ["default"]
+    assert first["reasoning"]["intents"] == list(rc.INTENTS)
+    assert first["reasoning"]["routeVerified"] is False
     assert second["reasoning"]["intents"] == list(rc.INTENTS)
     assert first["reasoning"]["capabilityRevision"] != second["reasoning"]["capabilityRevision"]
     persisted = json.loads((tmp_path / "routes.json").read_text())
