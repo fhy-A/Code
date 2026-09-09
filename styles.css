@@ -2531,10 +2531,15 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
   gap: 3px;
 }
 
-.thinking-pill .model-pill-chevron {
-  width: 8px;
-  height: 8px;
+.composer-bar .composer-chevron {
+  display: block;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
 }
+
+#permPillBtn { gap: 5px; }
 
 .model-pill-btn:focus-visible {
   box-shadow: 0 0 0 2px var(--accent);
@@ -14919,7 +14924,7 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 #modelPillWrap .model-picker-menu[data-pane="effort"] { width: 168px; min-width: 0; }
 #modelPillWrap .model-picker-models { min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 #modelPillWrap .model-picker-entry {
-  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px;
+  display: flex; align-items: center; gap: 5px; width: 100%; min-height: 44px;
   border: 0; border-radius: 8px; padding: 10px; text-align: left;
   background: transparent; color: var(--text); font: inherit; cursor: pointer;
 }

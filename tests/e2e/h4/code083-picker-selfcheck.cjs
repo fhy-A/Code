@@ -11,11 +11,14 @@ const routes=[
  {routeRef:'mr1_synthetic_long',connectionId:'manual_synthetic_b',modelId:'Synthetic-Model-With-A-Long-Name-2026-09-08',label:'Synthetic B',reasoning:cap(['default'],'reasoning_model_unverified')},
 ].map(r=>({...r,source:'manual',enabled:true,credentialsAvailable:true}));
 async function main(){
+ const arrowsOnly=process.argv.includes('--arrows-only');
  const evidenceDir=await fs.mkdtemp(path.join(os.tmpdir(),'code083-picker-'));
  const host=await startIsolatedHost();let browser,result;const cases=[],blockedWrites=[],errors=[];
  try{
   const before=await host.metrics();browser=await chromium.launch({headless:true});
   for(const runtime of ['bundle','classic'])for(const language of ['zh','en'])for(const theme of ['light','dark'])for(const width of [1280,390]){
+   const arrowRepresentative=(runtime==='bundle'&&width===1280&&((language==='zh'&&theme==='light')||(language==='en'&&theme==='dark')))||(runtime==='classic'&&width===390&&((language==='en'&&theme==='dark')||(language==='zh'&&theme==='light')));
+   if(arrowsOnly&&!arrowRepresentative)continue;
    const context=await browser.newContext({viewport:{width,height:850},serviceWorkers:'block',colorScheme:theme,hasTouch:width===390});
    try{
     await context.route('**/*',async route=>{
@@ -88,6 +91,38 @@ async function main(){
     }
     await page.waitForFunction(()=>document.querySelectorAll('#modelPillDropdown [data-route-ref]').length===5);
     await page.waitForLoadState('networkidle');
+    const permission=page.locator('#permPillBtn'),permissionMenu=page.locator('#permPillDropdown');
+    const arrowChecks=[];
+    const permissionValue=await permission.getAttribute('data-value');
+    const sendIcon=await page.locator('#sendBtn svg').evaluate(el=>el.outerHTML);
+    for(const entry of [permission,trigger])await expect(entry.locator('.composer-chevron')).toHaveCSS('transform','none');
+    const commonArrow=await permission.locator('svg').innerHTML();assert.equal(await trigger.locator('svg').innerHTML(),commonArrow);
+    if(arrowRepresentative)await page.locator('.composer-bar').screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-arrows-closed.png`)});
+    await permission.focus();await page.keyboard.press('Enter');await expect(permissionMenu).toBeVisible();
+    await expect(permission.locator('svg')).toHaveCSS('transform','matrix(-1, 0, 0, -1, 0, 0)');
+    await page.keyboard.press('Tab');await expect(permissionMenu.locator('button').first()).toBeFocused();
+    if(arrowRepresentative)await page.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-arrows-permission-open.png`)});
+    await page.locator('#prompt').click();await expect(permissionMenu).toBeHidden();await expect(permission.locator('svg')).toHaveCSS('transform','none');
+    await trigger.focus();await page.keyboard.press('Enter');await expect(menu).toBeVisible();
+    await expect(trigger.locator('svg')).toHaveCSS('transform','matrix(-1, 0, 0, -1, 0, 0)');
+    for(const selector of ['#permPillBtn','#modelPillBtn','[data-picker-pane=model]','[data-picker-pane=effort]']){
+      const metrics=await page.locator(selector).evaluate(el=>{
+        const icon=el.querySelector('.composer-chevron'),p=icon.querySelector('path'),r=icon.getBoundingClientRect(),b=el.getBoundingClientRect();
+        let previous=icon.previousElementSibling;while(previous&&!previous.getClientRects().length)previous=previous.previousElementSibling;
+        const prev=previous.getBoundingClientRect();
+        return{width:r.width,height:r.height,viewBox:icon.getAttribute('viewBox'),stroke:getComputedStyle(p).strokeWidth,color:getComputedStyle(icon).color,
+          centered:Math.abs(r.y+r.height/2-b.y-b.height/2)<1,gap:r.left-prev.right,hidden:icon.getAttribute('aria-hidden'),transform:getComputedStyle(icon).transform};
+      });
+      assert.equal(metrics.width,14);assert.equal(metrics.height,14);assert.equal(metrics.viewBox,'0 0 14 14');assert.equal(metrics.stroke,'1.5px');
+      assert(metrics.centered,JSON.stringify({selector,...metrics}));assert(Math.abs(metrics.gap-5)<1,JSON.stringify({selector,...metrics}));assert.equal(metrics.hidden,'true');
+      if(selector.startsWith('[data-')){assert.equal(metrics.transform,'none');assert.equal(await page.locator(selector+' svg path').getAttribute('d'),'m5 3 4 4-4 4')}
+      arrowChecks.push({selector,...metrics});
+    }
+    assert.equal(new Set(arrowChecks.map(a=>a.color)).size,1);
+    if(arrowRepresentative)await page.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-arrows-model-open.png`)});
+    await page.keyboard.press('Escape');await expect(menu).toBeHidden();await expect(trigger).toBeFocused();await expect(trigger.locator('svg')).toHaveCSS('transform','none');
+    assert.equal(await permission.getAttribute('data-value'),permissionValue);assert.equal(await page.locator('#sendBtn svg').evaluate(el=>el.outerHTML),sendIcon);
+    if(arrowsOnly){cases.push({runtime,language,theme,width,arrowChecks});continue}
     await expect(trigger).toHaveText(language==='zh'?'选择模型':'Select model',{useInnerText:true});
     await expect(trigger).toHaveAttribute('aria-label',language==='zh'?'选择模型':'Select model');
     await trigger.click();await expect(page.locator('#thinkingPillLabel')).toHaveText(language==='zh'?'请先选择模型':'Select a model first');
@@ -143,10 +178,10 @@ async function main(){
     await page.locator('#maxTokens').evaluate(el=>{el.value='8192';el.dispatchEvent(new Event('change',{bubbles:true}))});
     await expect(page.locator('#thinkingPillDropdown [data-value=high]')).toBeEnabled();
     await menu.screenshot({path:path.join(evidenceDir,`${runtime}-${language}-${theme}-${width}-budget.png`)});
-    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true,budgetGuard:true,headerChecks});
+    cases.push({runtime,language,theme,width,initialPreference,unselectedGuidance:true,geometry,modelGeometry,legacyOptIn:initialPreference==='legacy',unknownPreservesIntent:true,astraBlocked:true,reload:true,keyboard:true,liveLanguage:true,budgetGuard:true,headerChecks,arrowChecks});
    }finally{await context.close()}
   }
-  const after=await host.metrics();assert.equal(after.chatRequests.length-before.chatRequests.length,0);assert.equal(after.toolExecutions.length-before.toolExecutions.length,0);assert.deepEqual(blockedWrites,[]);assert.deepEqual(errors,[]);result={ok:true,cases,evidenceDir};
+  const after=await host.metrics();assert.equal(after.chatRequests.length-before.chatRequests.length,0);assert.equal(after.toolExecutions.length-before.toolExecutions.length,0);assert.deepEqual(blockedWrites,[]);assert.deepEqual(errors,[]);result={ok:true,arrowsOnly,cases,evidenceDir};
  }finally{
   if(browser)await browser.close();const cleanup=await host.stop();assert(cleanup.childExited&&cleanup.rootRemoved);assert.deepEqual(cleanup.portsClosed,[true,true]);assert.equal(getActiveChildCount(),0);
   await fs.writeFile(path.join(evidenceDir,'result.json'),JSON.stringify({...result,ok:!!result?.ok,cleanup,blockedWrites,errors},null,2));
