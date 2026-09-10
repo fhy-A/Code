@@ -939,11 +939,9 @@
               <label class="field"><span data-i18n="maxTokens">${t("maxTokens")}</span><select id="settingsMaxTokens">${els.maxTokens.innerHTML}</select></label>
               <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>
             </div>
-            <p class="field-hint" data-i18n="responseStyleHint">${t("responseStyleHint")}</p>
             <p id="settingsResponseStyleStatus" class="field-hint" role="status">${replyStyle.error ? t(replyStyle.error) : ""}</p>
             <details class="response-style-advanced"><summary data-i18n="advancedSampling">${t("advancedSampling")}</summary>
               <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
-              <p class="field-hint" data-i18n="samplingHint">${t("samplingHint")}</p>
             </details>
           </section>
         </div>
