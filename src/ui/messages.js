@@ -1092,6 +1092,55 @@
     return true;
   }
 
+  // Native offsets read as zero in closed details. Keep only the last visible
+  // offsets on the actual DOM node; discarded groups are garbage-collectable.
+  const toolScrollMemory = new WeakMap();
+  const toolScrollBindings = new WeakSet();
+  const toolToggleBindings = new WeakSet();
+  const toolScrollSelector = ".tool-process-stage-body, .tool-process-body, [data-tool-detail] > pre";
+  function toolScrollKey(node) {
+    const stage = node.closest?.("details.tool-process-stage[data-tool-process-id]");
+    if (!stage) return "";
+    const item = node.closest?.("details.tool-process-item[data-tool-process-item-key]");
+    const detail = node.closest?.("[data-tool-detail]")?.dataset?.toolDetail || "";
+    return `${stage.dataset.toolProcessId}\u0000${stage.classList?.contains("tool-image-stage")}\u0000${item?.dataset.toolProcessItemKey || ""}\u0000${detail}`;
+  }
+  function readToolScroll(node) {
+    const key = toolScrollKey(node), remembered = toolScrollMemory.get(node);
+    if (!node.getClientRects?.().length && remembered?.key === key) return remembered;
+    return { key, top: node.scrollTop || 0, left: node.scrollLeft || 0 };
+  }
+  function restoreToolScroll(node, position) {
+    const value = { ...position, key: toolScrollKey(node) };
+    toolScrollMemory.set(node, value);
+    if (!node.getClientRects?.().length) return;
+    node.scrollTop = value.top;
+    node.scrollLeft = value.left;
+    // The browser owns clamping after shorter results or viewport changes.
+    toolScrollMemory.set(node, { key: value.key, top: node.scrollTop, left: node.scrollLeft });
+  }
+  function bindToolScrollMemory(root) {
+    Array.from(root.querySelectorAll(toolScrollSelector)).forEach(node => {
+      if (toolScrollBindings.has(node)) return;
+      toolScrollBindings.add(node);
+      if (!toolScrollMemory.has(node)) toolScrollMemory.set(node, readToolScroll(node));
+      node.addEventListener("scroll", () => {
+        if (node.isConnected && node.getClientRects().length) toolScrollMemory.set(node, readToolScroll(node));
+      }, { passive: true });
+    });
+    Array.from(root.querySelectorAll("details.tool-process-stage, details.tool-process-item")).forEach(details => {
+      if (toolToggleBindings.has(details)) return;
+      toolToggleBindings.add(details);
+      details.addEventListener("toggle", event => {
+        if (event.target !== details || !details.open || !details.isConnected) return;
+        Array.from(details.querySelectorAll(toolScrollSelector)).forEach(node => {
+          const value = toolScrollMemory.get(node);
+          if (value?.key === toolScrollKey(node) && !node.scrollTop && !node.scrollLeft) restoreToolScroll(node, value);
+        });
+      });
+    });
+  }
+
   function reconcileToolProcessItem(currentItem, projectedItem) {
     if (!currentItem || !projectedItem) return false;
     const currentSummary = currentItem.querySelector?.(":scope > summary") || null;
@@ -1108,12 +1157,36 @@
     if (!currentRoot?.querySelectorAll || !projectedRoot?.querySelectorAll) {
       return { traces: 0, groups: 0, items: 0 };
     }
+    // Moving a preserved details node into the detached projection can zero
+    // its native scroll offsets. Capture before any moves, restore only after
+    // the caller reconnects the tree. No shared history or follow-to-end rule.
+    const scrollPositions = [];
+    const activeElement = currentRoot.ownerDocument?.activeElement;
+    const focusedSummary = activeElement?.matches?.("details.tool-process-stage > summary, details.tool-process-item > summary")
+      && currentRoot.contains?.(activeElement) ? activeElement : null;
+    const captureScroll = (owner, selector, stage) => {
+      const node = owner.querySelector?.(selector);
+      if (!node) return;
+      scrollPositions.push({
+        owner, selector, stage,
+        processId: String(stage.dataset?.toolProcessId || ""),
+        image: stage.classList?.contains("tool-image-stage"),
+        ...readToolScroll(node),
+      });
+    };
     const currentStages = new Map();
     Array.from(currentRoot.querySelectorAll(
       "details.tool-process-stage[data-tool-process-id]",
     )).forEach((stage) => {
       const processId = String(stage.dataset?.toolProcessId || "");
       if (processId && !currentStages.has(processId)) currentStages.set(processId, stage);
+      captureScroll(stage, ":scope > .tool-process-stage-body", stage);
+      Array.from(stage.querySelectorAll("details.tool-process-item[data-tool-process-item-key]")).forEach(item => {
+        captureScroll(item, ":scope > .tool-process-body", stage);
+        for (const detail of ["arguments", "result"]) {
+          captureScroll(item, `:scope > .tool-process-body > [data-tool-detail="${detail}"] > pre`, stage);
+        }
+      });
     });
 
     let groups = 0;
@@ -1200,7 +1273,21 @@
       projectedTrace.replaceWith?.(currentTrace);
       traces += 1;
     });
-    return { traces, groups, items };
+    const restoreScroll = () => {
+      if (focusedSummary?.isConnected && currentRoot.contains?.(focusedSummary)) {
+        focusedSummary.focus?.({ preventScroll: true });
+      }
+      scrollPositions.forEach(({ owner, selector, stage, processId, image, top, left }) => {
+        if (!owner.isConnected || !currentRoot.contains?.(owner)
+          || String(stage.dataset?.toolProcessId || "") !== processId
+          || stage.classList?.contains("tool-image-stage") !== image) return;
+        const node = owner.querySelector?.(selector);
+        if (!node) return;
+        restoreToolScroll(node, { top, left });
+      });
+      bindToolScrollMemory(currentRoot);
+    };
+    return { traces, groups, items, restoreScroll };
   }
 
   function createMessagesFeature(options = {}) {
@@ -1828,9 +1915,11 @@
     function toolCallDetails(call) {
       const native = call?.function || {};
       const metaTool = call?.meta?.tool || {};
-      const args = Object.keys(metaTool).length
+      const rawArgs = Object.keys(metaTool).length
         ? metaTool
         : parseToolArguments(native.arguments ?? call?.arguments);
+      const args = { ...rawArgs };
+      delete args._actionStatus;
       const action = String(
         call?.meta?.action
         || args.action
@@ -2282,9 +2371,9 @@
                       <span class="tool-process-chevron" aria-hidden="true"></span>
                     </summary>
                     <div class="tool-process-body">
-                      ${argumentsText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessArguments"))}</strong><pre>${escapeHtml(argumentsText)}</pre></section>` : ""}
+                      ${argumentsText ? `<section class="tool-process-detail" data-tool-detail="arguments"><strong>${escapeHtml(t("toolProcessArguments"))}</strong><pre>${escapeHtml(argumentsText)}</pre></section>` : ""}
                       ${imageGroup ? '<section class="tool-process-detail"><code>read_file</code></section>' : ""}
-                      ${resultText ? `<section class="tool-process-detail"><strong>${escapeHtml(t("toolProcessResult"))}</strong><pre>${escapeHtml(resultText)}</pre></section>` : ""}
+                      ${resultText ? `<section class="tool-process-detail" data-tool-detail="result"><strong>${escapeHtml(t("toolProcessResult"))}</strong><pre>${escapeHtml(resultText)}</pre></section>` : ""}
                     </div>
                   </details>`;
                 }).join("")}
@@ -2843,6 +2932,11 @@
       closeExecutionTrace({
         activeStage: hasActiveRun && currentUserIndex === activeUserIndex,
       });
+      const actionStatus = global.Code?.agent?.tools?.validActionStatus?.(projection.actionStatus);
+      const actionRunId = String(projection.runState?.agentRunId || "");
+      if (hasActiveRun && actionRunId && actionStatus) {
+        rows.push(`<div class="msg assistant action-status" data-action-status-run="${escapeHtml(actionRunId)}"><span>${escapeHtml(actionStatus)}</span></div>`);
+      }
       if (hasActiveRun && !activeRunAnchorInserted) insertActiveRunAnchor();
       insertBranchMarker();
       queuedTailMessages.forEach(({ msg, index }) => {

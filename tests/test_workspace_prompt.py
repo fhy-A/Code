@@ -77,7 +77,8 @@ def test_request_only_hint_preserves_history_prefix_tool_pairs_and_idempotence(r
         second, _ = s._agent_model_payload(run)
     assert first == second
     assert first["messages"][:2] == original[:2]
-    assert first["messages"][3:] == before_messages[2:]
+    assert first["messages"][3]["content"].startswith("[Optional action status]\n")
+    assert first["messages"][4:] == before_messages[2:]
     assert facts(first) == {"cwd": run["cwd"], "sourceDirectories": run["workspace_roots"]}
     s._agent_validate_tool_protocol_messages(first["messages"])
     assert run["messages"] == before_messages and run["request"] == before_request

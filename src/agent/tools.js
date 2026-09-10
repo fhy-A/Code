@@ -773,6 +773,94 @@ const nativeTools = [
 
 ];
 
+  const actionStatusGuidance = "Optional current action and purpose; one line, at most 80 Unicode code points. Omit when unhelpful; display only.";
+  const actionStatusTools = new Set(nativeTools.map(tool => tool.function.name).filter(name => name !== "request_user_input"));
+  actionStatusTools.add("create_ppt_master_deck");
+  nativeTools.forEach(tool => {
+    if (actionStatusTools.has(tool.function.name)) {
+      tool.function.parameters.properties._actionStatus = {type: "string", maxLength: 80, description: actionStatusGuidance};
+    }
+  });
+
+  function validActionStatus(value) {
+    if (typeof value !== "string" || /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ud800-\udfff]/u.test(value)) return "";
+    const text = value.trim();
+    return text && [...text].length <= 80 ? text : "";
+  }
+
+  // Observer-local presentation only. Never persist this object in a Session
+  // checkpoint or seed it from message history. Recovery discards all names.
+  function createActionStatusObserver(sessionId, runId, fresh = false) {
+    let seq = 0, seedRequired = !fresh, text = "", status = "", currentRuntime = "", terminal = false;
+    let names = new Map();
+    const clear = () => { text = ""; names.clear(); };
+    const reset = () => { clear(); seedRequired = true; currentRuntime = ""; };
+    const matches = snapshot => snapshot?.agentRunId === runId && snapshot?.sessionId === sessionId;
+    const active = snapshot => matches(snapshot) && ["model", "tools"].includes(snapshot.status)
+      && !snapshot.pendingAuthorization && !snapshot.pendingInput && !snapshot.pendingSkillEvidence;
+    const watermark = snapshot => Math.max(0, Number(snapshot?.nextCursor || 0), ...(snapshot?.events || []).map(event => Number(event.seq || 0)));
+    function observe(snapshot) {
+      if (!matches(snapshot)) { reset(); return; }
+      status = snapshot.status;
+      if (["completed", "failed", "cancelled"].includes(status)) terminal = true;
+      if (terminal) { clear(); return; }
+      if (seedRequired || !active(snapshot)) {
+        clear(); seq = Math.max(seq, watermark(snapshot)); seedRequired = false;
+      }
+    }
+    function event(event, snapshot) {
+      if (!matches(snapshot)) { reset(); return; }
+      if (terminal || ["completed", "failed", "cancelled"].includes(snapshot.status)) { terminal = true; clear(); return; }
+      if (seedRequired) { observe(snapshot); return; }
+      const next = Number(event?.seq || 0);
+      if (!Number.isSafeInteger(next) || next <= seq) return;
+      seq = next; status = snapshot.status;
+      if (!active(snapshot)) { clear(); return; }
+      const data = event.data || {}, type = event.type;
+      if (["model_recovery", "authorization_required", "user_input_required", "waiting_credentials",
+        "waiting_recovery", "context_compaction_started", "context_compaction_completed", "context_compaction_failed"].includes(type)) {
+        clear(); return;
+      }
+      if (type === "model_started") currentRuntime = String(data.runtimeRunId || "");
+      if (type === "model_completed") {
+        currentRuntime = String(data.runtimeRunId || currentRuntime);
+        if (String(data.content || "").trim()) clear();
+        // Only complete, fresh model calls can offer names. A later tool in
+        // the batch cannot update the line until its own execution starts.
+        for (const call of data.toolCalls || []) {
+          if (!actionStatusTools.has(call?.function?.name)) continue;
+          const value = validActionStatus(parseJsonLoose(call.function.arguments)?._actionStatus);
+          if (value && call.id) names.set(call.id, {text: value, name: call.function.name});
+        }
+      }
+      if (!["tool_started", "command_started"].includes(type) || data.replayed) return;
+      const candidate = names.get(data.toolCallId);
+      if (!candidate) return;
+      if (type === "tool_started" && data.name !== candidate.name) return;
+      // An old frozen Run does not reserve this field: it remains an invalid
+      // execution argument there, not a supported display channel.
+      if (type === "tool_started" && Object.hasOwn(parseJsonLoose(data.arguments) || {}, "_actionStatus")) {
+        names.delete(data.toolCallId); return;
+      }
+      // tool_started precedes authorization checks. Commands have a later
+      // authoritative start; other gated actions are shown only in bypass.
+      if (candidate.name === "run_command" && type !== "command_started") return;
+      const execution = (snapshot.toolExecutions || []).find(item => item.toolCallId === data.toolCallId);
+      if (["write_file", "delete_file", "propose_edit", "generate_image", "manage_generated_image", "create_ppt_master_deck"].includes(candidate.name)
+        && snapshot.permissionProfile !== "bypass"
+        && !(candidate.name === "propose_edit" && snapshot.permissionProfile === "plan")
+        && !(execution?.authorizationDecision === "approved"
+          && ["running", "applying_file_mutation", "applying_edit"].includes(execution.status))) return;
+      text = candidate.text;
+      names.delete(data.toolCallId);
+    }
+    return {
+      sessionId, runId, event, observe, reset,
+      boundary(runtimeId) { if (!runtimeId || runtimeId === currentRuntime) clear(); },
+      view() { return !terminal && !seedRequired && ["model", "tools"].includes(status) ? text : ""; },
+    };
+  }
+
   function parseJsonLoose(text = "{}") {
     if (typeof text === "object" && text !== null) return text;
     try {
@@ -784,7 +872,8 @@ const nativeTools = [
 
   function normalizeNativeToolCall(call) {
     const name = call?.function?.name || call?.name || "";
-    const args = parseJsonLoose(call?.function?.arguments || call?.arguments || "{}");
+    const args = { ...parseJsonLoose(call?.function?.arguments || call?.arguments || "{}") };
+    if (actionStatusTools.has(name)) delete args._actionStatus;
     return {
       ...args,
       action: name,
@@ -801,6 +890,8 @@ const nativeTools = [
   }
 
   agent.tools = Object.freeze({
+    validActionStatus,
+    createActionStatusObserver,
     nativeTools,
     normalizeNativeToolCall,
     normalizeToolCallList,

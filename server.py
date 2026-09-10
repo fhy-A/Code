@@ -3070,7 +3070,13 @@ def _agent_registry_tool_definition(name):
     definition = spec.get("definition")
     if not isinstance(definition, dict):
         return None
-    return _json_clone(definition)
+    definition = _json_clone(definition)
+    if name in SERVER_TOOL_REGISTRY and name != "request_user_input":
+        definition["function"]["parameters"]["properties"]["_actionStatus"] = {
+            "type": "string", "maxLength": 80,
+            "description": "Optional current action and purpose; one line, at most 80 Unicode code points. Omit when unhelpful; display only.",
+        }
+    return definition
 
 
 def _agent_selected_tools(payload, allowed_tools=None, permission_profile="read"):
@@ -6335,6 +6341,34 @@ _AGENT_TOOL_JSON_OUTPUT_LIMIT_NOTE = (
 )
 
 
+_ACTION_STATUS_GUIDANCE = (
+    "Optional temporary status, at most 80 Unicode code points, one line. "
+    "Only supply when it adds useful information beyond existing commentary: "
+    "describe current work and its purpose, never claim success in advance. "
+    "For example: 'Checking formulas to locate the total mismatch'. "
+    "Omit for simple single actions, ordinary questions, no concrete action, or "
+    "when commentary already explains the stage. Never add a call just to send "
+    "a status, repeat it on every call, or use tool counts or duration thresholds. "
+    "'All errors fixed' is not a current action. This is display data only."
+)
+
+
+def _agent_execution_arguments_text(call):
+    """Execution records never contain optional model presentation metadata."""
+    arguments = call.get("arguments")
+    if isinstance(arguments, dict):
+        return json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    return (call.get("function") or {}).get("arguments", "{}")
+
+
+def _agent_action_status_enabled(run, name=None):
+    return any(
+        (name is None or (definition.get("function") or {}).get("name") == name)
+        and "_actionStatus" in (((definition.get("function") or {}).get("parameters") or {}).get("properties") or {})
+        for definition in run.get("tools") or []
+    )
+
+
 def _normalize_agent_tool_calls(run, tool_calls, round_number, *, finish_reason=None):
     normalized = []
     for fallback_index, source in enumerate(tool_calls or []):
@@ -6351,10 +6385,18 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number, *, finish_reason=
             arguments_text = json.dumps(raw_arguments or {}, ensure_ascii=False, separators=(",", ":"))
         argument_aliases = []
         validation_errors = []
+        wire_arguments = None
         try:
             parsed_arguments = json.loads(arguments_text)
             if not isinstance(parsed_arguments, dict):
                 raise ValueError("tool arguments must be an object")
+            # Only newly advertised schemas reserve this key. Old frozen Runs
+            # retain their original argument contract. Preserve the exact model
+            # call for native replay, including invalid presentation values.
+            supports_status = _agent_action_status_enabled(run, name)
+            if supports_status and "_actionStatus" in parsed_arguments:
+                wire_arguments = arguments_text
+                parsed_arguments.pop("_actionStatus")
             arguments, argument_aliases, canonical_errors = (
                 _canonicalize_agent_tool_arguments(name, parsed_arguments)
             )
@@ -6396,7 +6438,7 @@ def _normalize_agent_tool_calls(run, tool_calls, round_number, *, finish_reason=
             "index": index,
             "id": call_id,
             "type": "function",
-            "function": {"name": name, "arguments": arguments_text},
+            "function": {"name": name, "arguments": wire_arguments if wire_arguments is not None else arguments_text},
             "arguments": arguments,
             "parseError": parse_error,
             "validationErrors": validation_errors,
@@ -7928,7 +7970,7 @@ def _new_agent_delegation_execution(run, call):
         return execution
     execution = {
         "name": "task",
-        "arguments": (call.get("function") or {}).get("arguments", "{}"),
+        "arguments": _agent_execution_arguments_text(call),
         "fingerprint": call.get("fingerprint", ""),
         "status": "queued_child",
         "outcome": "",
@@ -9392,7 +9434,7 @@ def _execute_agent_pending_tools(run):
                         return False
                     execution = {
                         "name": name,
-                        "arguments": (call.get("function") or {}).get("arguments", "{}"),
+                        "arguments": _agent_execution_arguments_text(call),
                         "argumentAliases": _json_clone(
                             call.get("argumentAliases") or []
                         ),
@@ -10091,6 +10133,10 @@ def _agent_model_payload(run):
                             if message.get("role") not in {"system", "developer"}),
                            len(payload["messages"]))
     payload["messages"].insert(workspace_index, _agent_workspace_message(run))
+    if _agent_action_status_enabled(run):
+        payload["messages"].insert(workspace_index + 1, {
+            "role": "system", "content": "[Optional action status]\n" + _ACTION_STATUS_GUIDANCE,
+        })
     recovery_checkpoint = _normalize_agent_model_checkpoint(
         run.get("model_checkpoint")
     )
@@ -12457,7 +12503,7 @@ def _close_agent_tools_for_cancel_locked(run):
         )
         arguments = (
             (execution or {}).get("arguments")
-            or function.get("arguments")
+            or _agent_execution_arguments_text(call)
             or "{}"
         )
         argument_aliases = _json_clone(

@@ -3813,6 +3813,7 @@ function ownsActiveRunContext(ctx) {
 
 function releaseActiveRunContext(ctx) {
   if (!ownsActiveRunContext(ctx)) return false;
+  ctx._actionStatus?.reset();
   ctx.run._activeCtx = null;
   return true;
 }
@@ -4240,6 +4241,13 @@ function patchStreamingAssistantMessage(sessionId, index) {
 
   const content = (getMsgText(msg) || "").trim();
   const visibleContent = content && !isToolPlanningPlaceholder(content) ? content : "";
+  if (visibleContent && !isOperationalToolNotice(visibleContent) && msg.meta?.agentRunId) {
+    const ctx = ensureSessionRun(sessionId)?._activeCtx;
+    if (ctx?.agentRunId === msg.meta.agentRunId && ctx._actionStatus?.view()) {
+      ctx._actionStatus.boundary(msg.meta.agentRuntimeRunId);
+      renderSessionMessages(sessionId);
+    }
+  }
 
   // The pending model round has no DOM node while it is empty. Schedule the
   // answer projection before looking up that node so the first visible delta
@@ -4748,7 +4756,11 @@ function playWelcomeMotion(root) {
   }, 1820);
 }
 
+let displayedActionStatusObserver = null;
 function renderMessages() {
+  const actionObserver = state.sessionId ? ensureSessionRun(state.sessionId)?._activeCtx?._actionStatus : null;
+  if (displayedActionStatusObserver && displayedActionStatusObserver !== actionObserver) displayedActionStatusObserver.reset();
+  displayedActionStatusObserver = actionObserver || null;
 
   goalFeature?.setSession(state.sessionId);
   editDiffDisclosureState.setSession(state.sessionId);
@@ -4851,6 +4863,10 @@ function renderMessages() {
     : new Set();
   const html = projectMessages(msgs, {
     hasActiveRun,
+    actionStatus: hasActiveRun && !run.abortController?.signal.aborted
+      && run._activeCtx?.sessionId === state.sessionId
+      && run._activeCtx?.agentRunId === run.agentRunId
+      ? run._activeCtx?._actionStatus?.view() || "" : "",
     runState: getSessionRunState(state.sessionId),
     branchMarker,
     expandedExecutionTraces,
@@ -4880,8 +4896,15 @@ function renderMessages() {
   parkActiveRunBanner();
   const projectedMessageList = els.messageList.cloneNode(false);
   projectedMessageList.innerHTML = html;
-  reconcileToolProcessNodes(els.messageList, projectedMessageList);
+  const toolProcessReconciliation = reconcileToolProcessNodes(els.messageList, projectedMessageList);
+  const oldActionStatus = els.messageList.querySelector("[data-action-status-run]");
+  const nextActionStatus = projectedMessageList.querySelector("[data-action-status-run]");
+  if (oldActionStatus && nextActionStatus && oldActionStatus.dataset.actionStatusRun === nextActionStatus.dataset.actionStatusRun) {
+    oldActionStatus.firstElementChild.textContent = nextActionStatus.textContent;
+    nextActionStatus.replaceWith(oldActionStatus);
+  }
   els.messageList.replaceChildren(...Array.from(projectedMessageList.childNodes));
+  toolProcessReconciliation?.restoreScroll?.();
   mountActiveRunBanner();
   syncActiveRunBanner(state.sessionId);
 
@@ -9967,6 +9990,7 @@ function makeActiveSessionProjectionAuthorityError(ctx, authoritative, reason = 
 }
 
 function rebaseActiveServerAgentProjection(ctx, authoritative) {
+  ctx?._actionStatus?.reset();
   const sessionId = String(ctx?.sessionId || "");
   if (!sessionId || !authoritative || String(authoritative.id || "") !== sessionId) {
     throw makeActiveSessionProjectionAuthorityError(ctx, authoritative, "session_mismatch");
@@ -12558,6 +12582,7 @@ function updateBackgroundJob(job, status, detail = "") {
 
 function clearObservedAgentRun(ctx) {
   if (!ctx) return;
+  ctx._actionStatus?.reset();
   ctx.agentRunId = "";
   ctx.agentEventCursor = 0;
   ctx._activeRuntimeRunId = "";
@@ -13435,6 +13460,7 @@ function archiveAgentProjectionShadow(ctx) {
 }
 
 function observeAgentProjectionSnapshot(ctx, snapshot, referenceTime = Date.now()) {
+  ctx._actionStatus?.observe(snapshot);
   if (
     !ctx.isDetachedBackground
     && !ctx.isSubAgent
@@ -14167,6 +14193,14 @@ function restoreAgentProjectionUsageCheckpoint(ctx, checkpoint) {
 }
 
 async function projectAgentEvent(ctx, event, snapshot = null) {
+  if (!ctx.isSubAgent && !ctx.isDetachedBackground && ownsActiveRunContext(ctx) && ctx.sessionId === state.sessionId) {
+    const content = String(event?.data?.content || "");
+    const statusEvent = event?.type === "model_completed" && (isToolPlanningPlaceholder(content) || isOperationalToolNotice(content))
+      ? { ...event, data: { ...event.data, content: "" } } : event;
+    ctx._actionStatus?.event(statusEvent, snapshot);
+  } else {
+    ctx._actionStatus?.reset();
+  }
   const eventType = String(event?.type || "");
   const internalToolEvent = (
     isInternalGoalToolName(event?.data?.name)
@@ -14704,6 +14738,14 @@ async function runServerAgentLoop(ctx) {
       cursor: ctx.agentEventCursor || 0,
       signal: ctx.run.abortController.signal,
     });
+    if (!ctx.isSubAgent && !ctx.isDetachedBackground) {
+      if (ctx._actionStatus?.runId !== ctx.agentRunId) {
+        ctx._actionStatus = Code.agent.tools.createActionStatusObserver(
+          ctx.sessionId, ctx.agentRunId, creatingAgentRun && !ctx._actionStatus,
+        );
+      }
+      ctx._actionStatus.observe(snapshot);
+    }
     if (snapshot.routeRef) {
       ctx.routeRef = String(snapshot.routeRef);
       ctx.catalogRevision = Math.max(0, Number(snapshot.catalogRevision || ctx.catalogRevision || 0));
@@ -14748,6 +14790,7 @@ async function runServerAgentLoop(ctx) {
         onEvent: (event, observedSnapshot) => projectAgentEvent(ctx, event, observedSnapshot),
         onSnapshot: (observedSnapshot) => observeAgentProjectionSnapshot(ctx, observedSnapshot),
         onReconnect({ attempt, nextRetryAt, error }) {
+          ctx._actionStatus?.reset();
           ctx.run.recovery = {
             source: "agent-poll",
             attempt,
