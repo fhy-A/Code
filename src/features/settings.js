@@ -900,6 +900,10 @@
     }
 
     function renderModelsPanel(container) {
+      const styleApi = global.Code.agent.systemPrompt;
+      const replyStyle = styleApi.readResponseStylePreference(storage);
+      const styleOptions = (values, prefix, selected) => values.map(value =>
+        `<option value="${value}" ${value === selected ? "selected" : ""}>${t(prefix + value)}</option>`).join("");
       const keyConfig = loadKeyConfig(storage);
       els.apiKey.value = serializeKeys(keyConfig);
       const modelCount = renderedModelCount();
@@ -930,10 +934,17 @@
           <section class="model-settings-section model-parameters-section">
             <div class="model-settings-section-heading"><strong data-i18n="modelParameters">${t("modelParameters")}</strong></div>
             <div class="model-parameter-grid context-settings-primary">
-              <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
+              <label class="field"><span data-i18n="responseDetail">${t("responseDetail")}</span><select id="settingsResponseDetail">${styleOptions(styleApi.RESPONSE_DETAILS, "responseDetail_", replyStyle.snapshot.detail)}</select></label>
+              <label class="field"><span data-i18n="responseTone">${t("responseTone")}</span><select id="settingsResponseTone">${styleOptions(styleApi.RESPONSE_TONES, "responseTone_", replyStyle.snapshot.tone)}</select></label>
               <label class="field"><span data-i18n="maxTokens">${t("maxTokens")}</span><select id="settingsMaxTokens">${els.maxTokens.innerHTML}</select></label>
               <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>
             </div>
+            <p class="field-hint" data-i18n="responseStyleHint">${t("responseStyleHint")}</p>
+            <p id="settingsResponseStyleStatus" class="field-hint" role="status">${replyStyle.error ? t(replyStyle.error) : ""}</p>
+            <details class="response-style-advanced"><summary data-i18n="advancedSampling">${t("advancedSampling")}</summary>
+              <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
+              <p class="field-hint" data-i18n="samplingHint">${t("samplingHint")}</p>
+            </details>
           </section>
         </div>
       `;
@@ -946,6 +957,23 @@
         syncKeysFromPlatform();
       });
       byId("settingsRefreshModels")?.addEventListener("click", refreshSettingsModelList);
+      for (const id of ["settingsResponseDetail", "settingsResponseTone"]) {
+        byId(id)?.addEventListener("change", () => {
+          const status = byId("settingsResponseStyleStatus");
+          try {
+            const saved = styleApi.saveResponseStylePreference(storage, {
+              detail: byId("settingsResponseDetail").value,
+              tone: byId("settingsResponseTone").value,
+            });
+            replyStyle.snapshot = saved;
+            status.textContent = t("responseStyleSaved");
+          } catch (_) {
+            byId("settingsResponseDetail").value = replyStyle.snapshot.detail;
+            byId("settingsResponseTone").value = replyStyle.snapshot.tone;
+            status.textContent = t("responseStyleSaveFailed");
+          }
+        });
+      }
       byId("settingsTemperature")?.addEventListener("change", (event) => {
         els.temperature.value = event.currentTarget.value;
         saveLocalSettings();

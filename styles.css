@@ -13325,6 +13325,11 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   margin: 0;
 }
 
+.response-style-advanced { margin-top: 12px; }
+.response-style-advanced > summary { cursor: pointer; color: var(--muted); margin-bottom: 10px; }
+.response-style-advanced > .field { max-width: 220px; }
+#settingsResponseStyleStatus:empty { display: none; }
+
 .model-parameter-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -46,11 +46,11 @@ class TestRunningMessageQueue(unittest.TestCase):
         enqueue = APP_SOURCE[enqueue_start:enqueue_end]
         for expected in (
             "const model = String(existingMessage?._model || getSelectedModel())",
-            "const permissionProfile = getPermissionProfile()",
-            'const toolPreset = els.toolPreset.value || "default"',
+            "const permissionProfile = retryCheckpoint?.permissionProfile || getPermissionProfile()",
+            'const toolPreset = retryCheckpoint?.toolPreset || els.toolPreset.value || "default"',
             "const thinkingLevel = existingMessage?.meta?.queuedDispatch?.thinkingLevel || getThinkingLevel()",
-            "const temperature = Number(els.temperature.value",
-            "const maxTokens = getEffectiveMaxTokens(model)",
+            "const temperature = Number(retryCheckpoint?.temperature ?? els.temperature.value",
+            "const maxTokens = retryCheckpoint?.maxTokens || getEffectiveMaxTokens(model)",
             "permissionProfile,",
             "toolPreset,",
             "thinkingLevel,",
@@ -222,9 +222,9 @@ class TestRunningMessageQueue(unittest.TestCase):
         steer_start = APP_SOURCE.index("async function steerSessionMessage(")
         steer_end = APP_SOURCE.index("async function resumePendingSessionSteers", steer_start)
         steer = APP_SOURCE[steer_start:steer_end]
-        self.assertIn("ctx.messages.push(userMessage)", steer)
+        self.assertIn("beginFollowUpSubmission(sessionId, userMessage)", steer)
         self.assertIn('status: "submitting"', steer)
-        self.assertIn("await saveSessionState", steer)
+        self.assertIn("preserveFailedFollowUp(sessionId, userMessage)", steer)
         self.assertIn("await submitSessionSteer(ctx, userMessage)", steer)
         self.assertIn("existingMessage: userMessage", steer)
         self.assertIn("agentRuntime.steerAgentRun(targetAgentRunId", APP_SOURCE)

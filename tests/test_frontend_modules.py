@@ -407,6 +407,10 @@ process.stdout.write(JSON.stringify({{
         send_end = APP_SOURCE.index("function getSelectedModel()", send_start)
         send_source = APP_SOURCE[send_start:send_end]
         script = f"""
+const __styleEnv = {{Code:{{agent:{{}}}}}}; __styleEnv.window=__styleEnv;
+require('vm').runInNewContext(require('fs').readFileSync('src/agent/system-prompt.js','utf8'),__styleEnv);
+const {{restoreResponseStyleSnapshot,readResponseStylePreference}}=__styleEnv.Code.agent.systemPrompt;
+const localStorage={{getItem:()=>null}};
 let selectedModel = "";
 let selectedKey = "";
 const state = {{}};
@@ -461,7 +465,7 @@ async function errorMessage(callback) {{
 }})().catch((error) => {{ console.error(error); process.exit(1); }});
 """
         completed = subprocess.run(
-            ["node", "-e", script],
+            ["node", "-"], input=script,
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -3510,6 +3514,10 @@ eval({json.dumps(RUNTIME_SOURCE)});
         prompt_end = APP_SOURCE.index("async function getSystemPrompt(", prompt_start)
         prompt_source = APP_SOURCE[prompt_start:prompt_end]
         script = f"""
+const __styleEnv = {{Code:{{agent:{{}}}}}}; __styleEnv.window=__styleEnv;
+require('vm').runInNewContext(require('fs').readFileSync('src/agent/system-prompt.js','utf8'),__styleEnv);
+const {{restoreResponseStyleSnapshot,readResponseStylePreference}}=__styleEnv.Code.agent.systemPrompt;
+const localStorage={{getItem:()=>null}};
 const SKILL_ACTIVATION_PROMPT_MARKER = "[[CODE_SKILL_ACTIVATION_CANONICAL_V1]]";
 const SKILL_ACTIVATION_DELEGATION_BEGIN = "[[CODE_TASK_DELEGATION_CANONICAL_V1_BEGIN]]";
 const SKILL_ACTIVATION_DELEGATION_END = "[[CODE_TASK_DELEGATION_CANONICAL_V1_END]]";
@@ -6587,7 +6595,7 @@ process.stdout.write(JSON.stringify({
             FRONTEND_ENTRY_SOURCE.index('import "../app.js";'),
         )
         for forbidden in ("state.", "els.", "ensureSkillBody", "getMatchedSkillPrompts"):
-            self.assertNotIn(forbidden, composer_source)
+            self.assertNotRegex(composer_source, r"\b" + re.escape(forbidden))
         self.assertIn("enumerable: false", composer_source)
         self.assertIn("agent.systemPrompt = Object.freeze({", composer_source)
 
@@ -24209,6 +24217,10 @@ process.stdout.write(JSON.stringify({{
         helper_end = APP_SOURCE.index("function getSelectedModel()", helper_start)
         source = APP_SOURCE[helper_start:helper_end]
         script = f"""
+const __styleEnv = {{Code:{{agent:{{}}}}}}; __styleEnv.window=__styleEnv;
+require('vm').runInNewContext(require('fs').readFileSync('src/agent/system-prompt.js','utf8'),__styleEnv);
+const {{restoreResponseStyleSnapshot,readResponseStylePreference}}=__styleEnv.Code.agent.systemPrompt;
+const localStorage={{getItem:()=>null}};
 const source = {json.dumps(source)};
 let _skillActivationCanonicalEnabled = false;
 const state = {{

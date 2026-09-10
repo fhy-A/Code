@@ -25,6 +25,9 @@ function setup(){
     messageScrollController:null,modelRouteFailureCode:()=>'',updateQueuedMessageItem(){},
     runQueuedSessionMessage:async(_id,item)=>{log.push({type:'dispatch',id:item.id,text:item.userText});queue=queue.filter(q=>q.id!==item.id);return true},
   });
+  sandbox.Code={agent:{}};sandbox.window=sandbox;sandbox.localStorage={getItem:()=>null};
+  vm.runInContext(fs.readFileSync(path.resolve(__dirname,'../../../src/agent/system-prompt.js'),'utf8'),sandbox);
+  Object.assign(sandbox,sandbox.Code.agent.systemPrompt);
   vm.runInContext(code+pump,sandbox);
   return {api:vm.runInContext('({enqueueSessionMessage,steerSessionMessage,retryFailedFollowUpMessage,recoverUnadmittedFollowUpMessages,submitSessionSteer,resumePendingSessionSteers,pumpQueuedSessionMessages,followUpSubmissions})',sandbox),
     state,ctx,log,control,messages:()=>messages,queue:()=>queue,streaming:value=>{streaming=value},

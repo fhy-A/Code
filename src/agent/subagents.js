@@ -93,6 +93,9 @@
       toolPreset: String(source.toolPreset || "default"),
       thinkingLevel: String(source.thinkingLevel || "auto"),
       temperature: Number(source.temperature ?? 0.2),
+      ...(source.responseStyle !== undefined ? {
+        responseStyle: agent.systemPrompt.restoreResponseStyleSnapshot(source.responseStyle),
+      } : {}),
       maxTokens: Number(source.maxTokens || 0),
       cwd: String(source.cwd || source.parentCtx?.cwd || ""),
       primaryRoot: String(source.primaryRoot || source.parentCtx?.primaryRoot || ""),

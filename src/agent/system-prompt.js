@@ -7,6 +7,7 @@
   const SYSTEM_PROMPT_SEGMENTS = Object.freeze([
     Object.freeze({ name: "security", input: "securityLayer", condition: "always", refresh: "static" }),
     Object.freeze({ name: "behavior", input: "behaviorInstruction", condition: "always", refresh: "task" }),
+    Object.freeze({ name: "response-style", input: "responseStyleInstruction", condition: "explicit-preference", refresh: "task" }),
     Object.freeze({ name: "environment", input: "environmentInstruction", condition: "always", refresh: "task" }),
     Object.freeze({ name: "project-folders", input: "projectFoldersInstruction", condition: "multiple-roots", refresh: "task" }),
     Object.freeze({ name: "external-files", input: "externalFilesInstruction", condition: "always", refresh: "static" }),
@@ -144,7 +145,74 @@
     return owner._systemPromptSnapshotPromise;
   }
 
+  const RESPONSE_STYLE_KEY = "code-response-style";
+  const RESPONSE_DETAILS = Object.freeze(["default", "concise", "detailed"]);
+  const RESPONSE_TONES = Object.freeze(["default", "professional", "casual"]);
+
+  function compileResponseStyle(detail, tone, version = 2) {
+    if (!RESPONSE_DETAILS.includes(detail) || !RESPONSE_TONES.includes(tone)) {
+      throw new TypeError("Invalid reply style preference");
+    }
+    if (detail === "default" && tone === "default") return "";
+    const lines = [
+      "[Reply preferences]",
+      "Apply these preferences to explanations addressed to the user. The user's explicit request for detail, tone, format or artifact content takes precedence. Keep the engineering work complete, including required checks, error facts and permission confirmations. Preserve tool contracts, workspace rules, reasoning privacy and existing emoji rules. Keep the usual cadence of progress reporting and action names.",
+    ];
+    if (detail === "concise") lines.push(version === 1
+      ? "Lead with the result. Keep explanations compact, with the essential conclusion and verification; trim preamble and repetition. Expand when the user asks for an explanation."
+      : "Lead with the result and the essential conclusion and verification. For ordinary questions, aim for a short paragraph or a few focused points with the core explanation. Add further depth when the user explicitly requests a detailed explanation or more detail. Keep complex tasks complete while trimming preamble, repetition and tangents.");
+    if (detail === "detailed") lines.push("Explain the result with the key evidence, tradeoffs and a useful example where appropriate. Add context that helps understanding; keep it relevant to the requested task. This overrides the default short-answer preference.");
+    if (tone === "professional") lines.push("Use precise, measured language and a composed, professional tone.");
+    if (tone === "casual") lines.push("Use natural, friendly conversational language, as with a colleague. Stay candid and accurate, with warmth and appropriate restraint.");
+    return lines.join("\n");
+  }
+
+  function createResponseStyleSnapshot(preference = {}) {
+    const detail = preference.detail ?? "default", tone = preference.tone ?? "default";
+    return Object.freeze({ version: 2, detail, tone, instruction: compileResponseStyle(detail, tone) });
+  }
+
+  function restoreResponseStyleSnapshot(value) {
+    // Absence belongs to a legacy task, never to today's UI preference.
+    if (value == null) return null;
+    if (typeof value !== "object" || Array.isArray(value)
+        || Object.keys(value).sort().join(",") !== "detail,instruction,tone,version"
+        || ![1, 2].includes(value.version) || !RESPONSE_DETAILS.includes(value.detail)
+        || !RESPONSE_TONES.includes(value.tone)
+        || !(value.instruction === compileResponseStyle(value.detail, value.tone, value.version)
+          || (value.version === 1 && value.instruction === compileResponseStyle(value.detail, value.tone, 1)
+            .replace("Keep the usual cadence of progress reporting and action names.", "Use the usual amount of progress reporting and action labels.")))) {
+      const error = new Error("Cannot resume this task: invalid or unsupported reply style snapshot.");
+      error.code = "response_style_snapshot_invalid";
+      throw error;
+    }
+    return Object.freeze({ ...value });
+  }
+
+  function readResponseStylePreference(storage) {
+    try {
+      const raw = storage.getItem(RESPONSE_STYLE_KEY);
+      if (raw === null) return { snapshot: createResponseStyleSnapshot(), error: "" };
+      const value = JSON.parse(raw);
+      if (!value || value.version !== 1 || Object.keys(value).sort().join(",") !== "detail,tone,version"
+          || !RESPONSE_DETAILS.includes(value.detail) || !RESPONSE_TONES.includes(value.tone)) throw new Error();
+      return { snapshot: createResponseStyleSnapshot(value), error: "" };
+    } catch (_) {
+      // Preserve damaged storage. Only an explicit successful save replaces it.
+      return { snapshot: createResponseStyleSnapshot(), error: "responseStyleLoadFailed" };
+    }
+  }
+
+  function saveResponseStylePreference(storage, preference) {
+    const snapshot = createResponseStyleSnapshot(preference);
+    storage.setItem(RESPONSE_STYLE_KEY, JSON.stringify({ version: 1, detail: snapshot.detail, tone: snapshot.tone }));
+    return snapshot;
+  }
+
   agent.systemPrompt = Object.freeze({
+    RESPONSE_STYLE_KEY, RESPONSE_DETAILS, RESPONSE_TONES,
+    createResponseStyleSnapshot, restoreResponseStyleSnapshot,
+    readResponseStylePreference, saveResponseStylePreference,
     SYSTEM_PROMPT_SEGMENTS,
     buildSystemPromptSegments,
     createSystemPromptSnapshot,

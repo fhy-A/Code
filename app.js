@@ -98,6 +98,8 @@ const {
   formatSystemPromptEnvironment,
   getOrCreateSystemPromptSnapshot,
   resolveLocalTimeZoneName,
+  readResponseStylePreference,
+  restoreResponseStyleSnapshot,
 } = window.Code.agent.systemPrompt;
 const {
   assembleModelRequestPayload,
@@ -618,6 +620,7 @@ function makeRunCheckpoint(ctx, status = "running", phase = "model", extra = {})
     )),
     ...(imageRoute ? { imageRoute } : {}),
     temperature: Number(ctx.temperature ?? 0.2),
+    ...(ctx.responseStyle ? { responseStyle: restoreResponseStyleSnapshot(ctx.responseStyle) } : {}),
     maxTokens: Number(ctx.maxTokens || 0),
     toolPreset: ctx.toolPreset || "default",
     permissionProfile: ctx.permissionProfile || "accept",
@@ -1162,6 +1165,7 @@ function buildRunContext(sessionId, options = {}) {
     catalogRevision: Math.max(0, Number(options.catalogRevision || 0)),
     imageRoute,
     temperature: Number(options.temperature ?? els.temperature.value ?? 0.2),
+    responseStyle: restoreResponseStyleSnapshot(options.responseStyle),
     maxTokens: Number(options.maxTokens || getEffectiveMaxTokens(model)),
     contextResolution: options.contextResolution || null,
     toolPreset,
@@ -2673,6 +2677,7 @@ async function buildSystemPromptSnapshot(options = {}) {
   return createSystemPromptSnapshotData({
     securityLayer: SYSTEM_SECURITY_LAYER,
     behaviorInstruction,
+    responseStyleInstruction: restoreResponseStyleSnapshot(options.responseStyle)?.instruction || "",
     environmentInstruction: environment.instruction,
     projectFoldersInstruction,
     externalFilesInstruction: `提示：项目外部文件可以直接读，系统自动处理权限。@图片路径 用 read_file 读取即可获得视觉输入。最终回答可以用相对路径或行内代码描述项目结构，但它们不可点击，也不得按 cwd 猜测；若要生成可点击的本地文件、图片或目录链接，底层目标必须使用完整规范化绝对路径且可访问，显示标签可以简写。工具参数仍使用项目相对路径。回复中可用 ![描述](绝对路径) 嵌入本地图片（png/jpg/gif/webp/svg）。${imageAttachmentInstruction}`,
@@ -10085,6 +10090,7 @@ function hasRecoveredModelResponse(messages, runState) {
 }
 
 function buildRecoveredRunContext(session, runState) {
+  const responseStyle = restoreResponseStyleSnapshot(runState.responseStyle);
   const sessionId = session.id;
   const messages = prepareMessagesForRunRecovery(session.messages, runState);
   setSessionMessages(sessionId, messages);
@@ -10100,6 +10106,7 @@ function buildRecoveredRunContext(session, runState) {
   ctx.routeRef = String(runState.routeRef || "");
   ctx.catalogRevision = Math.max(0, Number(runState.catalogRevision || 0));
   ctx.temperature = Number(runState.temperature ?? ctx.temperature ?? 0.2);
+  ctx.responseStyle = responseStyle;
   ctx.maxTokens = Number(runState.maxTokens || ctx.maxTokens || getEffectiveMaxTokens(ctx.model));
   ctx.toolPreset = runState.toolPreset || ctx.toolPreset || "default";
   ctx.permissionProfile = runState.permissionProfile || ctx.permissionProfile || "accept";
@@ -10206,7 +10213,14 @@ async function resumePersistedSessionRun(summary, options = {}) {
       return;
     }
 
-    const ctx = buildRecoveredRunContext(session, latestRunState);
+    let ctx;
+    try {
+      ctx = buildRecoveredRunContext(session, latestRunState);
+    } catch (error) {
+      if (error?.code !== "response_style_snapshot_invalid") throw error;
+      showToast(t("responseStyleRecoveryFailed", { title: session.title || summary.id }), "error", { duration: 10000 });
+      return;
+    }
     if (!claimActiveRunContext(ctx)) return;
     const recoveryCount = Number(latestRunState.recoveryCount || 0) + 1;
     const resumedAt = Date.now();
@@ -11167,6 +11181,7 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
 
   // Sub-agent already has its own system prompt in ctx.messages[0]; don't double-inject.
   const systemPromptOptions = {
+    responseStyle: ctx?.responseStyle ?? null,
     messages: modelMessages,
     explicitSkill: ctx?.explicitSkill,
     toolPreset: ctx?.toolPreset,
@@ -11944,6 +11959,7 @@ function queuedMessageCheckpoint(item) {
     thinkingLevel: String(item.thinkingLevel || "auto"),
     reasoningSelection: structuredClone(item.reasoningSelection ?? null),
     temperature: Number(item.temperature ?? 0.2),
+    ...(item.responseStyle !== undefined ? { responseStyle: restoreResponseStyleSnapshot(item.responseStyle) } : {}),
     maxTokens: Number(item.maxTokens || 0),
     contextLimit: Number(item.contextLimit || 0),
     contextWindowTokens: Number(item.contextWindowTokens || 0),
@@ -12147,6 +12163,9 @@ function preserveFailedFollowUp(sessionId, message) {
 }
 
 async function enqueueSessionMessage(sessionId, userText, images = [], options = {}) {
+  const responseStyle = options.existingMessage
+    ? restoreResponseStyleSnapshot((options.existingMessage.meta?.queuedDispatch || options.existingMessage.meta?.steerDispatch)?.responseStyle)
+    : readResponseStylePreference(localStorage).snapshot;
   if (!sessionId) throw new Error(t("createSessionFirst"));
   const existingMessage = options.existingMessage || null;
   const model = String(existingMessage?._model || getSelectedModel());
@@ -12175,7 +12194,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
   };
   userMessage.meta = {...(userMessage.meta || {}), detachedFromMain: true,
     queuedDispatch: {...(userMessage.meta?.queuedDispatch || {}), id, status: "pending", queuedAt,
-      thinkingLevel, reasoningSelection: structuredClone(reasoningSelection)}};
+      thinkingLevel, reasoningSelection: structuredClone(reasoningSelection), responseStyle}};
   delete userMessage.meta.steerDispatch;
   delete userMessage.meta.queuedDispatch.failureCode;
   const submission = beginFollowUpSubmission(sessionId, userMessage);
@@ -12194,7 +12213,7 @@ async function enqueueSessionMessage(sessionId, userText, images = [], options =
       id, clientRequestId: id, status: "pending", userText, model,
       routeRef: dispatchRoute.routeRef, catalogRevision: dispatchRoute.catalogRevision,
       imageRoute, permissionProfile, toolPreset, thinkingLevel, reasoningSelection,
-      temperature, maxTokens, ...contextResolution, queuedAt,
+      temperature, responseStyle, maxTokens, ...contextResolution, queuedAt,
     });
     const messages = getSessionMessages(sessionId);
     const queued = [...getQueuedMessageCheckpoints(sessionId).filter(candidate => candidate.id !== id), item];
@@ -12279,6 +12298,7 @@ async function steerSessionMessage(sessionId, userText, images = [], options = {
     _model: model, _time: new Date(submittedAt).toISOString(),
     meta: {detachedFromMain: true, steerDispatch: {
       agentRunId: ctx.agentRunId, clientRequestId, status: "submitting", submittedAt,
+      responseStyle: restoreResponseStyleSnapshot(ctx.responseStyle),
     }},
   };
   delete userMessage.meta.steerDispatch.failureCode;
@@ -12393,6 +12413,7 @@ async function runQueuedSessionMessage(sessionId, item) {
       thinkingLevel: item.thinkingLevel,
       reasoningSelection: structuredClone(item.reasoningSelection ?? null),
       temperature: item.temperature,
+      responseStyle: item.responseStyle ?? null,
       maxTokens: item.maxTokens,
       contextResolution: {
         contextLimit: item.contextLimit,
@@ -12776,6 +12797,10 @@ function createBackgroundServerContext(job) {
   subCtx.reasoningSelection = structuredClone(job.reasoningSelection ?? null);
   subCtx.authorizationLabel = job.userText.slice(0, 24) || "后台任务";
   subCtx.isDetachedBackground = true;
+  subCtx.responseStyle = restoreResponseStyleSnapshot(job.responseStyle);
+  if (subCtx.responseStyle?.instruction) {
+    subCtx.messages[0].content += "\n\n" + subCtx.responseStyle.instruction;
+  }
   subCtx.backgroundJobId = job.id;
   subCtx.parentTaskStartedAt = Number(job.parentTaskStartedAt || 0);
   subCtx.agentEventCursor = Number(job.cursor || 0);
@@ -13043,6 +13068,7 @@ function pumpBackgroundDispatcher() {
 }
 
 async function dispatchBackgroundSubAgent(sessionId, userText, images = []) {
+  const responseStyle = readResponseStylePreference(localStorage).snapshot;
   const run = ensureSessionRun(sessionId);
   const parentCtx = run?._activeCtx;
   if (!parentCtx) return Promise.reject(new Error("主 Agent 已结束，无法创建后台任务"));
@@ -13089,6 +13115,7 @@ async function dispatchBackgroundSubAgent(sessionId, userText, images = []) {
     thinkingLevel: parentCtx.thinkingLevel || getThinkingLevel(),
     reasoningSelection: structuredClone(parentCtx.reasoningSelection ?? null),
     temperature: Number(parentCtx.temperature ?? els.temperature.value ?? 0.2),
+    responseStyle,
     maxTokens: Number(parentCtx.maxTokens || getEffectiveMaxTokens(parentCtx.model || getSelectedModel())),
     ...getModelContextResolution(
       parentCtx.model || getSelectedModel(),
@@ -15765,11 +15792,15 @@ async function sendMessage(userText, options = {}) {
   const submittedAt = Date.now();
   const existingMessage = options.existingMessage || null;
   const retryMessage = !existingMessage ? options.retryMessage || null : null;
+  const frozenResponseStyle = Object.prototype.hasOwnProperty.call(options, "responseStyle")
+    ? restoreResponseStyleSnapshot(options.responseStyle)
+    : retryMessage ? restoreResponseStyleSnapshot(retryMessage.meta?.pendingDispatch?.responseStyle)
+      : readResponseStylePreference(localStorage).snapshot;
   const hasFrozenReasoning = Object.prototype.hasOwnProperty.call(options, "reasoningSelection");
   const frozenReasoning = hasFrozenReasoning ? options.reasoningSelection
     : retryMessage ? (retryMessage.meta?.pendingDispatch?.reasoningSelection ?? null)
     : getReasoningSelectionForModel(model, options.routeRef || "");
-  options = { ...options, reasoningSelection: structuredClone(frozenReasoning) };
+  options = { ...options, reasoningSelection: structuredClone(frozenReasoning), responseStyle: frozenResponseStyle };
   const createsSession = !options.sessionId && !state.sessionId;
   const optimisticMessage = !existingMessage
     ? projectOptimisticFirstMessage(userText, model, submittedAt, state.attachedImages, {
@@ -15779,6 +15810,7 @@ async function sendMessage(userText, options = {}) {
     : null;
   if (optimisticMessage?.meta?.pendingDispatch) {
     optimisticMessage.meta.pendingDispatch.reasoningSelection = structuredClone(frozenReasoning);
+    optimisticMessage.meta.pendingDispatch.responseStyle = frozenResponseStyle;
   }
   if (createsSession) {
     try {
