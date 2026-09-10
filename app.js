@@ -11565,11 +11565,38 @@ function _translateServerError(msg = "") {
   return msg;
 }
 
+function formatFileCoverage(result) {
+  if (!["list_files", "glob_files", "search_files"].includes(result.action)) return "";
+  const coverage = result.coverage;
+  if (!coverage || !["complete", "partial", "failed"].includes(coverage.status)) return "";
+  const reasonKeys = {
+    directory_unavailable: "fmtCoverageDirectory", file_unreadable: "fmtCoverageFile",
+    metadata_unavailable: "fmtCoverageMetadata", traversal_interrupted: "fmtCoverageTraversal",
+    size_limit: "fmtCoverageSizeLimit", candidate_limit: "fmtCoverageCandidateLimit",
+    result_limit: "fmtCoverageResultLimit", per_file_limit: "fmtCoveragePerFileLimit",
+    binary_excluded: "fmtCoverageBinary",
+  };
+  const labels = { complete: "fmtCoverageComplete", partial: "fmtCoveragePartial", failed: "fmtCoverageFailed" };
+  const reasons = Object.entries(reasonKeys).filter(([key]) => Number.isSafeInteger(coverage.reasons?.[key]) && coverage.reasons[key] > 0)
+    .map(([key, label]) => `${t(label)} (${coverage.reasons[key]})`);
+  let text = t(labels[coverage.status]);
+  if (reasons.length) text += ` · ${reasons.join(" · ")}`;
+  if (coverage.scope?.rootFallback === true) {
+    text += `\n${t("fmtCoverageFallback", { path: _safeMd(String(coverage.scope.requestedPath || ".").slice(0, 240)) })}`;
+  }
+  return `${text}\n`;
+}
+
 function formatToolResult(result) {
+
+  const coverageText = formatFileCoverage(result);
+  const emptyCoverageText = result.coverage?.status === "partial" ? t("fmtCoverageNoPartialMatch") : t("fmtCoverageNoMatch");
 
   if (!result.ok) {
 
-    return `${t("toolExecFailed")}：${result.error || result.stderr || "unknown error"}`;
+    const failure = coverageText && result.coverage.status === "failed" && result.error === "Target is not accessible for this operation."
+      ? t("fmtCoverageFailed") : result.error || result.stderr || "unknown error";
+    return `${t("toolExecFailed")}：${failure}${coverageText ? `\n${coverageText}` : ""}`;
 
   }
 
@@ -11587,13 +11614,13 @@ function formatToolResult(result) {
 
       const kind = item.type === "dir" ? "dir " : "file";
 
-      const size = item.type === "dir" ? "" : ` ${formatSize(item.size || 0)}`;
+      const size = item.type === "dir" ? "" : ` ${item.sizeAvailable === false ? t("fmtSizeUnknown") : formatSize(item.size || 0)}`;
 
       return `- [${kind}] ${item.path}${size}`;
 
     });
 
-    return `${t("fmtDir")}：${result.path || "/"}\n${t("fmtFileCount")}：${result.count}\n${result.truncated ? t("fmtTruncatedList") + "\n" : ""}\n${rows.join("\n") || t("fmtEmptyDir")}`;
+    return `${t("fmtDir")}：${result.path || "/"}\n${t("fmtFileCount")}：${result.count}\n${result.truncated ? t("fmtTruncatedList") + "\n" : ""}${coverageText}\n${rows.join("\n") || (coverageText ? emptyCoverageText : t("fmtEmptyDir"))}`;
 
   }
 
@@ -11631,7 +11658,7 @@ function formatToolResult(result) {
 
     const info = [result.regex ? t("fmtRegexMode") : "", result.truncated ? t("fmtTruncated") : ""].filter(Boolean).join(" · ");
 
-    return `${modeLabel}${t("fmtKeyword")}：${result.query}\n${t("fmtHitCount")}：${result.count}${info ? `\n${info}` : ""}\n\n${rows.join("\n") || t("fmtNoMatch")}`;
+    return `${modeLabel}${t("fmtKeyword")}：${result.query}\n${t("fmtHitCount")}：${result.count}${info ? `\n${info}` : ""}\n${coverageText}\n${rows.join("\n") || (coverageText ? emptyCoverageText : t("fmtNoMatch"))}`;
 
   }
 
@@ -11641,13 +11668,13 @@ function formatToolResult(result) {
 
       const kind = item.type === "dir" ? "dir " : "file";
 
-      const size = item.type === "file" ? ` ${formatSize(item.size || 0)}` : "";
+      const size = item.type === "file" ? ` ${item.sizeAvailable === false ? t("fmtSizeUnknown") : formatSize(item.size || 0)}` : "";
 
       return `- [${kind}] ${item.path}${size}`;
 
     });
 
-    return `${t("fmtGlobPattern")}：${result.pattern}\n${t("fmtMatchCount")}：${result.count}${result.truncated ? `（${t("fmtTruncated")}）` : ""}\n\n${rows.join("\n") || t("fmtNoGlobMatch")}`;
+    return `${t("fmtGlobPattern")}：${result.pattern}\n${t("fmtMatchCount")}：${result.count}${result.truncated ? `（${t("fmtTruncated")}）` : ""}\n${coverageText}\n${rows.join("\n") || (coverageText ? emptyCoverageText : t("fmtNoGlobMatch"))}`;
 
   }
 

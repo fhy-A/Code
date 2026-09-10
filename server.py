@@ -6441,6 +6441,9 @@ def _agent_tool_message_content(result):
             field = value.get(key)
             if isinstance(field, (str, int, float, bool)) or field is None:
                 compact[key] = field
+        coverage_header = _file_coverage_header(value)
+        if coverage_header is not None:
+            compact["coverage"] = coverage_header
     preview_limit = max(0, _AGENT_TOOL_MESSAGE_LIMIT - 800)
     compact["preview"] = serialized[:preview_limit]
     compact_serialized = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
@@ -23896,15 +23899,122 @@ def _matches_glob_path(name, relative_path, pattern):
     return match_at(0, 0)
 
 
-def _resolve_search_candidates(root, start, glob_pattern):
+_FILE_COVERAGE_REASONS = (
+    "directory_unavailable", "file_unreadable", "metadata_unavailable",
+    "traversal_interrupted", "size_limit", "candidate_limit", "result_limit",
+    "per_file_limit", "binary_excluded",
+)
+
+
+def _coverage_text(value, limit=240):
+    return str(value).encode("utf-8", errors="replace")[:limit].decode("utf-8", errors="ignore")
+
+
+class _FileCoverage:
+    """Bounded observations for one existing file-tool traversal, not a tree census."""
+    def __init__(self, root, start):
+        self.root, self.start = root, start
+        self.reasons, self.samples = {}, []
+        self.samples_truncated = False
+        self.directories_checked = 0
+        self.root_fallback = False
+        self.explicit_file = False
+
+    def relative(self, path):
+        try:
+            return _coverage_text(to_project_relative(self.root, Path(path)))
+        except (TypeError, ValueError):
+            return "."
+
+    def note(self, reason, path=None):
+        if reason not in _FILE_COVERAGE_REASONS:
+            return
+        self.reasons[reason] = min(2**53 - 1, self.reasons.get(reason, 0) + 1)
+        if path is not None:
+            if len(self.samples) < 10:
+                self.samples.append({"reason": reason, "path": self.relative(path)})
+            else:
+                self.samples_truncated = True
+
+    def is_kind(self, path, directory=False):
+        try:
+            mode = path.stat().st_mode
+            return stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)
+        except OSError:
+            self.note("metadata_unavailable", path)
+            return False
+
+    def size(self, path):
+        try:
+            return {"size": path.stat().st_size}
+        except OSError:
+            self.note("metadata_unavailable", path)
+            return {"size": 0, "sizeAvailable": False}
+
+    def walk(self, start):
+        def onerror(exc):
+            self.note("directory_unavailable", getattr(exc, "filename", None) or start)
+        try:
+            for row in os.walk(str(start), onerror=onerror):
+                self.directories_checked += 1
+                yield row
+        except OSError:
+            self.note("traversal_interrupted", start)
+
+    def finish(self, result):
+        incomplete = any(reason != "binary_excluded" for reason in self.reasons)
+        inaccessible = any(reason in self.reasons for reason in (
+            "directory_unavailable", "file_unreadable", "metadata_unavailable", "traversal_interrupted",
+        ))
+        failed = not result.get("count") and inaccessible and (
+            self.explicit_file or not self.directories_checked
+        )
+        coverage = {
+            "status": "failed" if failed else "partial" if incomplete else "complete",
+            "reasons": dict(self.reasons),
+            "scope": {"requestedPath": self.relative(self.start), "rootFallback": self.root_fallback},
+            "samples": list(self.samples), "samplesTruncated": self.samples_truncated,
+        }
+        if self.root_fallback:
+            coverage["scope"]["fallbackPath"] = "."
+        while len(json.dumps(coverage, ensure_ascii=False).encode("utf-8")) > 4096 and coverage["samples"]:
+            coverage["samples"].pop()
+            coverage["samplesTruncated"] = True
+        result["coverage"] = coverage
+        if failed:
+            result["ok"] = False
+            result["error"] = "Target is not accessible for this operation."
+        return result
+
+
+def _file_coverage_header(result):
+    """Only the three file discovery tools add a bounded head to large receipts."""
+    if result.get("action") not in {"list_files", "glob_files", "search_files"}:
+        return None
+    coverage = result.get("coverage")
+    if not isinstance(coverage, dict) or coverage.get("status") not in {"complete", "partial", "failed"}:
+        return None
+    reasons = coverage.get("reasons") if isinstance(coverage.get("reasons"), dict) else {}
+    scope = coverage.get("scope") if isinstance(coverage.get("scope"), dict) else {}
+    return {
+        "status": coverage["status"],
+        "reasons": {key: min(2**53 - 1, value) for key, value in reasons.items()
+                    if key in _FILE_COVERAGE_REASONS and type(value) is int and value > 0},
+        "rootFallback": scope.get("rootFallback") is True,
+    }
+
+
+def _resolve_search_candidates(root, start, glob_pattern, coverage=None, allowed_exts=None):
     """Resolve file candidates for read-only search tools."""
-    if start.is_file():
+    coverage = coverage or _FileCoverage(root, start)
+    if coverage.is_kind(start):
+        coverage.explicit_file = True
         return [start]
 
     candidates = []
     if glob_pattern:
         try:
-            for dirpath, dirnames, filenames in os.walk(str(start)):
+            for dirpath, dirnames, filenames in coverage.walk(start):
                 dirnames[:] = [item for item in dirnames if item not in SKIP_DIRS]
                 dirpath_p = Path(dirpath)
                 for name in filenames + dirnames:
@@ -23916,20 +24026,24 @@ def _resolve_search_candidates(root, start, glob_pattern):
                     if _matches_glob_path(full.name, relative_path, glob_pattern):
                         candidates.append(full)
                 if len(candidates) >= 5000:
+                    coverage.note("candidate_limit")
                     break
         except Exception:
-            candidates = []
+            coverage.note("traversal_interrupted", start)
     else:
-        for dirpath, dirnames, filenames in os.walk(str(start)):
+        for dirpath, dirnames, filenames in coverage.walk(start):
             dirnames[:] = [item for item in dirnames if item not in SKIP_DIRS]
             for name in filenames:
                 candidates.append(Path(dirpath) / name)
             if len(candidates) >= 5000:
+                coverage.note("candidate_limit")
                 break
 
     return [
         path for path in candidates
-        if path.is_file() and not any(part in SKIP_DIRS for part in path.relative_to(root).parts)
+        if not any(part in SKIP_DIRS for part in path.relative_to(root).parts)
+        and (not allowed_exts or path.suffix.lstrip(".").lower() in allowed_exts)
+        and coverage.is_kind(path)
     ]
 
 
@@ -23946,33 +24060,35 @@ def execute_list_files_tool(body):
         raise ValueError("目录不存在")
 
     items = []
+    coverage = _FileCoverage(root, start)
 
     def walk_dir(current, depth):
         if len(items) >= 200:
             return
         try:
-            children = sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+            children = sorted((item for item in current.iterdir() if item.name not in SKIP_DIRS),
+                              key=lambda item: (not coverage.is_kind(item, directory=True), item.name.lower()))
+            coverage.directories_checked += 1
         except OSError:
+            coverage.note("directory_unavailable", current)
             return
         for child in children:
             if child.name in SKIP_DIRS:
                 continue
             rel = to_project_relative(root, child)
-            if child.is_dir():
+            if coverage.is_kind(child, directory=True):
                 items.append({"type": "dir", "path": rel, "name": child.name})
                 if depth < max_depth:
                     walk_dir(child, depth + 1)
-            elif child.is_file():
-                try:
-                    size = child.stat().st_size
-                except OSError:
-                    size = 0
-                items.append({"type": "file", "path": rel, "name": child.name, "size": size})
+            elif coverage.is_kind(child):
+                items.append({"type": "file", "path": rel, "name": child.name, **coverage.size(child)})
             if len(items) >= 200:
                 return
 
     walk_dir(start, 1)
-    return {
+    if len(items) >= 200:
+        coverage.note("result_limit")
+    return coverage.finish({
         "ok": True,
         "action": "list_files",
         "path": relative_path or "/",
@@ -23980,7 +24096,7 @@ def execute_list_files_tool(body):
         "maxDepth": max_depth,
         "truncated": len(items) >= 200,
         "items": items,
-    }
+    })
 
 
 _TEXT_READ_CHUNK_BYTES = 64 * 1024
@@ -24220,7 +24336,8 @@ def execute_search_files_tool(body):
         raise ValueError("搜索路径不存在")
 
     results = []
-    for path in _resolve_search_candidates(root, start, glob_pattern):
+    coverage = _FileCoverage(root, start)
+    for path in _resolve_search_candidates(root, start, glob_pattern, coverage, allowed_exts):
         if allowed_exts and path.suffix.lstrip(".").lower() not in allowed_exts:
             continue
         if len(results) >= MAX_SEARCH_RESULTS:
@@ -24232,7 +24349,9 @@ def execute_search_files_tool(body):
         matches = []
         try:
             if path.stat().st_size <= MAX_SEARCH_FILE_BYTES:
-                content, _, _ = read_text_limited(path, MAX_SEARCH_FILE_BYTES)
+                content, _, content_truncated = read_text_limited(path, MAX_SEARCH_FILE_BYTES)
+                if content_truncated:
+                    coverage.note("size_limit", path)
                 content_lines = content.splitlines()
                 for line_no, line in enumerate(content_lines, start=1):
                     hit = bool(needle.search(line)) if use_regex else needle.lower() in line.lower()
@@ -24250,9 +24369,14 @@ def execute_search_files_tool(body):
                         "context": context if context_lines > 0 else None,
                     })
                     if len(matches) >= max_per_file:
+                        coverage.note("per_file_limit", path)
                         break
+            else:
+                coverage.note("size_limit", path)
+        except ValueError as exc:
+            coverage.note("binary_excluded" if str(exc) == "binary file is not supported" else "file_unreadable", path)
         except Exception:
-            pass
+            coverage.note("file_unreadable", path)
         if matched_name or matches:
             results.append({"path": rel, "nameMatch": matched_name, "matches": matches})
 
@@ -24265,13 +24389,15 @@ def execute_search_files_tool(body):
         "truncated": len(results) >= MAX_SEARCH_RESULTS,
         "results": results,
     }
+    if len(results) >= MAX_SEARCH_RESULTS:
+        coverage.note("result_limit")
     regex_markers = ("|", r"\(", r"\)", r"\[", r"\]", ".*", "^", "$")
     if not use_regex and not results and any(marker in query for marker in regex_markers):
         response["hint"] = (
             "Query looks like regular-expression syntax but regex=false; "
             "set regex=true to enable operators such as | or escaped groups."
         )
-    return response
+    return coverage.finish(response)
 
 
 def execute_glob_files_tool(body):
@@ -24283,10 +24409,11 @@ def execute_glob_files_tool(body):
     root, start = resolve_project_path(start_path)
     if not start.exists():
         raise ValueError("搜索路径不存在")
+    coverage = _FileCoverage(root, start)
 
     def collect(search_root, relative_root):
         collected = []
-        for dirpath, dirnames, filenames in os.walk(str(search_root)):
+        for dirpath, dirnames, filenames in coverage.walk(search_root):
             dirnames[:] = [name for name in dirnames if name not in SKIP_DIRS]
             dirpath_p = Path(dirpath)
             for name in filenames + dirnames:
@@ -24298,32 +24425,30 @@ def execute_glob_files_tool(body):
                 if not _matches_glob_path(full.name, relative_pattern, pattern):
                     continue
                 rel = to_project_relative(root, full)
-                if full.is_dir():
+                if coverage.is_kind(full, directory=True):
                     collected.append({"path": rel, "type": "dir"})
-                elif full.is_file():
-                    try:
-                        size = full.stat().st_size
-                    except OSError:
-                        size = 0
-                    collected.append({"path": rel, "type": "file", "size": size})
+                elif coverage.is_kind(full):
+                    collected.append({"path": rel, "type": "file", **coverage.size(full)})
                 if len(collected) >= 200:
+                    coverage.note("result_limit")
                     return collected
         return collected
 
     try:
         results = collect(start, start)
         if not results and start != root:
+            coverage.root_fallback = True
             results = collect(root, root)
     except Exception as exc:
         raise ValueError(f"glob 模式无效：{exc}")
-    return {
+    return coverage.finish({
         "ok": True,
         "action": "glob_files",
         "pattern": pattern,
         "count": len(results),
         "truncated": len(results) >= 200,
         "results": results,
-    }
+    })
 
 
 def execute_web_fetch_tool(body):
@@ -24692,7 +24817,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files/directories; default depth 1, clamped to 1-3, at most 200 entries. Common dependency/build directories are skipped. A nonexistent directory fails; an empty result does not prove every directory was readable. Example: {\"path\":\"src\",\"maxDepth\":2}.",
+            "description": "List files/directories; default depth 1, clamped to 1-3, at most 200 entries. Common dependency/build directories are skipped. A nonexistent directory fails. Example: {\"path\":\"src\",\"maxDepth\":2}. Check coverage.status: complete means inspected within the stated scope/filters; partial preserves usable results but some content was not checked; failed means the target was inaccessible. Counts are observed attempts, not a tree census. Limits may mean more content exists. If sizeAvailable=false, size is unknown, never zero. Missing coverage in old results is unknown. Do not retry automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -24725,7 +24850,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "search_files",
-            "description": "Search file names and text. query is literal unless regex=true; glob filters paths. Content scanning skips files over 1 MiB, returns at most 100 matching files and normally 10 matches per file; unreadable files can be skipped. No matches is not an execution failure. Example: {\"query\":\"TODO|FIXME\",\"regex\":true,\"glob\":\"**/*.py\",\"contextAround\":1}.",
+            "description": "Search file names and text. query is literal unless regex=true; glob filters paths. Content scanning skips files over 1 MiB, returns at most 100 matching files and normally 10 matches per file; unreadable content is reported. No matches is not an execution failure. Example: {\"query\":\"TODO|FIXME\",\"regex\":true,\"glob\":\"**/*.py\",\"contextAround\":1}. Check coverage.status: complete means inspected within the stated scope/filters; partial preserves usable results but some content was not checked; failed means the target was inaccessible. Counts are observed attempts, not a tree census. Limits may mean more content exists. If sizeAvailable=false, size is unknown, never zero. Missing coverage in old results is unknown. Do not retry automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -24745,7 +24870,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "glob_files",
-            "description": "Find names/relative paths with glob syntax, not text content or regex. ** includes zero or more directory levels. Common skipped directories and a 200-entry cap apply. If the starting directory has no matches, current behavior retries from the project root; inspect returned paths. Example: {\"pattern\":\"**/*.py\",\"path\":\"src\"}.",
+            "description": "Find names/relative paths with glob syntax, not text content or regex. ** includes zero or more directory levels. Common skipped directories and a 200-entry cap apply. If the starting directory has no matches, current behavior retries from the project root; inspect returned paths. Example: {\"pattern\":\"**/*.py\",\"path\":\"src\"}. Check coverage.status: complete means inspected within the stated scope/filters; partial preserves usable results but some content was not checked; failed means the target was inaccessible. Counts are observed attempts, not a tree census. Limits may mean more content exists. If sizeAvailable=false, size is unknown, never zero. Missing coverage in old results is unknown. Do not retry automatically.",
             "parameters": {
                 "type": "object",
                 "properties": {

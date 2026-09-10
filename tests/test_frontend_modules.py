@@ -6146,6 +6146,9 @@ process.stdout.write(JSON.stringify({{
     def test_failed_edit_tools_keep_failure_trace_without_false_pending_proposal(self):
         subprocess.run(["node", "tests/e2e/h4/code087-tool-failure-unit.cjs"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
 
+    def test_file_coverage_details_preserve_unknown_sizes_and_legacy_results(self):
+        subprocess.run(["node", "tests/e2e/h4/code087-file-coverage-unit.cjs"], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8")
+
     def test_server_agent_uses_profile_tools_and_projects_all_authorized_actions(self):
         for expected in (
             "const profileAllowedToolNames = getAllowedToolNamesForProfile(",
@@ -7880,7 +7883,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "68220d9d10ce668504827059c85eb6d70eb7bad3ce6716d30fba6f98d5b4a755",
+            "2f41261a05a4ea83152e695ecf5ced10bd5819fd80337ea9bbe997f20a880b60",
         )
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])

@@ -201,7 +201,7 @@ const nativeTools = [
 
       name: "list_files",
 
-      description: "列出文件与目录：默认1层，深度限制1–3层，最多200项，跳过常见依赖/构建目录。目录不存在会失败；空结果不保证每个目录都可读。例：{\"path\":\"src\",\"maxDepth\":2}。",
+      description: "列出文件与目录：默认1层，深度限制1–3层，最多200项，跳过常见依赖/构建目录。目录不存在会失败。例：{\"path\":\"src\",\"maxDepth\":2}。 请检查coverage.status：complete表示已检查声明范围/筛选，partial保留可用结果但有内容未检查，failed表示目标不可访问。原因计数为观察尝试，不是全树总数；达到上限只表示可能仍有内容。sizeAvailable=false时大小未知，不能认定0字节；旧结果缺coverage不代表完整。不要自动重试。",
 
       parameters: {
 
@@ -297,7 +297,7 @@ const nativeTools = [
 
       name: "search_files",
 
-      description: "搜索文件名与正文。query默认是字面文本，regex=true才解释正则；glob只过滤路径。正文跳过超过1MiB的文件，最多100个匹配文件、每文件通常10处匹配，不可读文件可能跳过。无匹配不等于执行失败。例：{\"query\":\"TODO|FIXME\",\"regex\":true,\"glob\":\"**/*.py\",\"contextAround\":1}。",
+      description: "搜索文件名与正文。query默认是字面文本，regex=true才解释正则；glob只过滤路径。正文跳过超过1MiB的文件，最多100个匹配文件、每文件通常10处匹配，不可读正文会报告原因。无匹配不等于执行失败。例：{\"query\":\"TODO|FIXME\",\"regex\":true,\"glob\":\"**/*.py\",\"contextAround\":1}。 请检查coverage.status：complete表示已检查声明范围/筛选，partial保留可用结果但有内容未检查，failed表示目标不可访问。原因计数为观察尝试，不是全树总数；达到上限只表示可能仍有内容。sizeAvailable=false时大小未知，不能认定0字节；旧结果缺coverage不代表完整。不要自动重试。",
 
       parameters: {
 
@@ -373,7 +373,7 @@ const nativeTools = [
 
       name: "glob_files",
 
-      description: "用glob查找文件名/相对路径，不搜索正文，也不使用正则语法。**匹配零层或多层目录；跳过常见目录，最多200项。起始目录无匹配时，当前会回到项目根重查，请检查返回路径。例：{\"pattern\":\"**/*.py\",\"path\":\"src\"}。",
+      description: "用glob查找文件名/相对路径，不搜索正文，也不使用正则语法。**匹配零层或多层目录；跳过常见目录，最多200项。起始目录无匹配时，当前会回到项目根重查，请检查返回路径。例：{\"pattern\":\"**/*.py\",\"path\":\"src\"}。 请检查coverage.status：complete表示已检查声明范围/筛选，partial保留可用结果但有内容未检查，failed表示目标不可访问。原因计数为观察尝试，不是全树总数；达到上限只表示可能仍有内容。sizeAvailable=false时大小未知，不能认定0字节；旧结果缺coverage不代表完整。不要自动重试。",
 
       parameters: {
 

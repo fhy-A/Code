@@ -2006,6 +2006,11 @@
     }
 
     function processCallResult(call) {
+      if (["list_files", "glob_files", "search_files"].includes(call?.action)
+        && ["complete", "partial", "failed"].includes(call?.result?.coverage?.status)) {
+        const content = getMessageText(call?.resultMessage);
+        if (content) return boundedProcessDetail(content);
+      }
       if (call?.error) return boundedProcessDetail(call.error);
       if (isSuccessfulImageRead(call)) {
         return boundedProcessDetail({action: "read_file", path: call.target, mime: call.result.mime, size: call.result.size, visual: true});

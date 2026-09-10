@@ -3489,6 +3489,64 @@ raise SystemExit(2)
         }}
         self.assertEqual(server_mod._agent_identical_tool_failure_count(run, new["fingerprint"], signature), 2)
 
+    def test_file_coverage_reaches_model_and_mixed_terminal_restore_without_extra_calls(self):
+        empty = self.project_dir / "empty"
+        empty.mkdir()
+        blocked = self.project_dir / "blocked.txt"
+        blocked.write_text("NEEDLE", encoding="utf-8")
+        visible = self.project_dir / "visible.txt"
+        visible.write_text("NEEDLE", encoding="utf-8")
+        payloads = [
+            {"query": "NEEDLE", "path": "empty"},
+            {"query": "NEEDLE"},
+            {"query": "NEEDLE", "path": "blocked.txt"},
+        ]
+        calls = [{"index": index, "id": f"coverage-{index}", "type": "function", "function": {
+            "name": "search_files", "arguments": json.dumps(payload),
+        }} for index, payload in enumerate(payloads)]
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [
+                [{"choices": [{"delta": {"tool_calls": calls}, "finish_reason": "tool_calls"}]}],
+                [{"choices": [{"delta": {"content": "checked scope with the reported limits"}, "finish_reason": "stop"}]}],
+            ]
+        original_read = Path.read_bytes
+        def read(path):
+            if path == blocked:
+                raise PermissionError("synthetic access denial, no ACL change")
+            return original_read(path)
+        with mock.patch.object(Path, "read_bytes", read), mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:
+            run = server_mod._create_agent_run(
+                "session-file-coverage", {"model": "test-model", "messages": [{"role": "user", "content": "inspect the synthetic search scopes"}]},
+                self.base_url, ["fixture-coverage-key"], allowed_tools=["search_files"], max_rounds=3,
+            )
+            self._wait_terminal(run)
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(execute_mock.call_count, 3)
+        snapshot = server_mod._agent_snapshot(run, 0)
+        self.assertEqual(snapshot["status"], "completed")
+        results = [execution["result"] for execution in snapshot["toolExecutions"]]
+        self.assertEqual([result["coverage"]["status"] for result in results], ["complete", "partial", "failed"])
+        self.assertEqual([result["ok"] for result in results], [True, True, False])
+        self.assertEqual(results[1]["results"][0]["path"], "visible.txt")
+        self.assertNotIn("failureCount", results[1])
+        self.assertEqual(results[2]["failureCount"], 1)
+        messages = [json.loads(message["content"]) for message in _AgentUpstream.payloads[1]["messages"] if message.get("role") == "tool"]
+        self.assertEqual([message["coverage"]["status"] for message in messages], ["complete", "partial", "failed"])
+        self.assertNotIn("synthetic access denial", json.dumps(messages))
+        # Make one terminal fixture entry a legacy result without the optional
+        # field, then exercise actual persisted-run loading alongside new data.
+        run["tool_executions"]["coverage-0"]["result"].pop("coverage")
+        server_mod._persist_agent_run(run)
+        with server_mod._agent_run_lock:
+            server_mod._agent_runs.pop(run["id"], None)
+        restored = server_mod._get_agent_run(run["id"])
+        restored_results = [entry["result"] for entry in server_mod._agent_snapshot(restored, 0)["toolExecutions"]]
+        self.assertNotIn("coverage", restored_results[0])
+        self.assertEqual(restored_results[1:], results[1:])
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertEqual(blocked.read_text(encoding="utf-8"), "NEEDLE")
+        self.assertEqual(visible.read_text(encoding="utf-8"), "NEEDLE")
+
     def test_bounded_late_text_window_reaches_agent_tool_result_without_mutation(self):
         target = self.project_dir / "late-window.txt"
         source = ("前段内容\n" * 80000 + "目标甲\r\n目标乙\n目标丙\n").encode("utf-8")
