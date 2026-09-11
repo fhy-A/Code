@@ -23,10 +23,17 @@ _ROOT_ID = re.compile(r"dr1_[0-9a-f]{32}\Z")
 _INSTALL_ID = re.compile(r"si1_[0-9a-f]{32}\Z")
 _LOCAL_ID = re.compile(r"local\.skill/[0-9a-f]{32}\Z")
 _BUNDLE_ID = re.compile(r"code\.bundle/[a-z0-9][a-z0-9._-]{0,127}\Z")
-_OP_ID = re.compile(r"op1_[0-9a-f]{64}\Z")
-_STORE_OP_ID = re.compile(r"op[12]_[0-9a-f]{64}\Z")
+# 0.6.12 shortened the staging operation id to 16 hex characters so the longest
+# bundled resource path stays under the Windows MAX_PATH limit (260).  Every
+# reader accepts BOTH forms: stores written before this change (64 hex) stay
+# readable, and their journals/receipts keep working untouched.
+_OP_ID_HEX = r"[0-9a-f]{16}(?:[0-9a-f]{48})?"
+_OP_ID = re.compile(r"op1_%s\Z" % _OP_ID_HEX)
+_STORE_OP_ID = re.compile(r"op[12]_%s\Z" % _OP_ID_HEX)
 _OPAQUE = re.compile(r"~invalid-[0-9a-f]{16}\Z")
-_TEMP = re.compile(r"^\.(?:root\.json|registry\.json|op[12]_[0-9a-f]{64}\.json)\.(op[12]_[0-9a-f]{64})\.[0-9a-f]{32}\.tmp\Z")
+_TEMP = re.compile(
+    r"^\.(?:root\.json|registry\.json|op[12]_@HEX@\.json)\.(op[12]_@HEX@)\.[0-9a-f]{32}\.tmp\Z".replace("@HEX@", _OP_ID_HEX)
+)
 _PHASES = ("prepared", "root-bound", "copying", "staged-verified", "objects-published", "registry-published", "committed")
 _BINDING_REASONS = {"source-invalid", "shared-development-unconfirmed", "same-name-modified", "tombstone-conflict", "bundled-tombstoned", "legacy-root-missing", "legacy-bundled-missing", "unmatched-legacy-tombstone"}
 _OBSERVATION_ERRORS = {"invalid": "source-invalid", "unsafe": "source-unsafe", "unreadable": "source-unreadable"}
@@ -83,8 +90,25 @@ def _state_hash(registry):
     return _digest(_canonical({key: registry[key] for key in keys}))
 def _registry_hash(registry):
     return _digest(_canonical({key: value for key, value in registry.items() if key != "registryHash"}))
+def _operation_digest(root_id, request_hash):
+    return hashlib.sha256(_canonical(["bootstrap-v1", root_id, request_hash])).hexdigest()
+
+
+def _operation_key(value):
+    """Return the comparable form of an operation id: prefix + first 16 hex chars."""
+    text = str(value or "")
+    prefix, _, remainder = text.partition("_")
+    return prefix + "_" + remainder[:16]
+
+
+def _operation_id_legacy(root_id, request_hash):
+    """The pre-0.6.12 id form (full digest); still valid for existing stores."""
+    return "op1_" + _operation_digest(root_id, request_hash)
+
+
 def _operation_id(root_id, request_hash):
-    return "op1_" + hashlib.sha256(_canonical(["bootstrap-v1", root_id, request_hash])).hexdigest()
+    """Short deterministic id: same input -> same id, and the path stays within MAX_PATH."""
+    return "op1_" + _operation_digest(root_id, request_hash)[:16]
 def _normalize_hints(value):
     if value is None: return {}
     if not isinstance(value, dict) or len(value) > revisions.MAX_SKILLS: _fail("identity_hints_invalid")
@@ -199,9 +223,10 @@ class SkillStore:
             if count > MAX_TRANSACTIONS: _fail("store_transaction_limit")
         staging = self.root / "staging"
         if staging.exists():
-            items = list(staging.iterdir())
-            if len(items) > 1: _fail("store_transaction_conflict")
-            for item in items:
+            # Staging residue from an older release must never brick startup: every
+            # entry only has to be a well-formed staging directory (both id forms),
+            # and leftovers are reclaimed best-effort by the write paths.
+            for item in staging.iterdir():
                 if not _STORE_OP_ID.fullmatch(item.name): _fail("store_layout_unknown")
                 _safe_dir(item)
         objects_root, objects, object_ids = self.root / "objects", self.root / "objects" / "sha256", set()
@@ -407,7 +432,11 @@ class SkillStore:
         fields = {"schema", "operationId", "operationKind", "phase", "journalGeneration", "dataRootId", "requestHash", "planHash", "catalogHash", "legacySnapshotHash", "baseRegistry", "targetRegistry", "objectRevisionIds", "newObjectBytes"}
         _exact(value, fields, "journal_invalid")
         hashes = ("requestHash", "planHash", "catalogHash", "legacySnapshotHash")
-        if value["schema"] != TRANSACTION_SCHEMA or value["operationKind"] != "bootstrap-v1" or value["phase"] not in _PHASES or not _ROOT_ID.fullmatch(str(value["dataRootId"])) or not all(_HASH.fullmatch(str(value[key])) for key in hashes) or value["operationId"] != _operation_id(value["dataRootId"], value["requestHash"]): _fail("journal_invalid")
+        expected_ids = {
+            _operation_id(value["dataRootId"], value["requestHash"]),
+            _operation_id_legacy(value["dataRootId"], value["requestHash"]),
+        }
+        if value["schema"] != TRANSACTION_SCHEMA or value["operationKind"] != "bootstrap-v1" or value["phase"] not in _PHASES or not _ROOT_ID.fullmatch(str(value["dataRootId"])) or not all(_HASH.fullmatch(str(value[key])) for key in hashes) or value["operationId"] not in expected_ids: _fail("journal_invalid")
         if isinstance(value["journalGeneration"], bool) or not isinstance(value["journalGeneration"], int) or value["journalGeneration"] < 0: _fail("journal_invalid")
         _exact(value["baseRegistry"], {"generation", "registryHash"}, "journal_invalid"); base = value["baseRegistry"]
         if (base["generation"], base["registryHash"]) != (None, None) and (isinstance(base["generation"], bool) or not isinstance(base["generation"], int) or not _HASH.fullmatch(str(base["registryHash"]))): _fail("journal_invalid")
@@ -417,7 +446,7 @@ class SkillStore:
                or set(objects) != {item["revisionId"] for item in target["installations"]}
                or isinstance(value["newObjectBytes"], bool) or not isinstance(value["newObjectBytes"], int) or not 0 <= value["newObjectBytes"] <= MAX_NEW_OBJECT_BYTES)
         if bad: _fail("journal_invalid")
-        receipt = next((item for item in target["operationReceipts"] if item["operationId"] == value["operationId"]), None)
+        receipt = next((item for item in target["operationReceipts"] if _operation_key(item["operationId"]) == _operation_key(value["operationId"])), None)
         if receipt is None or receipt["requestHash"] != value["requestHash"]: _fail("journal_invalid")
         return {**value, "targetRegistry": target}
     def _journals(self):
@@ -491,7 +520,7 @@ class SkillStore:
                 if attempt == 4: raise
                 time.sleep(0.01 * 2**attempt)
         self._verify_object(final, revision_id); self._hit("after-object-publish")
-    def _build_target(self, root_id, request_hash, plan, hints, fixed=None):
+    def _build_target(self, root_id, request_hash, plan, hints, fixed=None, operation_id=None):
         installs, bindings, observations, tombstones, materials, used_hints = [], [], [], [], {}, set()
         observation_ids, installation_ids, skill_ids, catalog_hash = set(), set(), set(), plan["catalogHash"]
         fixed_ids = {(item["kind"], item["displayName"]): (item["skillId"], item["installationId"]) for item in (fixed or {}).get("installations", [])}
@@ -564,10 +593,22 @@ class SkillStore:
         installs.sort(key=lambda item: item["installationId"]); bindings.sort(key=lambda item: (item["routingAlias"].casefold(), item["routingAlias"]))
         observations.sort(key=lambda item: item["sourceObservationId"]); tombstones.sort(key=lambda item: (item["legacyName"].casefold(), item["legacyName"]))
         base = {"schema": REGISTRY_SCHEMA, "dataRootId": root_id, "generation": 0, "installations": installs, "bindings": bindings, "bundledTombstones": tombstones, "sourceObservations": observations}
-        operation_id = _operation_id(root_id, request_hash)
+        operation_id = operation_id or _operation_id(root_id, request_hash)
         receipt = {"operationId": operation_id, "kind": "bootstrap-v1", "requestHash": request_hash, "appliedGeneration": 0, "resultStateHash": _state_hash(base)}
         registry = {**base, "operationReceipts": [receipt], "registryHash": None}; registry["registryHash"] = _registry_hash(registry)
         return normalize_registry(registry), materials
+    def _discard_stale_staging(self, known):
+        """Best-effort removal of staging residue; never fails the startup path."""
+        staging = self.root / "staging"
+        if not staging.exists(): return
+        keep = {_operation_key(item) for item in known}
+        for item in list(staging.iterdir()):
+            if not _STORE_OP_ID.fullmatch(item.name) or _operation_key(item.name) in keep:
+                continue
+            try:
+                _remove_safe_tree(item)
+            except (SkillStoreError, OSError):
+                continue
     def _clean_stage(self, operation_id, allowed_ids):
         path = self.root / "staging" / operation_id
         if not path.exists(): return
@@ -588,12 +629,13 @@ class SkillStore:
                         self._verify_object(item, revision_id)
         _remove_safe_tree(path)
     def _clean_temps(self, known, empty=False):
+        known_keys = {_operation_key(item) for item in known}
         for directory in (self.root, self.root / "transactions"):
             if not directory.exists(): continue
             for item in directory.iterdir():
                 match = _TEMP.fullmatch(item.name)
                 if match:
-                    if match.group(1) not in known and not empty: _fail("store_temp_unknown")
+                    if not empty and _operation_key(match.group(1)) not in known_keys: _fail("store_temp_unknown")
                     _safe_file(item); item.unlink()
     def read_registry(self):
         with self._read_lock():
@@ -639,12 +681,9 @@ class SkillStore:
             if object_ids - expected:
                 _fail("store_object_unknown")
             staging_root = self.root / "staging"
-            staged_operations = (
-                {item.name for item in staging_root.iterdir()}
-                if staging_root.exists() else set()
-            )
-            if staged_operations - {journal["operationId"]}:
-                _fail("staging_unknown")
+            # Leftover staging directories of other operations are tolerated here
+            # (their names were validated by _inspect_layout); only the active
+            # operation's tree is inspected in depth.
             staged_operation = staging_root / journal["operationId"]
             if staged_operation.exists():
                 _safe_dir(staged_operation)
@@ -706,8 +745,11 @@ class SkillStore:
         if object_ids != referenced:
             _fail("store_object_unknown")
         staging = self.root / "staging"
-        if staging.exists() and next(staging.iterdir(), None) is not None:
-            _fail("staging_unknown")
+        if staging.exists():
+            # Residue is tolerated and reclaimed best-effort by the write paths.
+            for item in staging.iterdir():
+                if not _STORE_OP_ID.fullmatch(item.name): _fail("staging_unknown")
+                _safe_dir(item)
         return {
             "state": "committed",
             "dataRootId": root["dataRootId"],
@@ -754,8 +796,7 @@ class SkillStore:
             registry = self._load_registry() if (self.root / "registry.json").exists() else None
             active = [item for item in journals if item["phase"] != "committed"]
             known = {item["operationId"] for item in journals}
-            staged = {item.name for item in (self.root / "staging").iterdir()}
-            if staged - known: _fail("staging_unknown")
+            self._discard_stale_staging(known)
             referenced = {item["revisionId"] for item in (registry or {}).get("installations", [])}
             referenced.update(revision_id for item in journals for revision_id in item["objectRevisionIds"])
             if self._inspect_layout() - referenced: _fail("store_object_unknown")
@@ -778,7 +819,11 @@ class SkillStore:
             root_id = matching["dataRootId"] if matching else "dr1_" + uuid.uuid4().hex
             operation_id = matching["operationId"] if matching else _operation_id(root_id, request_hash)
             self._clean_temps(known, empty=root is None and registry is None and not journals)
-            target, materials = self._build_target(root_id, request_hash, plan, hints, matching["targetRegistry"] if matching else None)
+            target, materials = self._build_target(
+                root_id, request_hash, plan, hints,
+                matching["targetRegistry"] if matching else None,
+                operation_id=matching["operationId"] if matching else None,
+            )
             if len(_canonical(target)) + 1 > MAX_REGISTRY_BYTES: _fail("registry_size_limit")
             if matching is None:
                 object_ids = sorted(materials); new_bytes = sum(revisions.build_skill_revision(materials[item])["summary"]["totalSize"] for item in object_ids if not self._object_path(item).exists())

@@ -65,6 +65,135 @@ def _reseal(registry):
     return registry
 
 
+def test_operation_id_is_short_deterministic_and_reads_both_forms():
+    root_id, request_hash = "dr1_" + "a" * 32, "sha256:" + "b" * 64
+    short = skill_store._operation_id(root_id, request_hash)
+    legacy = skill_store._operation_id_legacy(root_id, request_hash)
+    assert short == skill_store._operation_id(root_id, request_hash)
+    assert len(short) == 20 and len(legacy) == 68
+    assert legacy.startswith(short)
+    for value in (short, legacy):
+        assert skill_store._OP_ID.fullmatch(value)
+        assert skill_store._STORE_OP_ID.fullmatch(value)
+        assert skill_store._operation_key(value) == short
+        assert skill_store._TEMP.fullmatch(f".registry.json.{value}.{'d' * 32}.tmp")
+    assert not skill_store._OP_ID.fullmatch("op1_" + "a" * 15)
+    assert not skill_store._OP_ID.fullmatch("op1_" + "a" * 17)
+
+
+def test_legacy_operation_ids_stay_readable_and_recover_in_place(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    store = _store(data, bundle)
+    store.bootstrap(catalog)
+    store_root = data / skill_store.STORE_DIRECTORY
+    root = json.loads((store_root / "root.json").read_text(encoding="utf-8"))
+    journal_path = next((store_root / "transactions").glob("op1_*.json"))
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    short = journal["operationId"]
+    legacy = skill_store._operation_id_legacy(root["dataRootId"], journal["requestHash"])
+    assert short != legacy
+
+    def rewrite(path, value):
+        # byte-exact: the store validates the file against its canonical encoding
+        path.write_bytes(skill_store._canonical(value) + b"\n")
+
+    journal["operationId"] = legacy
+    journal["targetRegistry"]["operationReceipts"][0]["operationId"] = legacy
+    _reseal(journal["targetRegistry"])
+    rewrite(journal_path.with_name(f"{legacy}.json"), journal)
+    journal_path.unlink()
+
+    registry_path = store_root / "registry.json"
+    legacy_registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    legacy_registry["operationReceipts"][0]["operationId"] = legacy
+    _reseal(legacy_registry)
+    rewrite(registry_path, legacy_registry)
+
+    reopened = _store(data, bundle)
+    assert reopened.inspect_startup_state()["state"] == "committed"
+    recovered = reopened.bootstrap(catalog)
+    assert recovered == legacy_registry
+    assert recovered["operationReceipts"][0]["operationId"] == legacy
+    assert json.loads(registry_path.read_text(encoding="utf-8")) == legacy_registry
+
+
+def _legacy_staging_residue(data, digest="6a" + "b" * 62):
+    residue = data / skill_store.STORE_DIRECTORY / "staging" / ("op1_" + "c" * 64)
+    (residue / "objects" / "sha256" / digest[:2] / digest).mkdir(parents=True)
+    return residue
+
+
+def test_staging_residue_from_an_older_release_does_not_brick_startup(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    residue = _legacy_staging_residue(data)
+    reopened = _store(data, bundle)
+    assert reopened.inspect_startup_state()["state"] == "committed"
+    assert reopened.read_registry() == registry
+    reopened.bootstrap(catalog)
+    assert not residue.exists()
+
+
+def test_staging_reclaim_failure_never_breaks_startup(tmp_path):
+    data, bundle, catalog = _fixture(tmp_path)
+    _store(data, bundle).bootstrap(catalog)
+    residue = _legacy_staging_residue(data)
+    with mock.patch.object(skill_store, "_remove_safe_tree", side_effect=OSError("locked")):
+        registry = _store(data, bundle).bootstrap(catalog)
+    assert registry["schema"] == skill_store.REGISTRY_SCHEMA
+    assert residue.exists()
+
+
+def test_max_path_budget_reproduces_the_reported_boundary():
+    profile = r"C:\Users\Administrator\.code"
+    digest = "6a" + "b" * 62
+    reported = r"vendor\scripts\pptx_shapes\data\LICENSE-APACHE-2.0.txt"
+    short = skill_store._operation_id("dr1_" + "a" * 32, "sha256:" + "b" * 64)
+    legacy = skill_store._operation_id_legacy("dr1_" + "a" * 32, "sha256:" + "b" * 64)
+
+    def budget(operation_id, relative=reported):
+        staged = "\\".join([
+            profile, "skill-store-v1", "staging", operation_id,
+            "objects", "sha256", digest[:2], digest, "content",
+        ])
+        return len(staged + "\\" + relative)
+
+    assert budget(legacy) == 266
+    assert budget(short) <= 230
+    base = budget(short) - len(reported)
+    for target in (258, 259, 260):
+        assert budget(short, "x" * (target - base)) == target
+
+
+def test_longest_bundled_resource_fits_under_max_path():
+    bundled = Path(skill_store.__file__).resolve().parent.parent / "data" / "skills"
+    if not bundled.exists():
+        pytest.skip("bundled skills are not present in this checkout")
+    longest = max(
+        (
+            path.relative_to(bundled).as_posix().replace("/", "\\")
+            for path in bundled.rglob("*")
+            if path.is_file()
+        ),
+        key=len,
+    )
+    profile = r"C:\Users\Administrator\.code"
+    digest = "6a" + "b" * 62
+    short = skill_store._operation_id("dr1_" + "a" * 32, "sha256:" + "b" * 64)
+    legacy = skill_store._operation_id_legacy("dr1_" + "a" * 32, "sha256:" + "b" * 64)
+
+    def budget(operation_id):
+        staged = "\\".join([
+            profile, "skill-store-v1", "staging", operation_id,
+            "objects", "sha256", digest[:2], digest, "content",
+        ])
+        return len(staged + "\\" + longest)
+
+    assert budget(short) <= 260
+    assert budget(legacy) > budget(short)
+
+
+
 def test_store_is_explicit_and_default_off(tmp_path):
     data, bundle, catalog = _fixture(tmp_path)
     with pytest.raises(ValueError):
