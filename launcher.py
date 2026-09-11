@@ -205,28 +205,62 @@ def hide_console():
         pass
 
 
+def _report_startup_failure(code, message, *, detail=None):
+    """Surface a startup failure where a windowed build's user can see it."""
+    try:
+        import server
+
+        return server._report_startup_failure(
+            code, message, detail=detail, data_dir=get_code_home(),
+        )
+    except Exception:
+        return None
+
+
+def _recover_pending_handoff(data_dir, *, owner):
+    """Offer the one-click recovery for a previous interrupted handoff."""
+    try:
+        import server
+    except Exception:
+        return None, owner
+
+    state = {"owner": owner}
+
+    def launch(candidate):
+        state["owner"].release()
+        if server._launch_replacement_process(candidate):
+            return True
+        state["owner"] = data_dir_owner.acquire_data_dir_owner(data_dir)
+        return False
+
+    try:
+        recovery = server._recover_pending_update_handoff(
+            data_dir=data_dir, launch=launch,
+        )
+    except Exception:
+        recovery = None
+    return recovery, state["owner"]
+
+
 def main():
     hide_console()
     try:
         return _main()
     except data_dir_owner.DataDirOwnerError as exc:
         if isinstance(exc, data_dir_owner.DataDirInUseError):
-            print(
-                "Code cannot start because this data directory is already in use.",
-                file=sys.stderr,
-            )
+            message = "Code cannot start because this data directory is already in use."
         else:
-            print(
-                "Code cannot start because its data directory is unavailable.",
-                file=sys.stderr,
-            )
+            message = "Code cannot start because its data directory is unavailable."
+        print(message, file=sys.stderr)
+        _report_startup_failure("data_dir_owner", message)
         return 1
     except skill_runtime_startup.ImmutableSkillStartupError as exc:
-        print(
+        message = (
             "Code cannot start because immutable Skill startup is unavailable "
-            f"({exc.code}).",
-            file=sys.stderr,
+            f"({exc.code})."
         )
+        print(message, file=sys.stderr)
+        _report_startup_failure("immutable_skill_startup", message, detail=str(exc.code))
         return 1
     except Exception:
         import traceback
@@ -241,6 +275,13 @@ def _main(*, owner_acquire=data_dir_owner.acquire_data_dir_owner):
     port = 3010
     data_dir = get_code_home()
     owner = owner_acquire(data_dir)
+
+    # A previous update can have downloaded and verified the replacement while
+    # failing to start it.  Surface that visibly instead of assuming the user
+    # already runs the new build (the updater that ran belongs to the old one).
+    recovery, owner = _recover_pending_handoff(data_dir, owner=owner)
+    if recovery and recovery.get("action") == "launched":
+        os._exit(0)
 
     # The sidecar owner must be acquired before this legacy migration checks
     # whether ``.code`` exists.  In particular, the lock itself never creates

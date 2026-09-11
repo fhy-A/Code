@@ -12815,6 +12815,224 @@ def _powershell_literal(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def _update_handoff_trace_path(target_dir):
+    """Return the reviewable handoff trace kept outside the locked data directory.
+
+    The updater must never write inside DATA_DIR before it owns the sidecar, so
+    every pre-lock stage, exception and exit code is recorded next to the data
+    directory instead (same parent directory as the owner sidecar).
+    """
+    root = _absolute_lexical_path(target_dir)
+    return root.parent / f"{root.name}.code-update-handoff.log"
+
+
+def _startup_error_log_path(data_dir=None):
+    """Return the reviewable startup-error log kept outside the data directory."""
+    root = _absolute_lexical_path(data_dir or DATA_DIR)
+    return root.parent / f"{root.name}.startup-error.log"
+
+
+def _append_sidecar_log(path, message):
+    """Append one line to a reviewable sidecar log; never raise."""
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8") as stream:
+            stream.write(f"{dt.datetime.now().isoformat(timespec='seconds')} {message}\n")
+        return True
+    except OSError:
+        return False
+
+
+def _startup_dialog_enabled():
+    """A windowed frozen build has no console, so failures need a visible dialog."""
+    return bool(getattr(sys, "frozen", False)) or os.environ.get("CODE_STARTUP_DIALOG") == "1"
+
+
+def _show_message_box(title, text, flags=0x00000010 | 0x00040000):
+    """Show a blocking Windows message box; never raise from a failure path."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.MessageBoxW(None, str(text), str(title), int(flags)))
+    except Exception:
+        return None
+
+
+def _report_startup_failure(code, message, *, detail=None, data_dir=None):
+    """Persist a reviewable startup failure and surface it where a user can see it."""
+    log_path = _startup_error_log_path(data_dir)
+    line = f"stage=startup code={code} message={message}"
+    if detail:
+        line += f" detail={detail}"
+    written = _append_sidecar_log(log_path, line)
+    if _startup_dialog_enabled():
+        body = message
+        if written:
+            body += f"\n\n详情已写入：{log_path}"
+        _show_message_box("Code 无法启动", body)
+    return log_path
+
+
+def _pending_update_handoff(data_dir=None):
+    """Return the interrupted handoff a stuck journal still records, if any.
+
+    The journal is untrusted input.  Its descriptor is re-normalized with the
+    same official-Release contract the downloader uses, the candidate name must
+    be the descriptor's own name with no path separators or traversal, the
+    resolved path must stay inside the install root, and the file must not be a
+    symlink, reparse point or multiply-linked file.  Only a descriptor that
+    passes all of that is marked startable.
+    """
+    root = _absolute_lexical_path(data_dir or DATA_DIR)
+    try:
+        journals = sorted(root.glob("*.update.json"))
+    except OSError:
+        return None
+    for path in journals:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("schema") != _UPDATE_JOB_SCHEMA:
+            continue
+        status = str(payload.get("status") or "")
+        stage = str(payload.get("stage") or "")
+        if status != "installing" and stage != "installing":
+            continue
+        entry = {
+            "journalPath": str(path),
+            "version": "",
+            "name": "",
+            "candidatePath": "",
+            "candidateExists": False,
+            "updatedAt": str(payload.get("updatedAt") or ""),
+            "descriptor": None,
+            "startable": False,
+            "rejected": "",
+        }
+        descriptor = _normalize_update_descriptor(payload.get("descriptor"))
+        if descriptor is None:
+            entry["rejected"] = "descriptor_invalid"
+            return entry
+        name = descriptor["name"]
+        entry["version"] = descriptor["version"]
+        entry["name"] = name
+        if (
+            not name
+            or name != Path(name).name
+            or "/" in name
+            or "\\" in name
+            or ".." in Path(name).parts
+        ):
+            entry["rejected"] = "unsafe_candidate_name"
+            return entry
+        candidate = root / name
+        if _absolute_lexical_path(candidate).parent != root:
+            entry["rejected"] = "candidate_outside_target"
+            return entry
+        entry["candidatePath"] = str(candidate)
+        try:
+            checked = _validate_safe_update_file(
+                candidate, root, allowed_names={name}, required=False,
+            )
+        except _UpdateFailure as exc:
+            entry["rejected"] = "unsafe_candidate:" + str(exc.code)
+            return entry
+        entry["candidateExists"] = bool(checked is not None and checked.exists())
+        if not entry["candidateExists"]:
+            entry["rejected"] = "candidate_missing"
+            return entry
+        entry["descriptor"] = descriptor
+        entry["startable"] = True
+        return entry
+    return None
+
+
+def _launch_replacement_process(path):
+    """Start a replacement executable the same way the updater does."""
+    try:
+        subprocess.Popen(
+            [str(path), "--reuse-browser"],
+            creationflags=0x08000000,
+            close_fds=True,
+            cwd=str(Path(path).parent),
+        )
+        return True
+    except OSError:
+        return False
+
+
+def _recover_pending_update_handoff(*, data_dir=None, launch=None, dialog=None):
+    """Offer a visible one-click recovery for an interrupted previous handoff."""
+    pending = _pending_update_handoff(data_dir)
+    if not pending:
+        return None
+    log_path = _startup_error_log_path(data_dir)
+    _append_sidecar_log(
+        log_path,
+        "stage=startup-handoff version=%s candidate=%s exists=%s startable=%s rejected=%s journal=%s updatedAt=%s"
+        % (
+            pending["version"],
+            pending["candidatePath"],
+            pending["candidateExists"],
+            pending["startable"],
+            pending["rejected"] or "none",
+            pending["journalPath"],
+            pending["updatedAt"],
+        ),
+    )
+    # A launch action is only ever offered for a descriptor-validated candidate
+    # that also passes the same size/digest/PE verification the downloader uses.
+    # Anything else gets manual guidance plus a rejected reason on disk.
+    verified = None
+    if pending["startable"]:
+        try:
+            verified = _validate_completed_update_file(
+                Path(pending["candidatePath"]),
+                pending["descriptor"],
+                _absolute_lexical_path(data_dir or DATA_DIR),
+            )
+        except _UpdateFailure as exc:
+            _append_sidecar_log(
+                log_path, "stage=startup-handoff verification_failed=" + str(exc.code),
+            )
+        except OSError:
+            _append_sidecar_log(log_path, "stage=startup-handoff verification_failed=unreadable")
+    if verified is None:
+        reason = pending["rejected"] or "verification_failed"
+        _append_sidecar_log(log_path, "stage=startup-handoff action=guidance_only reason=" + reason)
+        if _startup_dialog_enabled():
+            show = dialog or _show_message_box
+            show(
+                "Code 更新未完成",
+                "上一次更新没有完成启动，且无法安全地启动已下载的候选文件"
+                f"（原因：{reason}）。\n\n"
+                "请打开安装目录手动运行最新的 Code-v*.exe，或重新下载更新。",
+                0x00000030 | 0x00040000,
+            )
+        return {**pending, "action": "guidance_only", "reason": reason}
+    if not _startup_dialog_enabled():
+        return {**pending, "action": "logged"}
+    show = dialog or _show_message_box
+    text = (
+        "上一次更新没有完成启动。\n\n"
+        f"已下载的新版本：{pending['name']}\n"
+        "点击【确定】立即启动该版本；点击【取消】继续使用当前版本。"
+    )
+    if show("Code 更新未完成", text, 0x00000001 | 0x00000030 | 0x00040000) == 1:
+        starter = launch or _launch_replacement_process
+        if starter(Path(pending["candidatePath"])):
+            _append_sidecar_log(log_path, "stage=startup-handoff launched")
+            return {**pending, "action": "launched"}
+        _append_sidecar_log(log_path, "stage=startup-handoff launch_failed")
+        return {**pending, "action": "launch_failed"}
+    _append_sidecar_log(log_path, "stage=startup-handoff continued_current_version")
+    return {**pending, "action": "continued"}
+
+
 def _build_update_script(
     target_dir,
     new_exe,
@@ -12823,15 +13041,25 @@ def _build_update_script(
     *,
     source_pid=None,
     lock_path=None,
+    trace_path=None,
     wait_timeout_seconds=45,
+    image_wait_timeout_seconds=30,
 ):
     """Build a detached updater guarded by the formal DATA_DIR sidecar.
 
-    The helper first waits only for the exact source PID.  Once that process
-    has exited, it acquires the same Windows byte-range lock used by the
-    formal server entrypoint before it can write ``DATA_DIR`` or change the
-    installed executables.  It releases the lock before the replacement is
-    started, so a newly started formal instance remains the sole owner.
+    The helper waits for the exact source PID and then, with a bounded timeout
+    (image_wait_timeout_seconds, which may be lowered or set to 0 to skip it),
+    for any remaining same-image process inside the install directory.  It never
+    force-kills anything: a timeout is recorded with the still-running process
+    summary and the handoff continues, because this path no longer deletes,
+    renames or overwrites any existing installer image, so a lingering older
+    process cannot be harmed by proceeding.  The wait preserves the intent of
+    the pre-v0.6.8 updater (let same-image processes finish first) without its
+    forced termination semantics.
+    Once those waits are done, it acquires the same Windows byte-range lock used
+    by the formal server entrypoint before it can write DATA_DIR or place the
+    replacement.  It releases the lock before the replacement is started, so a
+    newly started formal instance remains the sole owner.
     """
     target_dir = Path(target_dir).resolve()
     new_exe = Path(new_exe).resolve()
@@ -12839,6 +13067,9 @@ def _build_update_script(
     log_path = Path(log_path).resolve()
     lock_path = Path(os.path.abspath(os.fspath(
         lock_path or data_dir_owner.lock_path_for(DATA_DIR)
+    )))
+    trace_path = Path(os.path.abspath(os.fspath(
+        trace_path or _update_handoff_trace_path(log_path.parent)
     )))
     try:
         source_pid = int(os.getpid() if source_pid is None else source_pid)
@@ -12856,16 +13087,99 @@ $logPath = {_powershell_literal(log_path)}
 $lockPath = {_powershell_literal(lock_path)}
 $sourcePid = {source_pid}
 $waitSeconds = {wait_timeout_seconds}
+$imageWaitSeconds = {image_wait_timeout_seconds}
 $lockOffset = {data_dir_owner.WINDOWS_LOCK_OFFSET}
 $lockLength = {data_dir_owner.WINDOWS_LOCK_LENGTH}
+$tracePath = {_powershell_literal(trace_path)}
+$updateLogStarted = $false
 
+function Write-UpdateTrace([string] $message) {{
+    try {{
+        [System.IO.File]::AppendAllText(
+            $tracePath,
+            "$(Get-Date -Format s) $message" + [Environment]::NewLine
+        )
+    }} catch {{
+    }}
+}}
+
+function Write-UpdateLine([string] $message) {{
+    try {{
+        [System.IO.File]::AppendAllText(
+            $logPath,
+            "$(Get-Date -Format s) $message" + [Environment]::NewLine
+        )
+    }} catch {{
+    }}
+}}
+
+function Write-UpdateStage([string] $name) {{
+    Write-UpdateTrace "stage $name"
+    if ($updateLogStarted) {{
+        Write-UpdateLine "stage $name"
+    }}
+}}
+
+function Write-UpdateFailure($record) {{
+    $detail = "EXCEPTION: " + $record.Exception.GetType().FullName + ": " + $record.Exception.Message
+    $stack = "SCRIPTSTACK: " + $record.ScriptStackTrace
+    Write-UpdateTrace $detail
+    Write-UpdateTrace $stack
+    if ($updateLogStarted) {{
+        Write-UpdateLine $detail
+        Write-UpdateLine $stack
+    }}
+}}
+
+function Complete-Update([int] $code) {{
+    Write-UpdateTrace "exit $code"
+    if ($updateLogStarted) {{
+        Write-UpdateLine "exit $code"
+    }}
+    exit $code
+}}
+
+Write-UpdateStage 'wait-source'
 $deadline = [DateTime]::UtcNow.AddSeconds($waitSeconds)
 while ($null -ne (Get-Process -Id $sourcePid -ErrorAction SilentlyContinue)) {{
     if ([DateTime]::UtcNow -ge $deadline) {{
-        exit 20
+        Write-UpdateTrace 'source process did not exit before the deadline'
+        Complete-Update 20
     }}
     Start-Sleep -Milliseconds 100
 }}
+
+# Wait (never force-kill) for every other same-image process in the install
+# directory to exit.  A timeout is recorded and the handoff continues: the
+# cleanup-free replacement never deletes a running image.
+Write-UpdateStage 'wait-siblings'
+$imageDeadline = [DateTime]::UtcNow.AddSeconds($imageWaitSeconds)
+while ($true) {{
+    $siblings = @()
+    foreach ($candidate in [System.Diagnostics.Process]::GetProcesses()) {{
+        try {{
+            if ($candidate.Id -eq $PID) {{ continue }}
+            $candidatePath = $candidate.MainModule.FileName
+            if (-not $candidatePath) {{ continue }}
+            $candidateName = [System.IO.Path]::GetFileName($candidatePath)
+            $candidateDir = [System.IO.Path]::GetDirectoryName($candidatePath)
+            if ($candidateName -like 'Code-v*.exe' -and
+                [String]::Equals($candidateDir, $targetDir, [StringComparison]::OrdinalIgnoreCase)) {{
+                $siblings += ($candidate.Id.ToString() + ':' + $candidateName)
+            }}
+        }} catch {{
+        }} finally {{
+            $candidate.Dispose()
+        }}
+    }}
+    if ($siblings.Count -eq 0) {{ break }}
+    if ([DateTime]::UtcNow -ge $imageDeadline) {{
+        Write-UpdateTrace ('same-image wait timed out after ' + $imageWaitSeconds + 's; still running: ' + ($siblings -join ', '))
+        break
+    }}
+    Start-Sleep -Milliseconds 200
+}}
+Write-UpdateStage 'add-type'
 
 try {{
 $null = Add-Type -TypeDefinition @'
@@ -12945,7 +13259,8 @@ namespace CodeUpdaterSidecar {{
 }}
 '@
 }} catch {{
-    exit 24
+    Write-UpdateFailure $_
+    Complete-Update 24
 }}
 
 function Open-SafeDataOwnerSidecar([string] $path) {{
@@ -13012,6 +13327,8 @@ $lockInformation = $null
 $lockStream = $null
 $locked = $false
 $exitCode = 0
+$replacementReady = $false
+Write-UpdateStage 'lock'
 try {{
     $lockedSidecar = Open-VerifiedDataOwnerSidecar $lockPath
     $lockHandle = $lockedSidecar.Handle
@@ -13020,11 +13337,13 @@ try {{
     $lockHandle = $null
     if ($lockStream.Length -lt $lockLength) {{
         $exitCode = 21
+        Write-UpdateTrace 'data directory lock sidecar is shorter than the locked range'
     }} else {{
         try {{
             $lockStream.Lock($lockOffset, $lockLength)
         }} catch [System.IO.IOException] {{
             $exitCode = 22
+            Write-UpdateTrace 'data directory lock is held by another owner'
         }}
         if ($exitCode -eq 0) {{
             $locked = $true
@@ -13032,27 +13351,38 @@ try {{
         }}
     }}
     if ($exitCode -eq 0) {{
-        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) update started" -Encoding utf8
+        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) update started" -Encoding utf8 -ErrorAction Continue
+        $updateLogStarted = $true
+        Write-UpdateStage 'replace'
         if ($partialExe -ne '' -and (Test-Path -LiteralPath $partialExe -PathType Leaf)) {{
             Move-Item -LiteralPath $partialExe -Destination $newExe -Force
-            Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) completed .part rename" -Encoding utf8
+            Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) completed .part rename" -Encoding utf8 -ErrorAction Continue
         }}
-        if (-not (Test-Path -LiteralPath $newExe -PathType Leaf)) {{
-            Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) executable not found" -Encoding utf8
+        Write-UpdateStage 'verify'
+        if (Test-Path -LiteralPath $newExe -PathType Leaf) {{
+            $replacementReady = $true
+        }} else {{
+            Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) executable not found" -Encoding utf8 -ErrorAction Continue
             $exitCode = 23
         }}
     }}
-    if ($exitCode -eq 0) {{
-        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) verified replacement ready; old versions retained" -Encoding utf8
+    if ($replacementReady) {{
+        Add-Content -LiteralPath $logPath -Value "$(Get-Date -Format s) verified replacement ready; old versions retained" -Encoding utf8 -ErrorAction Continue
     }}
 }} catch {{
-    $exitCode = 24
+    Write-UpdateFailure $_
+    if (-not $replacementReady) {{
+        $exitCode = 24
+    }}
 }} finally {{
     if ($locked) {{
         try {{
             $lockStream.Unlock($lockOffset, $lockLength)
         }} catch {{
-            $exitCode = 25
+            Write-UpdateTrace 'the data directory lock could not be unlocked'
+            if (-not $replacementReady) {{
+                $exitCode = 25
+            }}
         }}
     }}
     if ($null -ne $lockStream) {{
@@ -13061,7 +13391,12 @@ try {{
         $lockHandle.Dispose()
     }}
 }}
-exit $exitCode
+# Starting the replacement is gated only on the verified replacement file:
+# best-effort logging or cleanup steps never block the relaunch.
+if ($replacementReady) {{
+    Complete-Update 0
+}}
+Complete-Update $exitCode
 """
     encoded_power_shell = base64.b64encode(
         power_shell.encode("utf-16le")
@@ -13075,7 +13410,10 @@ powershell.exe -NoProfile -NonInteractive -EncodedCommand {encoded_power_shell}
 set "result=%errorlevel%"
 if not "%result%"=="0" goto :cleanup
 start "" "{new_exe}" --reuse-browser
+>>"{trace_path}" echo bat started replacement exit %result% script %~f0
 :cleanup
+>>"{trace_path}" echo bat exit %result% script %~f0
+if not "%result%"=="0" >>"{trace_path}" echo bat skipped replacement
 start "" /b cmd.exe /c del "%~f0" >nul 2>&1
 exit /b %result%
 """)
@@ -30305,15 +30643,34 @@ def run_server(
     try:
         owner = owner_acquire(DATA_DIR)
     except data_dir_owner.DataDirOwnerError as exc:
-        print(_data_dir_owner_startup_message(exc), file=sys.stderr)
+        message = _data_dir_owner_startup_message(exc)
+        print(message, file=sys.stderr)
+        _report_startup_failure("data_dir_owner", message, data_dir=DATA_DIR)
         return 1
 
     _ensure_runtime_data_directories()
     try:
         _initialize_immutable_skill_runtime(owner)
     except skill_runtime_startup.ImmutableSkillStartupError as exc:
-        print(_immutable_skill_startup_message(exc), file=sys.stderr)
+        message = _immutable_skill_startup_message(exc)
+        print(message, file=sys.stderr)
+        _report_startup_failure("immutable_skill_startup", message, data_dir=DATA_DIR)
         return 1
+    handoff_state = {"owner": owner}
+
+    def _launch_pending_handoff(candidate):
+        handoff_state["owner"].release()
+        if _launch_replacement_process(candidate):
+            return True
+        handoff_state["owner"] = owner_acquire(DATA_DIR)
+        return False
+
+    recovery = _recover_pending_update_handoff(
+        data_dir=DATA_DIR, launch=_launch_pending_handoff,
+    )
+    if recovery and recovery.get("action") == "launched":
+        return 0
+    owner = handoff_state["owner"]
     _initialize_runtime_data_services()
     _restore_update_jobs()
 

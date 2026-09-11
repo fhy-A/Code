@@ -1612,6 +1612,287 @@ class TestUpdaterHelpers(unittest.TestCase):
             script.index('start "" "'),
         )
 
+    def test_update_script_is_diagnosable_and_never_touches_other_images(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_dir = Path(temp_dir) / "data"
+            target_dir.mkdir()
+            new_exe = target_dir / "Code-v1.2.3.exe"
+            other_running = target_dir / "Code-v1.2.2.exe"
+            other_newer = target_dir / "Code-v1.2.4.exe"
+            for path in (new_exe, other_running, other_newer):
+                path.write_bytes(b"image")
+            log_path = target_dir / "update.log"
+            lock_path = data_dir_owner.lock_path_for(target_dir)
+            bat_path = server._build_update_script(
+                target_dir,
+                new_exe,
+                None,
+                log_path,
+                source_pid=4242,
+                lock_path=lock_path,
+            )
+            script, payload = self._generated_power_shell(bat_path)
+
+        # A running image cannot be removed on Windows, and a fatal cleanup step
+        # used to abort the relaunch (the v0.6.8 regression).  The updater may
+        # only ever place the verified replacement; it never deletes or
+        # overwrites any other installer image.
+        for forbidden in ("remove-item", "get-childitem", "del /f", "erase ", "-filter"):
+            self.assertNotIn(forbidden, payload.lower())
+        self.assertNotIn("Code-v1.2.2.exe", payload)
+        self.assertNotIn("Code-v1.2.4.exe", payload)
+
+        # Every stage and the final exit code are persisted instead of exiting
+        # silently, including the exception type, message and script line.
+        for stage in ("'wait-source'", "'add-type'", "'lock'", "'replace'", "'verify'"):
+            self.assertIn("Write-UpdateStage " + stage, payload)
+        self.assertIn("Complete-Update 20", payload)
+        self.assertIn("Complete-Update 24", payload)
+        self.assertIn("Complete-Update $exitCode", payload)
+        self.assertNotIn("exit 20", payload)
+        self.assertNotIn("exit 24", payload)
+        self.assertIn("EXCEPTION: ", payload)
+        self.assertIn("SCRIPTSTACK: ", payload)
+
+        # Pre-lock evidence is kept outside the locked data directory so the
+        # updater still never writes inside DATA_DIR before it owns the sidecar.
+        self.assertIn(str(server._update_handoff_trace_path(target_dir)), payload)
+        self.assertTrue(
+            server._update_handoff_trace_path(target_dir).parent == target_dir.parent
+        )
+        self.assertIn(
+            "Add-Content -LiteralPath $logPath",
+            payload[payload.index("update started") - 400:],
+        )
+
+        # The wrapper records the real %errorlevel% and its own path before it
+        # removes itself, so a failed handoff is never silently self-deleted.
+        self.assertIn("bat exit %result% script %~f0", script)
+        self.assertIn('if not "%result%"=="0" goto :cleanup', script)
+        self.assertLess(script.index("bat exit %result%"), script.index('del "%~f0"'))
+
+    def test_update_script_waits_without_killing_and_gates_only_on_the_replacement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target_dir = Path(temp_dir) / "data"
+            target_dir.mkdir()
+            new_exe = target_dir / "Code-v1.2.3.exe"
+            new_exe.write_bytes(b"image")
+            bat_path = server._build_update_script(
+                target_dir,
+                new_exe,
+                None,
+                target_dir / "update.log",
+                source_pid=4242,
+                lock_path=data_dir_owner.lock_path_for(target_dir),
+            )
+            script, payload = self._generated_power_shell(bat_path)
+
+        # Semantics 1: other same-image processes are waited for with a bounded
+        # timeout and never force-killed, before any install-directory write.
+        self.assertIn("$imageWaitSeconds = 30", payload)
+        self.assertIn("Write-UpdateStage 'wait-siblings'", payload)
+        self.assertIn("[System.Diagnostics.Process]::GetProcesses()", payload)
+        self.assertIn("same-image wait timed out after", payload)
+        self.assertLess(
+            payload.index("Write-UpdateStage 'wait-source'"),
+            payload.index("Write-UpdateStage 'wait-siblings'"),
+        )
+        self.assertLess(
+            payload.index("Write-UpdateStage 'wait-siblings'"),
+            payload.index("Open-VerifiedDataOwnerSidecar $lockPath"),
+        )
+        for forbidden in ("taskkill", "stop-process", "remove-item", "del /f", "erase "):
+            self.assertNotIn(forbidden, payload.lower())
+
+        # Semantics 2: logging is best effort, so a logging failure cannot abort
+        # the handoff.
+        self.assertGreaterEqual(payload.count("-ErrorAction Continue"), 4)
+
+        # Semantics 3: starting is gated only on the verified replacement, and a
+        # failure after verification no longer overrides that decision.
+        self.assertIn("$replacementReady = $true", payload)
+        self.assertIn("if (-not $replacementReady) {", payload)
+        self.assertIn(
+            "Starting the replacement is gated only on the verified replacement file",
+            payload,
+        )
+        self.assertIn("Complete-Update 0", payload)
+        self.assertLess(
+            payload.index("$replacementReady = $true"),
+            payload.index("Complete-Update 0"),
+        )
+
+    def test_startup_error_log_is_a_sidecar_and_never_overwrites_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            existing = data_dir / "config.json"
+            existing.write_text("{}", encoding="utf-8")
+
+            with mock.patch("builtins.open", mock.mock_open()) as file_open, \
+                    mock.patch.object(server, "_startup_dialog_enabled", return_value=False), \
+                    mock.patch.object(server, "_show_message_box") as dialog:
+                log_path = server._report_startup_failure(
+                    "data_dir_owner", "busy", data_dir=data_dir,
+                )
+
+            # The diagnostic sidecar lives outside DATA_DIR: a startup failure
+            # can happen while another writer owns DATA_DIR, so the reporter
+            # must not assume ownership or write protected data.
+            self.assertEqual(log_path.parent, data_dir.parent)
+            self.assertNotEqual(log_path.parent, data_dir)
+            modes = [call.args[1] for call in file_open.call_args_list if len(call.args) > 1]
+            self.assertEqual(modes, ["a"])
+            self.assertNotIn(str(data_dir / ""), [str(call.args[0]) for call in file_open.call_args_list])
+            self.assertEqual(existing.read_text(encoding="utf-8"), "{}")
+            dialog.assert_not_called()
+
+    def test_startup_dialog_is_off_by_default_in_non_frozen_contexts(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CODE_STARTUP_DIALOG", None)
+            with mock.patch.object(server.sys, "frozen", False, create=True):
+                self.assertFalse(server._startup_dialog_enabled())
+        self.assertNotEqual(os.environ.get("CODE_STARTUP_DIALOG"), "1")
+
+    def test_startup_failure_is_logged_and_visible(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            dialogs = []
+
+            def fake_dialog(title, text, flags=0):
+                dialogs.append((title, text, flags))
+                return 1
+
+            with mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                    mock.patch.object(server, "_show_message_box", side_effect=fake_dialog):
+                log_path = server._report_startup_failure(
+                    "data_dir_owner",
+                    "Code cannot start because this data directory is already in use.",
+                    data_dir=data_dir,
+                )
+
+            self.assertEqual(log_path, data_dir.parent / ".code.startup-error.log")
+            self.assertTrue(log_path.exists())
+            self.assertIn("code=data_dir_owner", log_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(dialogs), 1)
+            self.assertIn("already in use", dialogs[0][1])
+            self.assertIn(str(log_path), dialogs[0][1])
+
+    def test_pending_handoff_recovery_requires_a_verified_official_candidate(self):
+        descriptor = {
+            "version": "9.9.9",
+            "name": "Code-v9.9.9.exe",
+            "url": "https://github.com/fhy-A/Code/releases/download/v9.9.9/Code-v9.9.9.exe",
+            "size": 1234,
+            "digest": "a" * 64,
+        }
+
+        def write_journal(data_dir, payload_descriptor, *, status="installing"):
+            journal = data_dir / "Code-v9.9.9.update.json"
+            journal.write_text(
+                json.dumps({
+                    "schema": server._UPDATE_JOB_SCHEMA,
+                    "jobId": "job-1",
+                    "descriptor": payload_descriptor,
+                    "status": status,
+                    "stage": status,
+                    "progress": 100,
+                    "downloaded": 1,
+                    "etag": "",
+                    "errorCode": "",
+                    "retryable": False,
+                    "updatedAt": "2026-09-11T10:55:07Z",
+                }),
+                encoding="utf-8",
+            )
+            return journal
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            candidate = data_dir / "Code-v9.9.9.exe"
+            candidate.write_bytes(b"image")
+            journal = write_journal(data_dir, descriptor)
+            launched = []
+            dialogs = []
+
+            def fake_dialog(title, text, flags=0):
+                dialogs.append((title, text, flags))
+                return 1
+
+            # Positive control: an official normalized descriptor plus a candidate
+            # that passes the shared verification is offered as a one-click launch.
+            with mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                    mock.patch.object(server, "_show_message_box", side_effect=fake_dialog), \
+                    mock.patch.object(
+                        server, "_validate_completed_update_file", return_value=candidate,
+                    ) as verify:
+                result = server._recover_pending_update_handoff(
+                    data_dir=data_dir,
+                    launch=lambda path: launched.append(str(path)) or True,
+                )
+
+            self.assertEqual(result["action"], "launched")
+            self.assertEqual(launched, [str(candidate)])
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args[0][1]["digest"], "a" * 64)
+            self.assertEqual(dialogs[0][2] & 0x00000001, 0x00000001)
+            trace = data_dir.parent / ".code.startup-error.log"
+            self.assertIn("stage=startup-handoff", trace.read_text(encoding="utf-8"))
+
+            # (a) a journal with a foreign schema is not a pending handoff.
+            journal.write_text(
+                json.dumps({"schema": "other/v1", "status": "installing"}), encoding="utf-8",
+            )
+            self.assertIsNone(server._pending_update_handoff(data_dir))
+
+            # (b) illegal descriptors never become startable.
+            for bad in (
+                dict(descriptor, url="https://evil.example/Code-v9.9.9.exe"),
+                dict(descriptor, digest="not-a-digest"),
+                dict(descriptor, name="Code-v9.9.8.exe"),
+                dict(descriptor, size=0),
+            ):
+                write_journal(data_dir, bad)
+                pending = server._pending_update_handoff(data_dir)
+                self.assertFalse(pending["startable"])
+                self.assertEqual(pending["rejected"], "descriptor_invalid")
+
+            # (c) traversal in the name never resolves to a launchable path.
+            write_journal(data_dir, dict(descriptor, name="..\\..\\evil.exe"))
+            pending = server._pending_update_handoff(data_dir)
+            self.assertFalse(pending["startable"])
+            self.assertEqual(pending["rejected"], "descriptor_invalid")
+            self.assertEqual(pending["candidatePath"], "")
+
+            # (d) a present candidate that fails the shared verification gets
+            # manual guidance only: no launch call and no launch-capable dialog.
+            write_journal(data_dir, descriptor)
+            launched.clear()
+            dialogs.clear()
+            with mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                    mock.patch.object(server, "_show_message_box", side_effect=fake_dialog), \
+                    mock.patch.object(
+                        server,
+                        "_validate_completed_update_file",
+                        side_effect=server._UpdateFailure("download_digest_mismatch", stage="verifying"),
+                    ):
+                result = server._recover_pending_update_handoff(
+                    data_dir=data_dir,
+                    launch=lambda path: launched.append(str(path)) or True,
+                )
+            self.assertEqual(result["action"], "guidance_only")
+            self.assertEqual(result["reason"], "verification_failed")
+            self.assertEqual(launched, [])
+            self.assertEqual(dialogs[0][2] & 0x00000001, 0)
+            self.assertNotIn("立即启动该版本", dialogs[0][1])
+            self.assertIn("verification_failed", trace.read_text(encoding="utf-8"))
+
+            # A terminal journal must not trigger the recovery entry.
+            write_journal(data_dir, descriptor, status="completed")
+            self.assertIsNone(server._pending_update_handoff(data_dir))
+
     def test_update_helper_rejects_install_root_outside_formal_data_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
@@ -3656,6 +3937,7 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
              mock.patch.object(server, "_initialize_immutable_skill_runtime") as skills, \
              mock.patch.object(server, "_initialize_runtime_data_services") as route_catalogs, \
              mock.patch.object(server, "_restore_update_jobs") as restore, \
+             mock.patch.object(server, "_report_startup_failure") as report, \
              mock.patch("sys.stderr", stderr):
             result = server.run_server(
                 owner_acquire=owner_acquire,
@@ -3668,6 +3950,8 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
             stderr.getvalue(),
             "Code cannot start because this data directory is already in use.\n",
         )
+        self.assertEqual(report.call_args[0][0], "data_dir_owner")
+        self.assertEqual(report.call_args[0][1], stderr.getvalue().strip())
         directories.assert_not_called()
         skills.assert_not_called()
         route_catalogs.assert_not_called()
@@ -3686,12 +3970,14 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
              mock.patch.object(server, "_initialize_immutable_skill_runtime", side_effect=failure) as skills, \
              mock.patch.object(server, "_initialize_runtime_data_services") as route_catalogs, \
              mock.patch.object(server, "_restore_update_jobs") as restore, \
+             mock.patch.object(server, "_report_startup_failure") as report, \
              mock.patch("sys.stderr", stderr):
             result = server.run_server(
                 owner_acquire=mock.Mock(return_value=owner),
                 server_factory=factory,
                 tray_starter=mock.Mock(),
             )
+        self.assertEqual(report.call_args[0][0], "immutable_skill_startup")
         self.assertEqual(result, 1)
         self.assertEqual(
             stderr.getvalue(),
@@ -3844,7 +4130,9 @@ class TestLauncherInstall(unittest.TestCase):
             stderr.getvalue(),
             "Code cannot start because this data directory is already in use.\n",
         )
-        file_open.assert_not_called()
+        opened = [str(call.args[0]) for call in file_open.call_args_list if call.args]
+        self.assertFalse([path for path in opened if path.endswith("crash.log")])
+        self.assertTrue([path for path in opened if path.endswith(".startup-error.log")])
 
     def test_launcher_main_reports_immutable_startup_without_crash_log(self):
         stderr = io.StringIO()
@@ -3862,7 +4150,9 @@ class TestLauncherInstall(unittest.TestCase):
             "Code cannot start because immutable Skill startup is unavailable "
             "(catalog_stale).\n",
         )
-        file_open.assert_not_called()
+        opened = [str(call.args[0]) for call in file_open.call_args_list if call.args]
+        self.assertFalse([path for path in opened if path.endswith("crash.log")])
+        self.assertTrue([path for path in opened if path.endswith(".startup-error.log")])
 
     def test_create_desktop_shortcut_ps_script(self):
         """The PowerShell script embeds the correct target path."""
