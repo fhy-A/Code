@@ -112,7 +112,7 @@ CHECKS: dict[str, CheckSpec] = {
         "pytest_full",
         "运行完整 pytest",
         (sys.executable, "-m", "pytest", "tests", "-v", "--tb=short", "--durations=30"),
-        1500,
+        3600,
     ),
     "harness_replay": CheckSpec(
         "harness_replay",

@@ -161,7 +161,7 @@ def test_manifest_is_only_reordered_with_unchanged_commands_and_timeouts():
     before = verification.get_release_definition_fingerprint()
     with mock.patch.object(verification, "get_release_check_ids", return_value=historical):
         assert verification.get_release_definition_fingerprint() != before
-    assert verification.CHECKS["pytest_full"].timeout == 1500
+    assert verification.CHECKS["pytest_full"].timeout == 3600
 
 
 @pytest.mark.parametrize("body", ["", "# 更新\n", release.RELEASE_NOTES_PLACEHOLDER])

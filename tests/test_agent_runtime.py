@@ -4562,14 +4562,55 @@ raise SystemExit(2)
                 restored = server_mod._agent_run_from_record(record)
                 payload, _ = server_mod._agent_model_payload(restored)
                 self.assertEqual(json.dumps(record["messages"], ensure_ascii=False), before)
+                # Two request-only system projections lead the payload and are never persisted.
+                projected_system = [
+                    message for message in payload["messages"]
+                    if message.get("role") in {"system", "developer"}
+                ]
+                self.assertEqual(len(projected_system), 2)
+                self.assertEqual(projected_system, payload["messages"][:2])
                 self.assertEqual(
-                    [message["role"] for message in payload["messages"]],
+                    [message["role"] for message in payload["messages"][:2]],
+                    ["system", "system"],
+                )
+                self.assertTrue(
+                    payload["messages"][0]["content"].startswith("[Current AgentRun workspace]\n")
+                )
+                self.assertEqual(payload["messages"][0], server_mod._agent_workspace_message(restored))
+                self.assertTrue(
+                    payload["messages"][1]["content"].startswith("[Optional action status]\n")
+                )
+                self.assertEqual(
+                    payload["messages"][1]["content"],
+                    "[Optional action status]\n" + server_mod._ACTION_STATUS_GUIDANCE,
+                )
+                conversation = [
+                    message for message in payload["messages"]
+                    if message.get("role") not in {"system", "developer"}
+                ]
+                self.assertEqual(
+                    [message["role"] for message in conversation],
                     ["assistant", "tool", "tool", "user", "user"],
                 )
                 self.assertEqual(
-                    [payload["messages"][1]["tool_call_id"], payload["messages"][2]["tool_call_id"]],
+                    [conversation[1]["tool_call_id"], conversation[2]["tool_call_id"]],
                     ["call-a", "call-b"],
                 )
+                # The action-status projection is gated by the advertised tool schema.
+                self.assertTrue(server_mod._agent_action_status_enabled(restored, "read_file"))
+                without_status = json.loads(json.dumps(record))
+                for definition in without_status["tools"]:
+                    (((definition.get("function") or {}).get("parameters") or {}).get("properties") or {}).pop(
+                        "_actionStatus", None
+                    )
+                plain_run = server_mod._agent_run_from_record(without_status)
+                self.assertFalse(server_mod._agent_action_status_enabled(plain_run))
+                plain_payload, _ = server_mod._agent_model_payload(plain_run)
+                self.assertEqual(
+                    [message["role"] for message in plain_payload["messages"]],
+                    ["system", "assistant", "tool", "tool", "user", "user"],
+                )
+                self.assertEqual(plain_payload["messages"][0], payload["messages"][0])
 
     def test_conflicting_tool_history_fails_locally_without_upstream_or_replay(self):
         run = server_mod._create_agent_run(

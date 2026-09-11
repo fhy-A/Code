@@ -350,9 +350,9 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
     def _expected_npm_executable():
         return "npm.cmd" if release.os.name == "nt" else "npm"
 
-    def test_pytest_full_uses_shared_1500_second_definition_and_durations(self):
+    def test_pytest_full_uses_shared_3600_second_definition_and_durations(self):
         spec = release.CHECKS["pytest_full"]
-        self.assertEqual(spec.timeout, 1500)
+        self.assertEqual(spec.timeout, 3600)
         self.assertEqual(spec.command, (release.sys.executable, "-m", "pytest", "tests", "-v", "--tb=short", "--durations=30"))
         manifest_entry = next(
             item
@@ -360,7 +360,7 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
             if item["id"] == "pytest_full"
         )
         self.assertEqual(manifest_entry["command"], spec.command)
-        self.assertEqual(manifest_entry["timeout"], 1500)
+        self.assertEqual(manifest_entry["timeout"], 3600)
         self.assertEqual(
             verification.get_release_check_ids(dry_run=False, skip_tests=False),
             ("git_diff_check", "syntax_app", "syntax_agent_runtime", "syntax_server",
@@ -382,7 +382,7 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
         run_command.assert_called_once_with(
             list(spec.command),
             description="pytest tests -v --tb=short --durations=30",
-            timeout=1500,
+            timeout=3600,
         )
         mark_ok.assert_called_once_with("全量测试通过")
 
