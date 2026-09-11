@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-12 | i18n 口径定稿：原生对话框文案**暂不抽模块**（护栏二改为可判定触发＝**正文达 4 条**时必须抽到 `code/startup_messages.py`，当前基线＝**3**）；护栏一仍满足（双语只由 `_startup_occupancy_guidance()` 单点构造）；本轮无代码改动 | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 教训正例：**测试脚手架不得降低对产品的检查强度**——自catch「替换 `_build_update_script` 会让 inspect 源码不变量检查空转」，改为在创建点跟踪并加结构性断言；并复核 immutable-skill 诊断增强（errno/winerror/filename 入对话框与旁路日志、仍 fail-closed）已落地；用户报告该机磁盘空间充足（41.2 GB 剩余） | [查看](2026/2026-09-12.md) |
 | 2026-09-11 | 第三方机器证据入库（**用户报告**）：A `download_pe_invalid` 假阴性 7 次（size+sha256 已过 ⇒ 文件本身好，PE/身份假阴性，与本机复现机制一致）；B `immutable_skill_startup` 阻塞 9 次，本轮**诊断增强**把底层 `errno/winerror/filename` 写入对话框与旁路日志（注入验收：fail-closed 且两处均含 `errno=2 filename=…`）；C 占用 6 次与 `candidate_missing` 仅记录 | [查看](2026/2026-09-11.md) |
 | 2026-09-11 | 批次自检按授权落地为**结构性断言**（模块级对话框替身已生效、更新脚本工厂未被替换且可 inspect、临时脚本在创建点被跟踪、当下批次窗口/进程/目录/临时文件均 0）；未新增独立脚本文件；test_server.py 300 passed／1 skipped | [查看](2026/2026-09-11.md) |
