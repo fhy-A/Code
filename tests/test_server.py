@@ -35,7 +35,7 @@ from code_runtime import data_dir_owner
 
 _DIALOG_GUARD = None
 _BUILT_UPDATE_SCRIPTS = []
-_REAL_BUILD_UPDATE_SCRIPT = None
+_REAL_MKSTEMP = None
 _PRODUCT_DIALOG_TITLES = ("Code 无法启动", "Code 更新未完成")
 _FIXTURE_DIRS_BEFORE = set()
 _TEMP_BATS_BEFORE = set()
@@ -108,26 +108,31 @@ def setUpModule():
     that assert the dialog layer patch _show_message_box themselves with their own
     stand-in, which simply nests over this no-op guard.
     """
-    global _DIALOG_GUARD, _REAL_BUILD_UPDATE_SCRIPT, _FIXTURE_DIRS_BEFORE, _TEMP_BATS_BEFORE
+    global _DIALOG_GUARD, _REAL_MKSTEMP, _FIXTURE_DIRS_BEFORE, _TEMP_BATS_BEFORE
     _DIALOG_GUARD = mock.patch.object(server, "_show_message_box", return_value=0)
     _DIALOG_GUARD.start()
     # snapshot the fixture area so the batch check reports only what this run left
     _FIXTURE_DIRS_BEFORE = _fixture_temp_dirs()
     _TEMP_BATS_BEFORE = _temp_update_bats()
-    _REAL_BUILD_UPDATE_SCRIPT = server._build_update_script
+    # Track the temporary updater script at its creation point instead of wrapping
+    # _build_update_script: the real builder must stay patchable and its source must
+    # stay inspectable by the update-script invariant tests.
+    _REAL_MKSTEMP = tempfile.mkstemp
 
-    def _tracking_build(*args, **kwargs):
-        path = _REAL_BUILD_UPDATE_SCRIPT(*args, **kwargs)
-        _BUILT_UPDATE_SCRIPTS.append(Path(path))
-        return path
+    def _tracking_mkstemp(*args, **kwargs):
+        handle, path = _REAL_MKSTEMP(*args, **kwargs)
+        if kwargs.get("prefix") == "code-update-":
+            _BUILT_UPDATE_SCRIPTS.append(Path(path))
+        return handle, path
 
-    server._build_update_script = _tracking_build
+    tempfile.mkstemp = _tracking_mkstemp
 
 
 def tearDownModule():
     global _DIALOG_GUARD
-    if _REAL_BUILD_UPDATE_SCRIPT is not None:
-        server._build_update_script = _REAL_BUILD_UPDATE_SCRIPT
+    # note: _REAL_MKSTEMP is restored below before the file checks run
+    if _REAL_MKSTEMP is not None:
+        tempfile.mkstemp = _REAL_MKSTEMP
     for path in _BUILT_UPDATE_SCRIPTS:
         try:
             path.unlink()
