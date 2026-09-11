@@ -31010,10 +31010,19 @@ def run_server(
     print(f"Code is running: http://127.0.0.1:{PORT}")
     print(f"Proxy upstream: {NEW_API_BASE_URL}")
     print(f"Project root: {load_config()['projectRoot']}")
-    # Old images are reclaimed only by an instance that has already started: the
-    # v0.6.8 regression died inside the handoff script, which tried to remove a
-    # running image.  Best-effort, bounded, and never able to break startup.
-    if getattr(sys, "frozen", False):
+    # Old images are reclaimed only once this instance is the running, uniquely
+    # owning service.  A spawned process is not a working app: removing the
+    # previous image before the new version serves would destroy the rollback
+    # safety net.  Every failure path above (owner unavailable, immutable Skill
+    # startup, a completed handover) returns before this point, so reaching here
+    # means the data-directory lock is held and the listener is bound.  The
+    # cleanup itself stays best-effort and can never break startup.
+    service_ready = (
+        owner is not None
+        and getattr(server, "socket", None) is not None
+        and handoff_state.get("owner") is owner
+    )
+    if getattr(sys, "frozen", False) and service_ready:
         try:
             _cleanup_old_update_images(_update_target_dir(), log_path=DATA_DIR / "update.log")
         except Exception:

@@ -4262,7 +4262,7 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
                  mock.patch.object(server, "_cleanup_old_update_images", side_effect=cleanup(events)), \
                  mock.patch.object(server, "load_config", return_value={"projectRoot": "C:/workspace"}):
                 result = server.run_server(
-                    owner_acquire=mock.Mock(return_value=owner),
+                    owner_acquire=mock.Mock(side_effect=lambda data_dir: events.append("owner") or owner),
                     server_factory=FakeHttpServer,
                     tray_starter=lambda port, httpd: events.append("tray"),
                 )
@@ -4289,7 +4289,9 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(calls[0][0], (frozen_target,))
         self.assertEqual(calls[0][1]["log_path"], frozen_log)
-        # reclaiming happens after the instance is up: never inside the handoff
+        # reclaiming happens only after the lock is held and the instance is up:
+        # never at process spawn, and never inside the handoff script
+        self.assertLess(events.index("owner"), events.index("cleanup"))
         self.assertLess(events.index("tray"), events.index("cleanup"))
         self.assertLess(events.index("cleanup"), events.index("serve"))
 
@@ -4303,6 +4305,117 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(calls, [])
         self.assertNotIn("cleanup", events)
+
+    def test_cleanup_never_runs_when_the_instance_did_not_take_over(self):
+        import contextlib
+
+        install_root = Path(tempfile.mkdtemp()) / ".code"
+        install_root.mkdir(parents=True)
+        for version in ("0.6.8", "0.6.9", "0.6.10", "0.6.11"):
+            (install_root / f"Code-v{version}.exe").write_bytes(b"MZ" + version.encode("utf-8"))
+        before = sorted(path.name for path in install_root.glob("Code-v*.exe"))
+
+        def run(owner_acquire, *, skills=None):
+            events = []
+            calls = []
+            dialogs = []
+            real_cleanup = server._cleanup_old_update_images
+
+            def spy(*args, **kwargs):
+                calls.append((args, kwargs))
+                return real_cleanup(*args, **kwargs)
+
+            class FakeHttpServer:
+                daemon_threads = False
+
+                def __init__(self, address, handler):
+                    events.append("http")
+                    self.socket = mock.Mock()
+
+                def serve_forever(self):
+                    events.append("serve")
+
+            def record(name):
+                return lambda *args, **kwargs: events.append(name)
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(server.os, "chdir"))
+                stack.enter_context(mock.patch.object(server, "DATA_DIR", install_root))
+                stack.enter_context(mock.patch.object(server.sys, "frozen", True, create=True))
+                stack.enter_context(mock.patch.object(server, "_update_target_dir", return_value=install_root))
+                stack.enter_context(mock.patch.object(server, "_cleanup_old_update_images", side_effect=spy))
+                stack.enter_context(mock.patch.object(server, "_ensure_runtime_data_directories", side_effect=record("directories")))
+                stack.enter_context(mock.patch.object(
+                    server, "_initialize_immutable_skill_runtime",
+                    side_effect=skills if skills is not None else record("skills"),
+                ))
+                stack.enter_context(mock.patch.object(server, "_initialize_runtime_data_services", side_effect=record("route-catalogs")))
+                stack.enter_context(mock.patch.object(server, "_restore_update_jobs", side_effect=record("restore")))
+                stack.enter_context(mock.patch.object(server, "_migrate_sessions_to_hierarchy", side_effect=record("sessions")))
+                stack.enter_context(mock.patch.object(server, "_migrate_codex_project_sessions_support", side_effect=record("projects")))
+                stack.enter_context(mock.patch.object(server, "_migrate_project_root_paths", side_effect=record("roots")))
+                stack.enter_context(mock.patch.object(server, "_start_agent_run_nonterminal_index_build", side_effect=record("nonterminal-index")))
+                stack.enter_context(mock.patch.object(server, "_start_agent_run_session_index_build", side_effect=record("session-index")))
+                stack.enter_context(mock.patch.object(server, "load_config", return_value={"projectRoot": "C:/workspace"}))
+                stack.enter_context(mock.patch("sys.stderr", io.StringIO()))
+                # a frozen build surfaces startup failures in a real modal dialog;
+                # the fixture must never pop a visible window
+                stack.enter_context(mock.patch.object(
+                    server, "_show_message_box",
+                    side_effect=lambda *args, **kwargs: dialogs.append(args) or 0,
+                ))
+                result = server.run_server(
+                    owner_acquire=owner_acquire,
+                    server_factory=FakeHttpServer,
+                    tray_starter=lambda port, httpd: events.append("tray"),
+                )
+            return result, events, calls, dialogs
+
+        # (1) the data-directory lock was never taken
+        result, events, calls, dialogs = run(mock.Mock(side_effect=data_dir_owner.DataDirInUseError("busy")))
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+        self.assertNotIn("tray", events)
+        self.assertEqual(len(dialogs), 1)  # the failure stays visible to the user
+
+        # (2) startup failed before the listener came up
+        failure = server.skill_runtime_startup.ImmutableSkillStartupError("store_object_unknown")
+        result, events, calls, dialogs = run(mock.Mock(return_value=mock.Mock()), skills=failure)
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [])
+        self.assertNotIn("http", events)
+        self.assertEqual(len(dialogs), 1)
+
+        # (3) no live owner object means this instance is not the unique writer
+        result, events, calls, dialogs = run(mock.Mock(return_value=None))
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("serve", events)
+        self.assertEqual(dialogs, [])
+
+        # in every case the rollback images are still present and nothing was logged
+        self.assertEqual(
+            before, ["Code-v0.6.10.exe", "Code-v0.6.11.exe", "Code-v0.6.8.exe", "Code-v0.6.9.exe"],
+        )
+        self.assertEqual(sorted(path.name for path in install_root.glob("Code-v*.exe")), before)
+        self.assertFalse((install_root / "update.log").exists())
+
+    def test_cleanup_is_not_wired_into_the_launcher_or_the_handoff_script(self):
+        root = Path(server.__file__).resolve().parent
+        launcher_source = (root / "launcher.py").read_text(encoding="utf-8")
+        self.assertNotIn("_cleanup_old_update_images", launcher_source)
+        self.assertNotIn("unlink", launcher_source)
+        self.assertNotIn("Remove-Item", launcher_source)
+        server_source = Path(server.__file__).resolve().read_text(encoding="utf-8")
+        self.assertEqual(server_source.count("_cleanup_old_update_images(_update_target_dir("), 1)
+        self.assertLess(
+            server_source.index('print(f"Code is running: http://127.0.0.1:{PORT}")'),
+            server_source.index("_cleanup_old_update_images(_update_target_dir("),
+        )
+        self.assertLess(
+            server_source.index("_cleanup_old_update_images(_update_target_dir("),
+            server_source.index("server.serve_forever()"),
+        )
 
     def test_run_server_busy_owner_stops_before_runtime_initialization(self):
         owner_acquire = mock.Mock(
