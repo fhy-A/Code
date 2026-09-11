@@ -2292,6 +2292,20 @@ class TestUpdaterHelpers(unittest.TestCase):
         }), encoding="utf-8")
         return journal
 
+    def test_module_fixture_guards_are_installed_and_the_batch_is_clean(self):
+        # Authorized structural guard: no test in this module can reach the real
+        # dialog, the updater-script factory stays intact and inspectable, and its
+        # temporary files are tracked for teardown.
+        self.assertIsInstance(server._show_message_box, mock.Mock)
+        self.assertIsNotNone(_DIALOG_GUARD)
+        self.assertEqual(tempfile.mkstemp.__name__, "_tracking_mkstemp")
+        self.assertNotIn("_tracking_mkstemp", inspect.getsource(server._build_update_script))
+        # the batch is also clean at this moment
+        self.assertEqual(_visible_product_dialog_count(), 0)
+        self.assertEqual(_fixture_process_count(), 0)
+        self.assertEqual(sorted(_temp_update_bats() - _TEMP_BATS_BEFORE), [])
+        self.assertEqual(sorted(_fixture_temp_dirs() - _FIXTURE_DIRS_BEFORE), [])
+
     def test_cleanup_keeps_running_and_previous_version_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / ".code"
