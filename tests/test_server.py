@@ -2074,6 +2074,131 @@ class TestUpdaterHelpers(unittest.TestCase):
             self.assertEqual(invalid.exception.code, "download_pe_invalid")
             self.assertFalse(invalid.exception.retryable)
 
+    def _write_version_journal(self, root, version, status, *, stage=None):
+        journal = root / f"Code-v{version}.exe.update.json"
+        journal.write_text(json.dumps({
+            "schema": server._UPDATE_JOB_SCHEMA,
+            "jobId": "job-1",
+            "descriptor": self._handoff_descriptor(version),
+            "status": status,
+            "stage": stage or status,
+            "progress": 100,
+            "downloaded": 1,
+            "etag": "",
+            "errorCode": "",
+            "retryable": False,
+            "updatedAt": "2026-09-11T10:55:07Z",
+        }), encoding="utf-8")
+        return journal
+
+    def _install_root_with_images(self, versions):
+        root = Path(tempfile.mkdtemp()) / ".code"
+        root.mkdir(parents=True)
+        for version in versions:
+            (root / f"Code-v{version}.exe").write_bytes(b"MZ" + version.encode("utf-8"))
+        return root
+
+    def test_cleanup_keeps_running_and_previous_version_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / ".code"
+            root.mkdir()
+            for version in ("0.6.8", "0.6.9", "0.6.10", "0.6.11"):
+                (root / f"Code-v{version}.exe").write_bytes(b"MZ" + version.encode("utf-8"))
+            log = root / "update.log"
+            summary = server._cleanup_old_update_images(
+                root, running_version="0.6.11",
+                running_image=root / "Code-v0.6.11.exe", log_path=log,
+            )
+            self.assertEqual(
+                sorted(path.name for path in root.glob("Code-v*.exe")),
+                ["Code-v0.6.10.exe", "Code-v0.6.11.exe"],
+            )
+            self.assertEqual(sorted(item["version"] for item in summary["deleted"]), ["0.6.8", "0.6.9"])
+            self.assertEqual(summary["kept"], ["0.6.10", "0.6.11"])
+            self.assertEqual(summary["failed"], [])
+            text = log.read_text(encoding="utf-8")
+            self.assertIn("cleanup deleted version=0.6.8", text)
+            self.assertIn("cleanup deleted version=0.6.9", text)
+            self.assertIn("reason=keep_running_or_previous", text)
+            self.assertIn(
+                "cleanup finished running=0.6.11 kept=0.6.10,0.6.11 deleted=2 skipped=2 failed=0",
+                text,
+            )
+
+    def test_cleanup_never_removes_the_running_image_or_a_locked_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / ".code"
+            root.mkdir()
+            for version in ("0.6.7", "0.6.8", "0.6.9", "0.6.10", "0.6.11"):
+                (root / f"Code-v{version}.exe").write_bytes(b"MZ" + version.encode("utf-8"))
+            log = root / "update.log"
+            running = root / "Code-v0.6.9.exe"
+            locked = root / "Code-v0.6.8.exe"
+            handle = open(locked, "rb")
+            try:
+                summary = server._cleanup_old_update_images(
+                    root, running_version="0.6.11", running_image=running, log_path=log,
+                )
+            finally:
+                handle.close()
+            self.assertTrue(running.exists())
+            self.assertFalse((root / "Code-v0.6.7.exe").exists())
+            text = log.read_text(encoding="utf-8")
+            self.assertIn("reason=running_image", text)
+            self.assertIn("cleanup finished", text)
+            if os.name == "nt":
+                # an occupied image is never forced out; the cleanup just reports it
+                self.assertTrue(locked.exists())
+                self.assertEqual([item["version"] for item in summary["failed"]], ["0.6.8"])
+                self.assertIn("cleanup failed version=0.6.8", text)
+            self.assertEqual([item["version"] for item in summary["deleted"]], ["0.6.7"])
+
+    def test_cleanup_is_idempotent_and_logs_every_decision(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / ".code"
+            root.mkdir()
+            for version in ("0.6.8", "0.6.9", "0.6.10", "0.6.11"):
+                (root / f"Code-v{version}.exe").write_bytes(b"MZ")
+            log = root / "update.log"
+            first = server._cleanup_old_update_images(
+                root, running_version="0.6.11", running_image=root / "Code-v0.6.11.exe", log_path=log,
+            )
+            second = server._cleanup_old_update_images(
+                root, running_version="0.6.11", running_image=root / "Code-v0.6.11.exe", log_path=log,
+            )
+            self.assertEqual(sorted(item["version"] for item in first["deleted"]), ["0.6.8", "0.6.9"])
+            self.assertEqual(second["deleted"], [])
+            self.assertEqual(second["failed"], [])
+            text = log.read_text(encoding="utf-8")
+            self.assertEqual(text.count("cleanup deleted version=0.6.8"), 1)
+            self.assertEqual(text.count("cleanup deleted version=0.6.9"), 1)
+            self.assertIn("cleanup finished running=0.6.11 kept=0.6.10,0.6.11 deleted=0 skipped=2 failed=0", text)
+
+    def test_cleanup_removes_only_closed_out_paired_journals(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / ".code"
+            root.mkdir()
+            for version in ("0.6.8", "0.6.9", "0.6.10", "0.6.11"):
+                (root / f"Code-v{version}.exe").write_bytes(b"MZ")
+            log = root / "update.log"
+            closed = self._write_version_journal(root, "0.6.8", "failed", stage="completed")
+            unclosed = self._write_version_journal(root, "0.6.9", "installing")
+            summary = server._cleanup_old_update_images(
+                root, running_version="0.6.11", running_image=root / "Code-v0.6.11.exe", log_path=log,
+            )
+            self.assertFalse((root / "Code-v0.6.8.exe").exists())
+            self.assertFalse(closed.exists())
+            self.assertTrue((root / "Code-v0.6.9.exe").exists())
+            self.assertTrue(unclosed.exists())
+            self.assertEqual([item["version"] for item in summary["deleted"]], ["0.6.8"])
+            text = log.read_text(encoding="utf-8")
+            self.assertIn("reason=journal_installing", text)
+            self.assertIn("cleanup journal=Code-v0.6.8.exe.update.json result=deleted", text)
+            # no journal may be left pointing at a candidate that no longer exists
+            for journal in root.glob("*.update.json"):
+                payload = json.loads(journal.read_text(encoding="utf-8"))
+                self.assertTrue((root / payload["descriptor"]["name"]).exists(), journal.name)
+
     def test_update_helper_rejects_install_root_outside_formal_data_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
@@ -4105,6 +4230,79 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
             ],
         )
         owner.release.assert_not_called()
+
+    def test_run_server_reclaims_old_images_only_after_a_frozen_start(self):
+        def run(cleanup):
+            events = []
+            owner = mock.Mock()
+
+            class FakeHttpServer:
+                daemon_threads = False
+
+                def __init__(self, address, handler):
+                    events.append("http")
+                    self.socket = mock.Mock()
+
+                def serve_forever(self):
+                    events.append("serve")
+
+            def record(name):
+                return lambda *args, **kwargs: events.append(name)
+
+            with mock.patch.object(server.os, "chdir"), \
+                 mock.patch.object(server, "_ensure_runtime_data_directories", side_effect=record("directories")), \
+                 mock.patch.object(server, "_initialize_immutable_skill_runtime", side_effect=record("skills")), \
+                 mock.patch.object(server, "_initialize_runtime_data_services", side_effect=record("route-catalogs")), \
+                 mock.patch.object(server, "_restore_update_jobs", side_effect=record("restore")), \
+                 mock.patch.object(server, "_migrate_sessions_to_hierarchy", side_effect=record("sessions")), \
+                 mock.patch.object(server, "_migrate_codex_project_sessions_support", side_effect=record("projects")), \
+                 mock.patch.object(server, "_migrate_project_root_paths", side_effect=record("roots")), \
+                 mock.patch.object(server, "_start_agent_run_nonterminal_index_build", side_effect=record("nonterminal-index")), \
+                 mock.patch.object(server, "_start_agent_run_session_index_build", side_effect=record("session-index")), \
+                 mock.patch.object(server, "_cleanup_old_update_images", side_effect=cleanup(events)), \
+                 mock.patch.object(server, "load_config", return_value={"projectRoot": "C:/workspace"}):
+                result = server.run_server(
+                    owner_acquire=mock.Mock(return_value=owner),
+                    server_factory=FakeHttpServer,
+                    tray_starter=lambda port, httpd: events.append("tray"),
+                )
+            return result, events
+
+        calls = []
+
+        def recording_cleanup(events):
+            def cleanup(*args, **kwargs):
+                calls.append((args, kwargs))
+                events.append("cleanup")
+            return cleanup
+
+        def failing_cleanup(events):
+            def cleanup(*args, **kwargs):
+                events.append("cleanup")
+                raise OSError("disk full")
+            return cleanup
+
+        with mock.patch.object(server.sys, "frozen", True, create=True):
+            frozen_target = server._update_target_dir()
+            frozen_log = server.DATA_DIR / "update.log"
+            result, events = run(recording_cleanup)
+        self.assertEqual(result, 0)
+        self.assertEqual(calls[0][0], (frozen_target,))
+        self.assertEqual(calls[0][1]["log_path"], frozen_log)
+        # reclaiming happens after the instance is up: never inside the handoff
+        self.assertLess(events.index("tray"), events.index("cleanup"))
+        self.assertLess(events.index("cleanup"), events.index("serve"))
+
+        with mock.patch.object(server.sys, "frozen", True, create=True):
+            result, events = run(failing_cleanup)
+        self.assertEqual(result, 0)
+        self.assertIn("serve", events)
+
+        calls.clear()
+        result, events = run(recording_cleanup)
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+        self.assertNotIn("cleanup", events)
 
     def test_run_server_busy_owner_stops_before_runtime_initialization(self):
         owner_acquire = mock.Mock(

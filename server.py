@@ -13063,6 +13063,163 @@ def _pending_update_handoff(data_dir=None):
     return candidates[0][1]
 
 
+_CODE_IMAGE_NAME_RE = re.compile(r"^Code-v(\d+(?:\.\d+)+)\.exe$")
+
+
+def _paired_update_journal_paths(target_dir, image_name):
+    """Return the journal paths that can reference *image_name*.
+
+    The updater writes <image>.update.json while the recovery reader accepts any
+    *.update.json, so both spellings are honoured before an image is removed.
+    """
+    root = _absolute_lexical_path(target_dir)
+    version = image_name[len("Code-v"):-len(".exe")] if image_name.endswith(".exe") else image_name
+    return (root / f"{image_name}.update.json", root / f"Code-v{version}.update.json")
+
+
+def _journal_terminal_state(path):
+    """Return True (closed out), False (a handoff still owns it) or None (untrusted)."""
+    try:
+        info = _lstat_or_none(path)
+    except OSError:
+        return None
+    if info is None:
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or _path_stat_is_reparse(info)
+        or int(getattr(info, "st_nlink", 1)) != 1
+    ):
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != _UPDATE_JOB_SCHEMA:
+        return None
+    if str(payload.get("status") or "") == "installing" or str(payload.get("stage") or "") == "installing":
+        return False
+    return str(payload.get("status") or "") in {"completed", "failed", "installed"}
+
+
+def _update_image_journal_state(target_dir, image_name):
+    """Return (journals, blocking_reason) for the journals paired with an image.
+
+    An empty blocking_reason means the image is safe to delete: nothing points at
+    it, or every paired journal is already closed out.  Otherwise the reason names
+    why the image must stay, so that no unclosed journal can be left pointing at a
+    candidate file that no longer exists.
+    """
+    journals = []
+    blocking = ""
+    for path in _paired_update_journal_paths(target_dir, image_name):
+        try:
+            present = _lstat_or_none(path) is not None
+        except OSError:
+            present = False
+        if not present:
+            continue
+        journals.append(path)
+        state = _journal_terminal_state(path)
+        if state is False:
+            blocking = "journal_installing"
+        elif state is not True and not blocking:
+            blocking = "journal_unverified"
+    return journals, blocking
+
+
+def _delete_paired_update_journals(target_dir, journals):
+    """Best-effort removal of the closed-out journals paired with a deleted image."""
+    results = []
+    root = _absolute_lexical_path(target_dir)
+    for journal in journals:
+        try:
+            _validate_safe_update_file(journal, root, allowed_names={journal.name}, required=True)
+            journal.unlink()
+            results.append((journal.name, "deleted"))
+        except (_UpdateFailure, OSError) as exc:
+            results.append((journal.name, "failed:" + str(exc)))
+    return results
+
+
+def _cleanup_old_update_images(target_dir, *, running_version=None, running_image=None, log_path=None):
+    """Delete Code-v*.exe images strictly older than the kept previous version.
+
+    This runs in a *started* instance, never in the handoff script: the v0.6.8
+    regression died in the handoff because that script removed a running image.
+    The policy keeps the running version plus the newest version below it and
+    removes only what is strictly older than both.
+
+    The cleanup is bounded and best-effort: only regular version-named files in
+    the install root, never the running image, never an image whose paired journal
+    is not already closed out, and no failure can affect startup or an exit code.
+    Every decision is recorded in the update log.
+    """
+    root = _absolute_lexical_path(target_dir)
+    version = str(running_version if running_version is not None else _read_version_file() or "").strip()
+    running_key = _update_version_key(version)
+    exclude = os.path.normcase(str(_absolute_lexical_path(running_image or sys.executable)))
+    log_target = Path(log_path) if log_path else root / "update.log"
+    summary = {"running": version, "kept": [], "deleted": [], "skipped": [], "failed": []}
+    if running_key is None:
+        _append_sidecar_log(log_target, "cleanup skipped reason=unknown_running_version value=%s" % version)
+        return summary
+    images = []
+    try:
+        for child in sorted(root.glob("Code-v*.exe")):
+            matched = _CODE_IMAGE_NAME_RE.match(child.name)
+            if not matched:
+                continue
+            key = _update_version_key(matched.group(1))
+            if key is None:
+                continue
+            images.append((key, matched.group(1), child))
+    except OSError as exc:
+        _append_sidecar_log(log_target, "cleanup failed reason=scan_failed error=%s" % exc)
+        return summary
+    keys = sorted({key for key, _text, _path in images}, reverse=True)
+    keep = {running_key}
+    previous = next((key for key in keys if key < running_key), None)
+    if previous is not None:
+        keep.add(previous)
+    for key, text, path in images:
+        reason = ""
+        if os.path.normcase(str(_absolute_lexical_path(path))) == exclude:
+            reason = "running_image"
+        elif key in keep:
+            reason = "keep_running_or_previous"
+        else:
+            journals, reason = _update_image_journal_state(root, path.name)
+        if reason:
+            summary["skipped"].append({"version": text, "path": str(path), "reason": reason})
+            _append_sidecar_log(log_target, "cleanup skip version=%s path=%s reason=%s" % (text, path, reason))
+            continue
+        try:
+            _validate_safe_update_file(path, root, allowed_names={path.name}, required=True)
+            path.unlink()
+        except (_UpdateFailure, OSError) as exc:
+            summary["failed"].append({"version": text, "path": str(path), "error": str(exc)})
+            _append_sidecar_log(log_target, "cleanup failed version=%s path=%s error=%s" % (text, path, exc))
+            continue
+        summary["deleted"].append({"version": text, "path": str(path)})
+        _append_sidecar_log(log_target, "cleanup deleted version=%s path=%s" % (text, path))
+        journals, _blocking = _update_image_journal_state(root, path.name)
+        for name, result in _delete_paired_update_journals(root, journals):
+            _append_sidecar_log(log_target, "cleanup journal=%s result=%s" % (name, result))
+    summary["kept"] = sorted(
+        (text for key, text, _path in images if key in keep), key=_update_version_key,
+    )
+    if images:
+        _append_sidecar_log(
+            log_target,
+            "cleanup finished running=%s kept=%s deleted=%d skipped=%d failed=%d"
+            % (version, ",".join(summary["kept"]) or "none",
+               len(summary["deleted"]), len(summary["skipped"]), len(summary["failed"])),
+        )
+    return summary
+
+
 def _launch_replacement_process(path):
     """Start a replacement executable the same way the updater does."""
     try:
@@ -30853,6 +31010,14 @@ def run_server(
     print(f"Code is running: http://127.0.0.1:{PORT}")
     print(f"Proxy upstream: {NEW_API_BASE_URL}")
     print(f"Project root: {load_config()['projectRoot']}")
+    # Old images are reclaimed only by an instance that has already started: the
+    # v0.6.8 regression died inside the handoff script, which tried to remove a
+    # running image.  Best-effort, bounded, and never able to break startup.
+    if getattr(sys, "frozen", False):
+        try:
+            _cleanup_old_update_images(_update_target_dir(), log_path=DATA_DIR / "update.log")
+        except Exception:
+            pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:
