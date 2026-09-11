@@ -4438,6 +4438,14 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in install_root.glob("Code-v*.exe")), before)
         self.assertFalse((install_root / "update.log").exists())
 
+    def test_legacy_keep_only_latest_cleanup_stays_deleted(self):
+        # The old dead helper deleted every image except the newest, which
+        # contradicts the keep-running-and-previous policy and had no caller.
+        self.assertFalse(hasattr(server, "_cleanup_old_versions"))
+        source = Path(server.__file__).resolve().read_text(encoding="utf-8")
+        self.assertNotIn("_cleanup_old_versions", source)
+        self.assertNotIn("keeping only the latest", source)
+
     def test_cleanup_is_not_wired_into_the_launcher_or_the_handoff_script(self):
         root = Path(server.__file__).resolve().parent
         launcher_source = (root / "launcher.py").read_text(encoding="utf-8")

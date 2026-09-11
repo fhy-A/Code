@@ -12775,31 +12775,6 @@ def _read_remote_version():
     return descriptor["version"], descriptor["url"]
 
 
-def _cleanup_old_versions(target_dir):
-    """Delete older versioned Code-v*.exe files, keeping only the latest."""
-    pat = re.compile(r'^Code-v([\d.]+)\.exe$')
-    candidates = []
-    try:
-        for f in target_dir.iterdir():
-            m = pat.match(f.name)
-            if m and f.is_file():
-                try:
-                    ver = tuple(int(x) for x in m.group(1).split("."))
-                    candidates.append((ver, f))
-                except Exception:
-                    pass
-    except Exception:
-        return
-    if len(candidates) <= 1:
-        return
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    for _, f in candidates[1:]:
-        try:
-            f.unlink()
-        except Exception:
-            pass
-
-
 def _read_pe_header_state(path):
     """Return (ok, detail) for the bounded DOS/PE header check.
 
