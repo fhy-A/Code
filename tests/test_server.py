@@ -33,6 +33,49 @@ import launcher
 from code_runtime import data_dir_owner
 
 
+_DIALOG_GUARD = None
+_BUILT_UPDATE_SCRIPTS = []
+_REAL_BUILD_UPDATE_SCRIPT = None
+
+
+def setUpModule():
+    """Guarantee this module leaves no visible window and no fixture file behind.
+
+    A frozen startup path reaches a real modal dialog, and _build_update_script
+    writes a temporary .bat that only self-deletes when it actually runs.  Both are
+    stubbed or tracked for the whole module: a fixture must never open a visible
+    window on the user's desktop, and it must never leave a file in %TEMP%.  Tests
+    that assert the dialog layer patch _show_message_box themselves with their own
+    stand-in, which simply nests over this no-op guard.
+    """
+    global _DIALOG_GUARD, _REAL_BUILD_UPDATE_SCRIPT
+    _DIALOG_GUARD = mock.patch.object(server, "_show_message_box", return_value=0)
+    _DIALOG_GUARD.start()
+    _REAL_BUILD_UPDATE_SCRIPT = server._build_update_script
+
+    def _tracking_build(*args, **kwargs):
+        path = _REAL_BUILD_UPDATE_SCRIPT(*args, **kwargs)
+        _BUILT_UPDATE_SCRIPTS.append(Path(path))
+        return path
+
+    server._build_update_script = _tracking_build
+
+
+def tearDownModule():
+    global _DIALOG_GUARD
+    if _REAL_BUILD_UPDATE_SCRIPT is not None:
+        server._build_update_script = _REAL_BUILD_UPDATE_SCRIPT
+    for path in _BUILT_UPDATE_SCRIPTS:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    _BUILT_UPDATE_SCRIPTS.clear()
+    if _DIALOG_GUARD is not None:
+        _DIALOG_GUARD.stop()
+        _DIALOG_GUARD = None
+
+
 def _fake_pe_bytes(size=8192):
     payload = bytearray(max(size, 256))
     payload[:2] = b"MZ"
@@ -2090,13 +2133,6 @@ class TestUpdaterHelpers(unittest.TestCase):
             "updatedAt": "2026-09-11T10:55:07Z",
         }), encoding="utf-8")
         return journal
-
-    def _install_root_with_images(self, versions):
-        root = Path(tempfile.mkdtemp()) / ".code"
-        root.mkdir(parents=True)
-        for version in versions:
-            (root / f"Code-v{version}.exe").write_bytes(b"MZ" + version.encode("utf-8"))
-        return root
 
     def test_cleanup_keeps_running_and_previous_version_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -4349,6 +4385,7 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
 
         install_root = Path(tempfile.mkdtemp()) / ".code"
         install_root.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, install_root.parent, ignore_errors=True)
         for version in ("0.6.8", "0.6.9", "0.6.10", "0.6.11"):
             (install_root / f"Code-v{version}.exe").write_bytes(b"MZ" + version.encode("utf-8"))
         before = sorted(path.name for path in install_root.glob("Code-v*.exe"))
@@ -4396,8 +4433,10 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
                 stack.enter_context(mock.patch.object(server, "_start_agent_run_session_index_build", side_effect=record("session-index")))
                 stack.enter_context(mock.patch.object(server, "load_config", return_value={"projectRoot": "C:/workspace"}))
                 stack.enter_context(mock.patch("sys.stderr", io.StringIO()))
-                # a frozen build surfaces startup failures in a real modal dialog;
-                # the fixture must never pop a visible window
+                # a frozen build surfaces startup failures in a modal dialog; the
+                # fixture asserts that decision through stand-ins and never opens
+                # a visible window itself
+                stack.enter_context(mock.patch.object(server, "_startup_dialog_enabled", return_value=True))
                 stack.enter_context(mock.patch.object(
                     server, "_show_message_box",
                     side_effect=lambda *args, **kwargs: dialogs.append(args) or 0,
