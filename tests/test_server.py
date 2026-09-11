@@ -36,6 +36,66 @@ from code_runtime import data_dir_owner
 _DIALOG_GUARD = None
 _BUILT_UPDATE_SCRIPTS = []
 _REAL_BUILD_UPDATE_SCRIPT = None
+_PRODUCT_DIALOG_TITLES = ("Code 无法启动", "Code 更新未完成")
+_FIXTURE_DIRS_BEFORE = set()
+_TEMP_BATS_BEFORE = set()
+
+
+def _fixture_temp_dirs():
+    """Temp directories that only one of our fixtures can create."""
+    found = set()
+    for entry in Path(tempfile.gettempdir()).glob("tmp*"):
+        if not entry.is_dir():
+            continue
+        if (entry / ".code.startup-error.log").exists() or (entry / ".code" / "update.log").exists():
+            found.add(entry)
+    return found
+
+
+def _temp_update_bats():
+    return set(Path(tempfile.gettempdir()).glob("code-update-*.bat"))
+
+
+def _visible_product_dialog_count():
+    """Count visible Win32 dialogs belonging to this product; 0 on any failure."""
+    if os.name != "nt":
+        return 0
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        seen = [0]
+        callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def callback(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            title = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title, length + 1)
+            cls = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, cls, 256)
+            if cls.value == "#32770" or title.value.startswith(_PRODUCT_DIALOG_TITLES):
+                seen[0] += 1
+            return True
+
+        user32.EnumWindows(callback_type(callback), 0)
+        return seen[0]
+    except Exception:
+        return 0
+
+
+def _fixture_process_count():
+    """Count Code-v*.exe processes whose image lives in the fixture temp area."""
+    temp = str(Path(tempfile.gettempdir())).lower()
+    try:
+        return len([
+            item for item in server._running_code_image_processes(limit=50)
+            if str(item.get("path") or "").lower().startswith(temp)
+        ])
+    except Exception:
+        return 0
 
 
 def setUpModule():
@@ -48,9 +108,12 @@ def setUpModule():
     that assert the dialog layer patch _show_message_box themselves with their own
     stand-in, which simply nests over this no-op guard.
     """
-    global _DIALOG_GUARD, _REAL_BUILD_UPDATE_SCRIPT
+    global _DIALOG_GUARD, _REAL_BUILD_UPDATE_SCRIPT, _FIXTURE_DIRS_BEFORE, _TEMP_BATS_BEFORE
     _DIALOG_GUARD = mock.patch.object(server, "_show_message_box", return_value=0)
     _DIALOG_GUARD.start()
+    # snapshot the fixture area so the batch check reports only what this run left
+    _FIXTURE_DIRS_BEFORE = _fixture_temp_dirs()
+    _TEMP_BATS_BEFORE = _temp_update_bats()
     _REAL_BUILD_UPDATE_SCRIPT = server._build_update_script
 
     def _tracking_build(*args, **kwargs):
@@ -74,6 +137,22 @@ def tearDownModule():
     if _DIALOG_GUARD is not None:
         _DIALOG_GUARD.stop()
         _DIALOG_GUARD = None
+    # Batch self-check: a fixture run must leave no visible window, no fixture
+    # process, no new fixture directory and no new temporary .bat.  Any non-zero
+    # count fails the batch instead of leaking onto the user's desktop.
+    windows = _visible_product_dialog_count()
+    processes = _fixture_process_count()
+    new_dirs = sorted(_fixture_temp_dirs() - _FIXTURE_DIRS_BEFORE)
+    new_bats = sorted(_temp_update_bats() - _TEMP_BATS_BEFORE)
+    print(
+        "fixture_selfcheck: visible_product_dialogs=%d fixture_processes=%d new_fixture_dirs=%d new_temp_bats=%d"
+        % (windows, processes, len(new_dirs), len(new_bats))
+    )
+    if windows or processes or new_dirs or new_bats:
+        raise AssertionError(
+            "fixture self-check failed: windows=%d processes=%d dirs=%s bats=%s"
+            % (windows, processes, [str(item) for item in new_dirs], [str(item) for item in new_bats])
+        )
 
 
 def _fake_pe_bytes(size=8192):
