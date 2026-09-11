@@ -1822,6 +1822,80 @@ class TestUpdaterHelpers(unittest.TestCase):
             self.assertIn("already in use", dialogs[0][1])
             self.assertIn(str(log_path), dialogs[0][1])
 
+    def test_startup_failure_dialog_lists_running_code_processes(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            dialogs = []
+            processes = [{
+                "pid": 4242,
+                "name": "Code-v0.6.11.exe",
+                "path": r"C:\Users\someone\.code\Code-v0.6.11.exe",
+            }]
+            with mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                    mock.patch.object(
+                        server, "_show_message_box",
+                        side_effect=lambda *args, **kwargs: dialogs.append(args) or 1,
+                    ), \
+                    mock.patch.object(
+                        server, "_running_code_image_processes", return_value=processes,
+                    ):
+                log_path = server._report_startup_failure(
+                    "data_dir_owner",
+                    "Code cannot start because this data directory is already in use.",
+                    data_dir=data_dir,
+                )
+            body = dialogs[0][1]
+            self.assertIn("PID 4242", body)
+            self.assertIn("Code-v0.6.11.exe", body)
+            self.assertIn("Running Code processes:", body)
+            self.assertIn("当前正在运行的 Code 进程：", body)
+            self.assertIn("托盘图标", body)
+            self.assertIn("tray icon", body)
+            logged = log_path.read_text(encoding="utf-8")
+            self.assertIn("running_code_processes=", logged)
+            self.assertIn("pid=4242", logged)
+            self.assertIn("Code-v0.6.11.exe", logged)
+
+    def test_startup_failure_dialog_omits_the_process_section_when_none_is_running(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            dialogs = []
+            with mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                    mock.patch.object(
+                        server, "_show_message_box",
+                        side_effect=lambda *args, **kwargs: dialogs.append(args) or 1,
+                    ), \
+                    mock.patch.object(server, "_running_code_image_processes", return_value=[]):
+                log_path = server._report_startup_failure(
+                    "data_dir_owner",
+                    "Code cannot start because this data directory is already in use.",
+                    data_dir=data_dir,
+                )
+            body = dialogs[0][1]
+            self.assertNotIn("PID ", body)
+            self.assertNotIn("Running Code processes:", body)
+            self.assertNotIn("当前正在运行的 Code 进程：", body)
+            # the actionable guidance stays even when nothing can be enumerated
+            self.assertIn("托盘图标", body)
+            self.assertIn("tray icon", body)
+            self.assertIn("running_code_processes=none", log_path.read_text(encoding="utf-8"))
+
+    def test_running_code_process_enumeration_is_read_only_and_never_raises(self):
+        result = server._running_code_image_processes(limit=3)
+        self.assertIsInstance(result, list)
+        self.assertLessEqual(len(result), 3)
+        for item in result:
+            self.assertEqual(set(item), {"pid", "name", "path"})
+            self.assertTrue(server._CODE_IMAGE_PROCESS_RE.match(item["name"]))
+            self.assertGreater(item["pid"], 0)
+        reader = inspect.getsource(server._process_image_path)
+        enumerator = inspect.getsource(server._running_code_image_processes)
+        # only the least-privilege query right, and no termination capability at all
+        self.assertIn("0x1000", reader)
+        self.assertNotIn("TerminateProcess", reader + enumerator)
+
     def test_pending_handoff_recovery_requires_a_verified_official_candidate(self):
         descriptor = {
             "version": "9.9.9",

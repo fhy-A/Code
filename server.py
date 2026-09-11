@@ -12867,19 +12867,159 @@ def _show_message_box(title, text, flags=0x00000010 | 0x00040000):
         return None
 
 
+_CODE_IMAGE_PROCESS_RE = re.compile(r"^Code-v(\d+(?:\.\d+)+)\.exe$", re.IGNORECASE)
+_RUNNING_CODE_IMAGE_LIMIT = 5
+
+
+def _process_image_path(pid):
+    """Return a readable image path for *pid*, or "" when it cannot be read.
+
+    Read-only and privilege-free: the handle is opened with
+    PROCESS_QUERY_LIMITED_INFORMATION only, which is what a normal user may do.
+    Failure is normal (another user, a protected process) and must stay silent.
+    """
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return ""
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return ""
+        try:
+            size = ctypes.c_uint32(32768)
+            buffer = ctypes.create_unicode_buffer(size.value)
+            if not kernel32.QueryFullProcessImageNameW(
+                ctypes.c_void_p(handle), 0, buffer, ctypes.byref(size),
+            ):
+                return ""
+            return buffer.value
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+    except Exception:
+        return ""
+
+
+def _running_code_image_processes(limit=_RUNNING_CODE_IMAGE_LIMIT):
+    """Best-effort list of running Code-v*.exe processes: PID plus readable path.
+
+    Read-only evidence for the user, never an action: nothing here terminates,
+    suspends or preempts a process, and nothing here reads another process's
+    memory or data.  Any failure yields an empty list so the caller simply omits
+    the section instead of failing the startup path.
+    """
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return []
+    results = []
+    snapshot = None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if not snapshot or int(snapshot) in (-1, 0):
+            return []
+
+        class _ProcessEntry32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_uint32),
+                ("cntUsage", ctypes.c_uint32),
+                ("th32ProcessID", ctypes.c_uint32),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", ctypes.c_uint32),
+                ("cntThreads", ctypes.c_uint32),
+                ("th32ParentProcessID", ctypes.c_uint32),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_uint32),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        entry = _ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(_ProcessEntry32W)
+        if not kernel32.Process32FirstW(ctypes.c_void_p(snapshot), ctypes.byref(entry)):
+            return []
+        while True:
+            name = str(entry.szExeFile or "")
+            if _CODE_IMAGE_PROCESS_RE.match(name):
+                pid = int(entry.th32ProcessID)
+                results.append({"pid": pid, "name": name, "path": _process_image_path(pid)})
+                if len(results) >= max(1, int(limit)):
+                    break
+            if not kernel32.Process32NextW(ctypes.c_void_p(snapshot), ctypes.byref(entry)):
+                break
+    except Exception:
+        return results[: max(1, int(limit))]
+    finally:
+        if snapshot:
+            try:
+                kernel32.CloseHandle(ctypes.c_void_p(snapshot))
+            except Exception:
+                pass
+    return results
+
+
+def _startup_occupancy_guidance(processes=None):
+    """Return (dialog_text, log_summary) for an occupied data directory.
+
+    The guide is actionable and bilingual, and it never offers to free the lock:
+    Code still refuses to start, and no process is ever terminated or preempted.
+    """
+    if processes is None:
+        processes = _running_code_image_processes()
+    entries = []
+    for item in processes:
+        label = str(item.get("path") or item.get("name") or "")
+        entries.append("  PID %s  %s" % (item.get("pid"), label))
+    english = [
+        "Another Code instance may still be running, or a previous one did not exit cleanly.",
+    ]
+    chinese = [
+        "可能有另一个 Code 实例仍在运行，或上一次退出不干净。",
+    ]
+    if entries:
+        english.append("Running Code processes:")
+        chinese.append("当前正在运行的 Code 进程：")
+        english.extend(entries)
+        chinese.extend(entries)
+    english.append(
+        "Quit the other Code instance (tray icon -> Quit), then start Code again, or restart the computer."
+    )
+    chinese.append(
+        "请退出其它 Code 实例（托盘图标右键 → 退出）后重新打开 Code，或重启计算机。"
+    )
+    summary = "running_code_processes=" + (
+        ";".join(
+            "pid=%s path=%s" % (item.get("pid"), item.get("path") or item.get("name") or "")
+            for item in processes
+        )
+        if processes else "none"
+    )
+    return "\n\n".join(["\n".join(english), "\n".join(chinese)]), summary
+
+
 def _report_startup_failure(code, message, *, detail=None, data_dir=None):
     """Persist a reviewable startup failure and surface it where a user can see it."""
     log_path = _startup_error_log_path(data_dir)
+    guidance = ""
+    occupancy = ""
+    if code == "data_dir_owner":
+        guidance, occupancy = _startup_occupancy_guidance()
     line = f"stage=startup code={code} message={message}"
     if detail:
         line += f" detail={detail}"
+    if occupancy:
+        line += f" {occupancy}"
     written = _append_sidecar_log(log_path, line)
     if _startup_dialog_enabled():
         body = message
+        if guidance:
+            body += "\n\n" + guidance
         if written:
-            body += f"\n\n详情已写入：{log_path}"
+            body += f"\n\n详情已写入 / Details written to: {log_path}"
         _show_message_box("Code 无法启动", body)
     return log_path
+
+
+
 
 
 def _update_handoff_closeout_state(entry_version, running_version):
