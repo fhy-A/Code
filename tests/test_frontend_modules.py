@@ -12,6 +12,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_SOURCE = (ROOT / "app.js").read_text(encoding="utf-8")
+# Isolated Agent fixtures use the production ownership and presentation helpers.
+ACTIVE_RUN_CONTEXT_SOURCE = APP_SOURCE[
+    APP_SOURCE.index("function claimActiveRunContext("):
+    APP_SOURCE.index("function _formatAgentError(")
+]
+AGENT_PRESENTATION_SETUP = """
+global.window = {};
+require("./src/core/namespace.js");
+require("./src/agent/model-request.js");
+require("./src/agent/tools.js");
+require("./src/ui/messages.js");
+const Code = window.Code;
+const {isToolPlanningPlaceholder, isOperationalToolNotice} = Code.ui.messages;
+"""
 SERVER_SOURCE = (ROOT / "server.py").read_text(encoding="utf-8")
 RUNTIME_SOURCE = (ROOT / "agent-runtime.js").read_text(encoding="utf-8")
 STATE_SOURCE = (ROOT / "src" / "core" / "state.js").read_text(encoding="utf-8")
@@ -3968,6 +3982,8 @@ const setAgentProjectionShadowEnabled = () => {{}};
             loop_source.index('if (snapshot.status === "waiting_credentials") {'),
         )
         script = f"""
+{AGENT_PRESENTATION_SETUP}
+{ACTIVE_RUN_CONTEXT_SOURCE}
 const loopSource = {json.dumps(loop_source)};
 const _skillActivationCanonicalEnabled = false;
 const state = {{sessionId: "session-1", skills: [], disabledSkills: new Set()}};
@@ -3980,7 +3996,6 @@ const applySkillTaskPolicy = (tools) => tools;
 const getSkillToolBudgets = () => [];
 const getNativeTools = () => [];
 const ensureSessionRun = () => ({{abortController: new AbortController()}});
-const claimActiveRunContext = () => true;
 const buildModelRequestPayload = async () => ({{payload: {{model: "trusted-model"}}}});
 const getModelContextResolution = () => ({{
   inputBudgetInsufficient: false,
@@ -7829,6 +7844,11 @@ const byName = Object.fromEntries(definitions.map((tool) => [tool.function.name,
 process.stdout.write(JSON.stringify({
   names: definitions.map((tool) => tool.function.name),
   hash: crypto.createHash("sha256").update(before).digest("hex"),
+  actionStatusSchemas: definitions.map((tool) => ({
+    name: tool.function.name,
+    schema: tool.function.parameters.properties._actionStatus || null,
+    required: (tool.function.parameters.required || []).includes("_actionStatus"),
+  })),
   unchanged: JSON.stringify(definitions) === before,
   selectedNames: selected.map((tool) => tool.function.name),
   selectionIsNewArray: selected !== definitions,
@@ -7891,8 +7911,18 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["hash"],
-            "2f41261a05a4ea83152e695ecf5ced10bd5819fd80337ea9bbe997f20a880b60",
+            "23df31e4f0a91f44094c742eb42de7e1ab307d2f2662fe024762dd12f484dab4",
         )
+        for tool in data["actionStatusSchemas"]:
+            self.assertFalse(tool["required"], tool["name"])
+            if tool["name"] == "request_user_input":
+                self.assertIsNone(tool["schema"])
+            else:
+                self.assertEqual(tool["schema"], {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": "Optional current action and purpose; one line, at most 80 Unicode code points. Omit when unhelpful; display only.",
+                }, tool["name"])
         self.assertTrue(data["unchanged"])
         self.assertTrue(data["selectionIsNewArray"])
         self.assertEqual(data["selectedNames"], ["request_user_input", "read_file"])
@@ -7909,7 +7939,7 @@ process.stdout.write(JSON.stringify({
             data["questionnaireOptionRequired"],
             ["value", "label", "recommended"],
         )
-        self.assertEqual(data["runCommandProperties"], ["command"])
+        self.assertEqual(data["runCommandProperties"], ["command", "_actionStatus"])
         self.assertIn("runtimeResources", data["useSkillDescription"])
         self.assertIn("精确路径", data["useSkillDescription"])
         self.assertIn("不得搜索或复制资源", data["useSkillDescription"])
@@ -7919,7 +7949,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["imageProperties"],
-            ["prompt", "reference", "count"],
+            ["prompt", "reference", "count", "_actionStatus"],
         )
         self.assertEqual(data["imageRequired"], ["prompt"])
         self.assertEqual(data["imageReferenceRequired"], ["type", "id"])
@@ -7929,7 +7959,7 @@ process.stdout.write(JSON.stringify({
         )
         self.assertEqual(
             data["imageAssetProperties"],
-            ["operation", "assetId", "path", "name"],
+            ["operation", "assetId", "path", "name", "_actionStatus"],
         )
         self.assertEqual(data["imageAssetOperations"], ["export", "rename"])
         self.assertIn("const nativeTools = [", TOOLS_SOURCE)
@@ -25664,11 +25694,14 @@ eval(saveSource);
         )
 
         script = f"""
+{AGENT_PRESENTATION_SETUP}
+{ACTIVE_RUN_CONTEXT_SOURCE}
 const rebaseSource = {json.dumps(rebase_source)};
 const summarySource = {json.dumps(summary_source)};
 const eventSource = {json.dumps(event_source)};
 const clone = (value) => structuredClone(value);
 const sessionId = "questionnaire-cas";
+const state = {{sessionId}};
 const authority = {{
   id: sessionId,
   revision: 9,
@@ -25726,6 +25759,7 @@ const ctx = {{
   clientRequestId: "client-1",
   run: {{agentRunId: "agent-1", agentEventCursor: 7, runtimeRunId: "stale-runtime", modelRound: 4}},
 }};
+claimActiveRunContext(ctx);
 const recovery = rebaseActiveServerAgentProjection(ctx, authority);
 const rebasedMessages = ctx.messages;
 
@@ -26127,6 +26161,66 @@ eval(finishSource);
         }])
         self.assertEqual(data["runState"], authority_run_state)
 
+    def test_action_status_projection_resets_when_context_loses_real_ownership(self):
+        event_start = APP_SOURCE.index("async function projectAgentEvent(")
+        event_end = APP_SOURCE.index("async function requestServerAgentInput(", event_start)
+        script = f"""
+{AGENT_PRESENTATION_SETUP}
+{ACTIVE_RUN_CONTEXT_SOURCE}
+const assert = require("node:assert/strict");
+const state = {{sessionId: "session"}};
+const snapshot = {{sessionId: "session", agentRunId: "agent", status: "tools"}};
+const run = {{agentEventCursor: 0}};
+const ctx = {{sessionId: "session", agentRunId: "agent", messages: [], run,
+  _actionStatus: Code.agent.tools.createActionStatusObserver("session", "agent", true)}};
+ctx._actionStatus.observe(snapshot);
+const isInternalGoalToolName = () => false;
+const beginAgentProjectionEvent = () => true;
+const completeAgentProjectionEvent = () => {{}};
+const captureAgentProjectionUsageCheckpoint = () => null;
+const internalCompactionRuntimeIds = () => new Set();
+const projectAgentModelCompleted = () => {{}};
+const projectAgentToolStarted = () => {{}};
+const setSessionMessages = () => {{}};
+const renderSessionMessages = () => {{}};
+const persistRunCheckpoint = async () => {{}};
+const supersededSessionProjectionSnapshot = () => null;
+eval({json.dumps(APP_SOURCE[event_start:event_end])});
+async function showAction(seq, content) {{
+  await projectAgentEvent(ctx, {{seq, type: "model_completed", data: {{
+    runtimeRunId: `model-${{seq}}`, toolCalls: [{{id: `call-${{seq}}`, function: {{
+      name: "read_file", arguments: JSON.stringify({{path: ".", _actionStatus: content}})
+    }}}}]
+  }}}}, snapshot);
+  await projectAgentEvent(ctx, {{seq: seq + 1, type: "tool_started", data: {{
+    name: "read_file", toolCallId: `call-${{seq}}`
+  }}}}, snapshot);
+}}
+(async () => {{
+  assert.equal(claimActiveRunContext(ctx), true);
+  await showAction(1, "Reading current input");
+  assert.equal(ctx._actionStatus.view(), "Reading current input");
+  const successor = {{run}};
+  assert.equal(claimActiveRunContext(successor), false);
+  assert.equal(releaseActiveRunContext(ctx), true);
+  assert.equal(claimActiveRunContext(successor), true);
+  assert.equal(claimActiveRunContext(ctx), false);
+  assert.equal(ownsActiveRunContext(ctx), false);
+  // A stale asynchronous attachment must not revive visible status after handoff.
+  ctx._actionStatus = Code.agent.tools.createActionStatusObserver("session", "agent", true);
+  ctx._actionStatus.observe(snapshot);
+  await showAction(3, "Stale context action");
+  assert.equal(ctx._actionStatus.view(), "");
+  assert.equal(run._activeCtx, successor);
+  process.stdout.write("owner isolation passed");
+}})().catch(error => {{ console.error(error); process.exit(1); }});
+"""
+        completed = subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True,
+            text=True, encoding="utf-8", check=True,
+        )
+        self.assertEqual(completed.stdout, "owner isolation passed")
+
     def test_model_completed_cas_replay_restores_transient_usage_before_retry(self):
         usage_start = APP_SOURCE.index("function captureAgentProjectionUsageCheckpoint(")
         event_start = APP_SOURCE.index("async function projectAgentEvent(", usage_start)
@@ -26143,9 +26237,11 @@ eval(finishSource);
         )
 
         script = f"""
+{AGENT_PRESENTATION_SETUP}
+{ACTIVE_RUN_CONTEXT_SOURCE}
 const usageSource = {json.dumps(usage_source)};
 const eventSource = {json.dumps(event_source)};
-const state = {{responseUsage: {{input: 10, output: 2, cache: 0}}}};
+const state = {{sessionId: "session-usage", responseUsage: {{input: 10, output: 2, cache: 0}}}};
 eval(usageSource);
 const authority = {{id: "session-usage", stats: {{input: 10, output: 2, cache: 0}}}};
 const retired = new WeakSet();
@@ -26162,6 +26258,7 @@ const ctx = {{
   responseUsage: null,
   run: {{agentEventCursor: 4}},
 }};
+claimActiveRunContext(ctx);
 function isInternalGoalToolName() {{ return false; }}
 function beginAgentProjectionEvent() {{ return true; }}
 function completeAgentProjectionEvent() {{ completedObservations += 1; }}
@@ -26271,6 +26368,8 @@ eval(eventSource);
             consumer_source + runtime_source + completed_source + usage_source + event_source
         )
         script = f"""
+{AGENT_PRESENTATION_SETUP}
+{ACTIVE_RUN_CONTEXT_SOURCE}
 const source = {json.dumps(combined_source)};
 const clone = (value) => structuredClone(value);
 const authority = {{
@@ -26303,6 +26402,7 @@ const ctx = {{
   }},
   model: "model-1",
 }};
+claimActiveRunContext(ctx);
 function internalCompactionRuntimeIds() {{ return new Set(); }}
 function removeInternalCompactionRuntimeProjection() {{}}
 function getSelectedModel() {{ return "model-1"; }}
@@ -26442,6 +26542,8 @@ eval(source);
             loop_source.index("ctx.messages = Array.isArray(ctx.messages) ? ctx.messages.filter(Boolean) : [];"),
         )
         script = f"""
+{AGENT_PRESENTATION_SETUP}
+{ACTIVE_RUN_CONTEXT_SOURCE}
 const loopSource = {json.dumps(loop_source)};
 const _skillActivationCanonicalEnabled = false;
 const clone = (value) => structuredClone(value);
@@ -26453,7 +26555,6 @@ const applySkillTaskPolicy = (tools) => tools;
 const getSkillToolBudgets = () => [];
 const getNativeTools = () => [];
 const ensureSessionRun = () => ({{abortController: new AbortController()}});
-const claimActiveRunContext = () => true;
 const buildModelRequestPayload = async () => ({{payload: {{}}}});
 const getModelContextResolution = () => ({{inputBudgetInsufficient: false}});
 const getEffectiveMaxTokens = () => 128;
@@ -26564,7 +26665,10 @@ async function scenario(conflicts, options = {{}}) {{
   }};
   if (options.entryRetired) retired.add(initialMessages);
   let errorCode = "";
-  try {{ await runServerAgentLoop(ctx); }} catch (error) {{ errorCode = String(error.code || ""); }}
+  try {{ await runServerAgentLoop(ctx); }} catch (error) {{
+    if (!error.code) throw error;
+    errorCode = String(error.code);
+  }}
   return {{
     errorCode,
     watches,
@@ -34086,13 +34190,19 @@ class Code043CompactDisclosureTests(unittest.TestCase):
         self.assertIn("flex: 1 1 auto;", flex_rule)
         for selector in (
             ".tool-process-row-heading strong",
-            ".tool-process-outcome",
             ".tool-process-chevron",
         ):
             self.assertRegex(
                 STYLE_SOURCE,
                 rf"{re.escape(selector)}[^{{]*\{{[^}}]*flex:\s*0\s+0\s+auto;",
             )
+
+        outcome = self.rule(STYLE_SOURCE, ".tool-process-outcome {")
+        self.assertIn("flex: 0 0 4em;", outcome)
+        self.assertIn("width: 4em;", outcome)
+        english_outcome = self.rule(STYLE_SOURCE, ":lang(en) .tool-process-outcome {")
+        self.assertIn("flex-basis: 6em;", english_outcome)
+        self.assertIn("width: 6em;", english_outcome)
 
     def test_native_details_and_execution_trace_keyboard_aria_semantics_remain(self):
         for fragment in (
@@ -34298,14 +34408,15 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
         self.assertIn("margin: 1px 0 0 3px;", stage_body)
         self.assertIn("padding: 1px 0 1px 10px;", stage_body)
 
-        item_summary = self.rule(source, f"{self.COMPLETED_ITEM} > summary {{")
+        item_summary = self.rule(source, f"{self.TOOL_ITEM} > summary {{")
         for declaration in (
             "min-height: 28px;",
             "padding: 1px 4px;",
             "gap: 5px;",
-            "color: color-mix(in srgb, var(--muted) 84%, var(--text));",
         ):
             self.assertIn(declaration, item_summary)
+        completed_summary = self.rule(source, f"{self.COMPLETED_ITEM} > summary {{")
+        self.assertIn("color: color-mix(in srgb, var(--muted) 84%, var(--text));", completed_summary)
         indicator = self.rule(source, f"{self.COMPLETED_ITEM} .tool-process-indicator {{")
         self.assertIn("width: 5px;", indicator)
         self.assertIn("height: 5px;", indicator)
@@ -34357,6 +34468,23 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
             ".skill-",
         ):
             self.assertNotIn(forbidden_surface, source)
+        # Only the two explicit action-status rules may clip single-line labels.
+        remaining_source = source
+        for selector in (
+            ".chat-pane:not(.empty-chat) .msg.assistant.action-status {",
+            ".action-status > span {",
+        ):
+            action_status = self.rule(source, selector)
+            for declaration in ("overflow: hidden;", "white-space: nowrap;", "text-overflow: ellipsis;"):
+                self.assertIn(declaration, action_status)
+            for forbidden in ("display: none", "visibility:", "max-height:", "animation:"):
+                self.assertNotIn(forbidden, action_status)
+            if selector.startswith(".chat-pane"):
+                self.assertIn("min-height: 32px;", action_status)
+                self.assertIn("display: flex;", action_status)
+            else:
+                self.assertIn("min-width: 0;", action_status)
+            remaining_source = remaining_source.replace(action_status, "", 1)
         for forbidden_behavior in (
             "display: none",
             "visibility:",
@@ -34366,7 +34494,7 @@ class Code070TraceDensityVisualTests(unittest.TestCase):
             "white-space:",
             "text-overflow:",
         ):
-            self.assertNotIn(forbidden_behavior, source)
+            self.assertNotIn(forbidden_behavior, remaining_source)
         self.assertIn(".tool-process-stage.tool-active > .tool-process-stage-summary", STYLE_SOURCE)
         self.assertIn("@media (prefers-reduced-motion: reduce)", STYLE_SOURCE)
         self.assertIn('if (!["Enter", " "].includes(event.key)) return;', MESSAGES_SOURCE)
