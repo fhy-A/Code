@@ -12644,6 +12644,19 @@ def _read_version_file():
     return "0.0.0"
 
 
+def _update_version_key(value):
+    """Return a comparable numeric key for a dotted version, or \`None\`.
+
+    Handoff selection must compare versions by number, never by file name: the
+    name of an older release always sorts before the newer one, which is how a
+    stale journal kept winning the recovery entry.
+    """
+    text = str(value or "").strip().lstrip("v")
+    if not re.fullmatch(r"\d+(?:\.\d+)+", text):
+        return None
+    return tuple(int(part) for part in text.split("."))
+
+
 def _normalize_update_descriptor(value, *, require_official=True):
     """Return a canonical trusted Release asset descriptor or ``None``.
 
@@ -12787,27 +12800,45 @@ def _cleanup_old_versions(target_dir):
             pass
 
 
-def _is_valid_windows_executable(path):
-    """Return True when *path* has a bounded DOS header and PE signature."""
+def _read_pe_header_state(path):
+    """Return (ok, detail) for the bounded DOS/PE header check.
+
+    The detail separates a file that is genuinely not a PE image from one that
+    could not be read at all, so a transient read failure is never reported as
+    "not a valid Code executable".
+    """
     try:
         candidate = Path(path)
         size = candidate.stat().st_size
-        if not candidate.is_file() or size < 256:
-            return False
+        if not candidate.is_file():
+            return False, "not_a_file"
+        if size < 256:
+            return False, "size_too_small=%d" % size
         with candidate.open("rb") as stream:
             if stream.read(2) != b"MZ":
-                return False
+                return False, "missing_mz"
             stream.seek(0x3C)
             offset_raw = stream.read(4)
             if len(offset_raw) != 4:
-                return False
+                return False, "truncated_pe_offset"
             pe_offset = int.from_bytes(offset_raw, "little")
             if pe_offset < 0x40 or pe_offset > size - 4:
-                return False
+                return False, "pe_offset_out_of_range=%d" % pe_offset
             stream.seek(pe_offset)
-            return stream.read(4) == b"PE\0\0"
-    except (OSError, ValueError):
-        return False
+            if stream.read(4) != b"PE\0\0":
+                return False, "missing_pe_signature"
+        return True, ""
+    except OSError as exc:
+        return False, "oserror errno=%s winerror=%s message=%s" % (
+            getattr(exc, "errno", ""), getattr(exc, "winerror", ""), exc,
+        )
+    except (ValueError, TypeError) as exc:
+        return False, "%s: %s" % (type(exc).__name__, exc)
+
+
+def _is_valid_windows_executable(path):
+    """Return True when *path* has a bounded DOS header and PE signature."""
+    return _read_pe_header_state(path)[0]
 
 
 def _powershell_literal(value):
@@ -12876,8 +12907,48 @@ def _report_startup_failure(code, message, *, detail=None, data_dir=None):
     return log_path
 
 
+def _update_handoff_closeout_state(entry_version, running_version):
+    """Return the persisted terminal state for a journal that needs no recovery.
+
+    A journal whose version already runs is installed.  A journal older than the
+    running version was superseded: the running version is strictly newer, so its
+    handoff can never be needed again.  Both reuse the existing status vocabulary
+    only - no new field, status value or schema revision.
+    """
+    if str(entry_version) == str(running_version):
+        return {"status": "installed", "stage": "installed", "errorCode": "", "retryable": False}
+    return {"status": "failed", "stage": "completed", "errorCode": "update_not_ready", "retryable": False}
+
+
+def _close_out_update_handoff(path, payload, *, kind, running_version, entry_version, data_dir=None):
+    """Persist a terminal state so a stale journal never prompts again.
+
+    Only values of keys that already exist are rewritten, so the journal's field
+    set and every unrelated field keep their meaning.  Best-effort: a journal that
+    cannot be rewritten is still never offered as a recovery entry.
+    """
+    changes = _update_handoff_closeout_state(entry_version, running_version)
+    updated = dict(payload)
+    for key, value in changes.items():
+        if key in updated:
+            updated[key] = value
+    if "updatedAt" in updated:
+        updated["updatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    persisted = True
+    try:
+        _atomic_write_update_metadata(Path(path), updated)
+    except (_UpdateFailure, OSError):
+        persisted = False
+    _append_sidecar_log(
+        _startup_error_log_path(data_dir),
+        "stage=startup-handoff closeout=%s version=%s running=%s status=%s journal=%s persisted=%s"
+        % (kind, entry_version, running_version, updated.get("status"), path, persisted),
+    )
+    return persisted
+
+
 def _pending_update_handoff(data_dir=None):
-    """Return the interrupted handoff a stuck journal still records, if any.
+    """Return the interrupted handoff the running version still needs, if any.
 
     The journal is untrusted input.  Its descriptor is re-normalized with the
     same official-Release contract the downloader uses, the candidate name must
@@ -12885,12 +12956,26 @@ def _pending_update_handoff(data_dir=None):
     resolved path must stay inside the install root, and the file must not be a
     symlink, reparse point or multiply-linked file.  Only a descriptor that
     passes all of that is marked startable.
+
+    Selection is by descriptor version, never by file name:
+
+    * a journal for the running version is closed out as installed;
+    * a journal older than the running version was superseded and is closed out
+      as a terminal failure;
+    * only a strictly newer journal can be a pending handoff, and the newest of
+      those wins.
+
+    Closing out is persisted, because an untouched stale journal would raise the
+    same prompt on every start.
     """
     root = _absolute_lexical_path(data_dir or DATA_DIR)
     try:
         journals = sorted(root.glob("*.update.json"))
     except OSError:
         return None
+    running_version = str(_read_version_file() or "").strip()
+    running_key = _update_version_key(running_version)
+    candidates = []
     for path in journals:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -12913,12 +12998,30 @@ def _pending_update_handoff(data_dir=None):
             "startable": False,
             "rejected": "",
         }
-        descriptor = _normalize_update_descriptor(payload.get("descriptor"))
+        raw_descriptor = payload.get("descriptor")
+        raw_version = ""
+        if isinstance(raw_descriptor, dict):
+            raw_version = str(raw_descriptor.get("version") or "").strip().lstrip("v")
+        descriptor = _normalize_update_descriptor(raw_descriptor)
+        if descriptor is not None:
+            entry["version"] = descriptor["version"]
+        elif _update_version_key(raw_version) is not None:
+            entry["version"] = raw_version
+        entry_key = _update_version_key(entry["version"]) if entry["version"] else None
+        if entry_key is not None and running_key is not None and entry_key <= running_key:
+            _close_out_update_handoff(
+                path, payload,
+                kind="installed" if entry_key == running_key else "superseded",
+                running_version=running_version,
+                entry_version=entry["version"],
+                data_dir=data_dir,
+            )
+            continue
         if descriptor is None:
             entry["rejected"] = "descriptor_invalid"
-            return entry
+            candidates.append((entry_key, entry))
+            continue
         name = descriptor["name"]
-        entry["version"] = descriptor["version"]
         entry["name"] = name
         if (
             not name
@@ -12928,11 +13031,13 @@ def _pending_update_handoff(data_dir=None):
             or ".." in Path(name).parts
         ):
             entry["rejected"] = "unsafe_candidate_name"
-            return entry
+            candidates.append((entry_key, entry))
+            continue
         candidate = root / name
         if _absolute_lexical_path(candidate).parent != root:
             entry["rejected"] = "candidate_outside_target"
-            return entry
+            candidates.append((entry_key, entry))
+            continue
         entry["candidatePath"] = str(candidate)
         try:
             checked = _validate_safe_update_file(
@@ -12940,15 +13045,22 @@ def _pending_update_handoff(data_dir=None):
             )
         except _UpdateFailure as exc:
             entry["rejected"] = "unsafe_candidate:" + str(exc.code)
-            return entry
+            candidates.append((entry_key, entry))
+            continue
         entry["candidateExists"] = bool(checked is not None and checked.exists())
         if not entry["candidateExists"]:
             entry["rejected"] = "candidate_missing"
-            return entry
+            candidates.append((entry_key, entry))
+            continue
         entry["descriptor"] = descriptor
         entry["startable"] = True
-        return entry
-    return None
+        candidates.append((entry_key, entry))
+    if not candidates:
+        return None
+    known = [(key, entry) for key, entry in candidates if key is not None]
+    if known:
+        return max(known, key=lambda item: item[0])[1]
+    return candidates[0][1]
 
 
 def _launch_replacement_process(path):
@@ -12996,11 +13108,18 @@ def _recover_pending_update_handoff(*, data_dir=None, launch=None, dialog=None):
                 _absolute_lexical_path(data_dir or DATA_DIR),
             )
         except _UpdateFailure as exc:
+            detail = str(getattr(exc, "detail", "") or "")
             _append_sidecar_log(
-                log_path, "stage=startup-handoff verification_failed=" + str(exc.code),
+                log_path,
+                "stage=startup-handoff verification_failed=" + str(exc.code)
+                + ((" detail=" + detail) if detail else ""),
             )
-        except OSError:
-            _append_sidecar_log(log_path, "stage=startup-handoff verification_failed=unreadable")
+        except OSError as exc:
+            _append_sidecar_log(
+                log_path,
+                "stage=startup-handoff verification_failed=download_verify_unreadable"
+                " detail=%s: %s" % (type(exc).__name__, exc),
+            )
     if verified is None:
         reason = pending["rejected"] or "verification_failed"
         _append_sidecar_log(log_path, "stage=startup-handoff action=guidance_only reason=" + reason)
@@ -13421,12 +13540,15 @@ exit /b %result%
 
 
 class _UpdateFailure(Exception):
-    def __init__(self, code, *, retryable=False, stage="downloading", reset_part=False):
+    def __init__(self, code, *, retryable=False, stage="downloading", reset_part=False, detail=""):
         super().__init__(code)
         self.code = str(code)
         self.retryable = bool(retryable)
         self.stage = str(stage)
         self.reset_part = bool(reset_part)
+        # Concrete evidence (failing call, Win32 error, observed identity) so a
+        # verification verdict can be attributed instead of guessed at.
+        self.detail = str(detail or "")
 
 
 _UPDATE_PUBLIC_ERRORS = {
@@ -13442,11 +13564,23 @@ _UPDATE_PUBLIC_ERRORS = {
     "download_size_mismatch": "The downloaded update has an unexpected size.",
     "download_digest_mismatch": "The downloaded update failed integrity verification.",
     "download_pe_invalid": "The downloaded update is not a valid Code executable.",
+    "download_verify_unreadable": "The downloaded update could not be read for verification.",
     "publish_failed": "The verified update could not be finalized.",
     "metadata_invalid": "Saved update state could not be verified.",
     "update_not_ready": "No verified update is ready to install.",
     "install_launch_failed": "The update installer could not be started.",
 }
+
+# Verification verdicts that mean "this file is not a usable Code image" and are
+# therefore not retryable.  A read failure is deliberately absent: "could not be
+# read" is not "not a valid Code executable", so it stays retryable exactly like
+# the download path's transient failures.
+_UPDATE_INVALID_FILE_CODES = frozenset({
+    "download_size_mismatch",
+    "download_digest_mismatch",
+    "download_pe_invalid",
+    "unsafe_update_path",
+})
 
 
 def _update_target_dir():
@@ -13520,18 +13654,23 @@ def _validate_safe_update_file(path, target_dir, *, allowed_names, required=Fals
     return candidate
 
 
-def _read_windows_file_identity(path):
-    """Read immutable PE version-resource identity using the Windows API."""
+def _read_windows_file_identity_detailed(path):
+    """Return (identity, detail) for the PE version-resource identity.
+
+    The detail records the failing Win32 call and its error code, so an identity
+    that could not be read stays distinguishable from one that was read and did
+    not match - and the next occurrence is attributable instead of a guess.
+    """
     if os.name != "nt" or not hasattr(ctypes, "windll"):
-        return None
+        return None, "unsupported_platform"
     try:
-        version_api = ctypes.windll.version
+        version_api = ctypes.WinDLL("version", use_last_error=True)
         size = version_api.GetFileVersionInfoSizeW(str(path), None)
         if not size:
-            return None
+            return None, "GetFileVersionInfoSizeW winerror=%s" % (ctypes.get_last_error(),)
         buffer = ctypes.create_string_buffer(size)
         if not version_api.GetFileVersionInfoW(str(path), 0, size, buffer):
-            return None
+            return None, "GetFileVersionInfoW winerror=%s" % (ctypes.get_last_error(),)
 
         class _VSFixedFileInfo(ctypes.Structure):
             _fields_ = [
@@ -13547,10 +13686,10 @@ def _read_windows_file_identity(path):
         fixed_pointer = ctypes.c_void_p()
         fixed_length = ctypes.c_uint()
         if not version_api.VerQueryValueW(buffer, "\\", ctypes.byref(fixed_pointer), ctypes.byref(fixed_length)):
-            return None
+            return None, "VerQueryValueW(root) winerror=%s" % (ctypes.get_last_error(),)
         fixed = ctypes.cast(fixed_pointer, ctypes.POINTER(_VSFixedFileInfo)).contents
         if fixed.dwSignature != 0xFEEF04BD:
-            return None
+            return None, "fixed_signature=0x%08X" % int(fixed.dwSignature)
         version_parts = [
             fixed.dwFileVersionMS >> 16,
             fixed.dwFileVersionMS & 0xFFFF,
@@ -13585,9 +13724,14 @@ def _read_windows_file_identity(path):
             "version": version,
             "originalFilename": query_string("OriginalFilename"),
             "productName": query_string("ProductName"),
-        }
-    except (OSError, ValueError, TypeError, AttributeError):
-        return None
+        }, ""
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        return None, "%s: %s" % (type(exc).__name__, exc)
+
+
+def _read_windows_file_identity(path):
+    """Read immutable PE version-resource identity using the Windows API."""
+    return _read_windows_file_identity_detailed(path)[0]
 
 
 def _sha256_file(path):
@@ -13610,16 +13754,39 @@ def _validate_completed_update_file(path, descriptor, target_dir, *, partial=Fal
         raise _UpdateFailure("download_size_mismatch", stage="verifying", reset_part=True)
     if not hmac.compare_digest(_sha256_file(candidate), descriptor["digest"]):
         raise _UpdateFailure("download_digest_mismatch", stage="verifying", reset_part=True)
+    # A file that cannot be read is not the same verdict as a file that was read
+    # and rejected: the first stays retryable, the second never publishes.  The
+    # wrappers above remain the patch points; the detailed readers are consulted
+    # only to explain a failure.
     if not _is_valid_windows_executable(candidate):
-        raise _UpdateFailure("download_pe_invalid", stage="verifying", reset_part=True)
+        _header_ok, header_detail = _read_pe_header_state(candidate)
+        if header_detail.startswith("oserror"):
+            raise _UpdateFailure(
+                "download_verify_unreadable", stage="verifying", retryable=True,
+                detail=header_detail,
+            )
+        raise _UpdateFailure(
+            "download_pe_invalid", stage="verifying", reset_part=True, detail=header_detail,
+        )
     identity = _read_windows_file_identity(candidate)
-    if (
-        not identity
-        or identity.get("version") != descriptor["version"]
-        or identity.get("originalFilename") != descriptor["name"]
-        or identity.get("productName") != "Code"
-    ):
-        raise _UpdateFailure("download_pe_invalid", stage="verifying", reset_part=True)
+    if not identity:
+        _identity, identity_detail = _read_windows_file_identity_detailed(candidate)
+        raise _UpdateFailure(
+            "download_verify_unreadable", stage="verifying", retryable=True,
+            detail=identity_detail or "identity_unavailable",
+        )
+    mismatch = []
+    if identity.get("version") != descriptor["version"]:
+        mismatch.append("version=%s expected=%s" % (identity.get("version"), descriptor["version"]))
+    if identity.get("originalFilename") != descriptor["name"]:
+        mismatch.append("originalFilename=%s expected=%s" % (identity.get("originalFilename"), descriptor["name"]))
+    if identity.get("productName") != "Code":
+        mismatch.append("productName=%s expected=Code" % (identity.get("productName"),))
+    if mismatch:
+        raise _UpdateFailure(
+            "download_pe_invalid", stage="verifying", reset_part=True,
+            detail="identity_mismatch " + "; ".join(mismatch),
+        )
     return candidate
 
 
@@ -30420,7 +30587,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 os._exit(0)
         except Exception as exc:
             code = exc.code if isinstance(exc, _UpdateFailure) else "install_launch_failed"
-            invalid_file = code in {"download_size_mismatch", "download_digest_mismatch", "download_pe_invalid", "unsafe_update_path"}
+            invalid_file = code in _UPDATE_INVALID_FILE_CODES
             _set_update_job_state(
                 job_copy["jobId"], generation, status="failed" if invalid_file else "completed", stage="verifying" if invalid_file else "completed",
                 errorCode=code, retryable=not invalid_file,

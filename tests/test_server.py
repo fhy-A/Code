@@ -1893,6 +1893,187 @@ class TestUpdaterHelpers(unittest.TestCase):
             write_journal(data_dir, descriptor, status="completed")
             self.assertIsNone(server._pending_update_handoff(data_dir))
 
+    @staticmethod
+    def _handoff_descriptor(version):
+        return {
+            "version": version,
+            "name": f"Code-v{version}.exe",
+            "url": f"https://github.com/fhy-A/Code/releases/download/v{version}/Code-v{version}.exe",
+            "size": 1234,
+            "digest": "a" * 64,
+        }
+
+    def _write_handoff_journal(self, data_dir, version, *, status="installing"):
+        journal = data_dir / f"Code-v{version}.update.json"
+        journal.write_text(json.dumps({
+            "schema": server._UPDATE_JOB_SCHEMA,
+            "jobId": "job-1",
+            "descriptor": self._handoff_descriptor(version),
+            "status": status,
+            "stage": status,
+            "progress": 100,
+            "downloaded": 1,
+            "etag": "",
+            "errorCode": "",
+            "retryable": False,
+            "updatedAt": "2026-09-11T10:55:07Z",
+        }), encoding="utf-8")
+        return journal
+
+    def test_stale_handoff_is_closed_out_persistently_and_never_prompts_again(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            journal = self._write_handoff_journal(data_dir, "0.6.10")
+            before = json.loads(journal.read_text(encoding="utf-8"))
+            dialogs = []
+            launched = []
+            with mock.patch.object(server, "_read_version_file", return_value="0.6.11"), \
+                 mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                 mock.patch.object(
+                     server, "_show_message_box",
+                     side_effect=lambda *args, **kwargs: dialogs.append(args) or 1,
+                 ):
+                first = server._recover_pending_update_handoff(
+                    data_dir=data_dir, launch=lambda path: launched.append(str(path)) or True,
+                )
+                second = server._recover_pending_update_handoff(
+                    data_dir=data_dir, launch=lambda path: launched.append(str(path)) or True,
+                )
+            self.assertIsNone(first)
+            self.assertIsNone(second)
+            self.assertEqual(dialogs, [])
+            self.assertEqual(launched, [])
+            closed = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertEqual(closed["status"], "failed")
+            self.assertEqual(closed["stage"], "completed")
+            self.assertEqual(closed["errorCode"], "update_not_ready")
+            self.assertFalse(closed["retryable"])
+            # the closeout persists the existing field set only, with every
+            # unrelated field keeping its meaning
+            self.assertEqual(sorted(closed), sorted(before))
+            self.assertEqual(closed["jobId"], before["jobId"])
+            self.assertEqual(closed["descriptor"], before["descriptor"])
+            self.assertEqual(closed["downloaded"], before["downloaded"])
+            self.assertEqual(closed["progress"], before["progress"])
+            self.assertNotEqual(closed["updatedAt"], before["updatedAt"])
+            trace = (data_dir.parent / ".code.startup-error.log").read_text(encoding="utf-8")
+            self.assertIn("closeout=superseded", trace)
+            self.assertIn("persisted=True", trace)
+
+    def test_handoff_for_the_running_version_is_closed_out_as_installed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            journal = self._write_handoff_journal(data_dir, "0.6.11")
+            before = json.loads(journal.read_text(encoding="utf-8"))
+            with mock.patch.object(server, "_read_version_file", return_value="0.6.11"):
+                self.assertIsNone(server._pending_update_handoff(data_dir))
+            closed = json.loads(journal.read_text(encoding="utf-8"))
+            self.assertEqual((closed["status"], closed["stage"]), ("installed", "installed"))
+            self.assertEqual(closed["errorCode"], "")
+            self.assertFalse(closed["retryable"])
+            self.assertEqual(sorted(closed), sorted(before))
+            trace = (data_dir.parent / ".code.startup-error.log").read_text(encoding="utf-8")
+            self.assertIn("closeout=installed", trace)
+
+    def test_newest_handoff_wins_even_when_its_file_name_sorts_first(self):
+        # "Code-v0.6.10.update.json" sorts before "Code-v0.6.11.update.json": the
+        # old first-match selector kept returning the older journal on every start.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            (data_dir / "Code-v0.6.10.exe").write_bytes(b"image")
+            (data_dir / "Code-v0.6.11.exe").write_bytes(b"image")
+            older = self._write_handoff_journal(data_dir, "0.6.10")
+            newer = self._write_handoff_journal(data_dir, "0.6.11")
+            self.assertLess("Code-v0.6.10.update.json", "Code-v0.6.11.update.json")
+            with mock.patch.object(server, "_read_version_file", return_value="0.6.5"):
+                pending = server._pending_update_handoff(data_dir)
+            self.assertEqual(pending["version"], "0.6.11")
+            self.assertTrue(pending["startable"])
+            # selection never touches journals that are still genuinely pending
+            self.assertEqual(json.loads(older.read_text(encoding="utf-8"))["status"], "installing")
+            self.assertEqual(json.loads(newer.read_text(encoding="utf-8"))["status"], "installing")
+            # once the running version catches up, none of them prompts again
+            with mock.patch.object(server, "_read_version_file", return_value="0.6.11"):
+                self.assertIsNone(server._pending_update_handoff(data_dir))
+            self.assertEqual(json.loads(newer.read_text(encoding="utf-8"))["status"], "installed")
+            self.assertEqual(json.loads(older.read_text(encoding="utf-8"))["status"], "failed")
+
+    def test_unreadable_identity_is_a_distinct_retryable_verdict(self):
+        payload = _fake_pe_bytes(4096)
+        descriptor = {
+            "version": "0.6.7",
+            "name": "Code-v0.6.7.exe",
+            "url": "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            "size": len(payload),
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir)
+            candidate = target / descriptor["name"]
+            candidate.write_bytes(payload)
+            with mock.patch.object(server, "_read_windows_file_identity", return_value=None):
+                with self.assertRaises(server._UpdateFailure) as unreadable:
+                    server._validate_completed_update_file(candidate, descriptor, target)
+            with mock.patch.object(
+                server, "_read_windows_file_identity",
+                return_value={"version": "9.9.9", "originalFilename": "Wrong.exe", "productName": "Code"},
+            ):
+                with self.assertRaises(server._UpdateFailure) as mismatch:
+                    server._validate_completed_update_file(candidate, descriptor, target)
+            self.assertEqual(unreadable.exception.code, "download_verify_unreadable")
+            self.assertEqual(mismatch.exception.code, "download_pe_invalid")
+            self.assertTrue(unreadable.exception.retryable)
+            self.assertFalse(mismatch.exception.retryable)
+            self.assertTrue(unreadable.exception.detail)
+            self.assertIn("identity_mismatch", mismatch.exception.detail)
+            if os.name == "nt":
+                self.assertIn("winerror=", unreadable.exception.detail)
+            self.assertIn("download_pe_invalid", server._UPDATE_INVALID_FILE_CODES)
+            self.assertNotIn("download_verify_unreadable", server._UPDATE_INVALID_FILE_CODES)
+            self.assertIn("download_verify_unreadable", server._UPDATE_PUBLIC_ERRORS)
+
+    def test_unreadable_file_is_not_reported_as_an_invalid_executable(self):
+        payload = _fake_pe_bytes(4096)
+        descriptor = {
+            "version": "0.6.7",
+            "name": "Code-v0.6.7.exe",
+            "url": "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            "size": len(payload),
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir)
+            missing = target / "absent.exe"
+            ok, detail = server._read_pe_header_state(missing)
+            self.assertFalse(ok)
+            self.assertTrue(detail.startswith("oserror"))
+            bad = target / "Code-v1.2.3.exe"
+            bad.write_text("<html>download failed</html>", encoding="utf-8")
+            ok, detail = server._read_pe_header_state(bad)
+            self.assertFalse(ok)
+            self.assertFalse(detail.startswith("oserror"))
+            candidate = target / descriptor["name"]
+            candidate.write_bytes(payload)
+            with mock.patch.object(server, "_is_valid_windows_executable", return_value=False), \
+                 mock.patch.object(
+                     server, "_read_pe_header_state",
+                     return_value=(False, "oserror errno=13 winerror=32 message=in use"),
+                 ):
+                with self.assertRaises(server._UpdateFailure) as read_failure:
+                    server._validate_completed_update_file(candidate, descriptor, target)
+            with mock.patch.object(server, "_is_valid_windows_executable", return_value=False), \
+                 mock.patch.object(server, "_read_pe_header_state", return_value=(False, "missing_mz")):
+                with self.assertRaises(server._UpdateFailure) as invalid:
+                    server._validate_completed_update_file(candidate, descriptor, target)
+            self.assertEqual(read_failure.exception.code, "download_verify_unreadable")
+            self.assertTrue(read_failure.exception.retryable)
+            self.assertIn("winerror=32", read_failure.exception.detail)
+            self.assertEqual(invalid.exception.code, "download_pe_invalid")
+            self.assertFalse(invalid.exception.retryable)
+
     def test_update_helper_rejects_install_root_outside_formal_data_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
