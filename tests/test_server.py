@@ -5000,6 +5000,53 @@ class TestLauncherInstall(unittest.TestCase):
         self.assertFalse([path for path in opened if path.endswith("crash.log")])
         self.assertTrue([path for path in opened if path.endswith(".startup-error.log")])
 
+    def test_launcher_report_startup_failure_forwards_underlying(self):
+        with mock.patch.object(server, "_report_startup_failure", return_value="log") as report:
+            result = launcher._report_startup_failure(
+                "code", "msg", detail="d", underlying="U",
+            )
+        self.assertEqual(result, "log")
+        self.assertEqual(report.call_args.kwargs["underlying"], "U")
+        self.assertEqual(report.call_args.kwargs["detail"], "d")
+        self.assertEqual(report.call_args.kwargs["data_dir"], launcher.get_code_home())
+
+    def test_launcher_main_forwards_the_underlying_startup_error(self):
+        # The packaged entrypoint is launcher.main: exercising only server's
+        # reporter is what let this gap ship in the first 0.6.12 diagnostic build.
+        stderr = io.StringIO()
+        cause = FileNotFoundError(
+            2, "No such file or directory", r"C:\Users\x\.code\skills\registry.json",
+        )
+        failure = launcher.skill_runtime_startup.ImmutableSkillStartupError(
+            "skill_runtime_startup_io_failed"
+        )
+        failure.__cause__ = cause
+        with mock.patch.object(launcher, "hide_console"), \
+                mock.patch.object(launcher, "_main", side_effect=failure), \
+                mock.patch.object(server, "_report_startup_failure", return_value="log") as report, \
+                mock.patch("sys.stderr", stderr):
+            result = launcher.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(report.call_args.args[0], "immutable_skill_startup")
+        self.assertEqual(report.call_args.kwargs["detail"], "skill_runtime_startup_io_failed")
+        underlying = report.call_args.kwargs["underlying"]
+        self.assertIn("errno=2", underlying)
+        self.assertIn("registry.json", underlying)
+        self.assertIn("Code cannot start because immutable Skill startup is unavailable", stderr.getvalue())
+
+    def test_launcher_main_forwards_the_underlying_owner_error(self):
+        cause = PermissionError(13, "Access is denied", r"C:\Users\x\.code\.lock")
+        failure = data_dir_owner.DataDirInUseError("busy")
+        failure.__cause__ = cause
+        with mock.patch.object(launcher, "hide_console"), \
+                mock.patch.object(launcher, "_main", side_effect=failure), \
+                mock.patch.object(server, "_report_startup_failure", return_value="log") as report, \
+                mock.patch("sys.stderr", io.StringIO()):
+            result = launcher.main()
+        self.assertEqual(result, 1)
+        self.assertEqual(report.call_args.args[0], "data_dir_owner")
+        self.assertIn("errno=13", report.call_args.kwargs["underlying"])
+
     def test_create_desktop_shortcut_ps_script(self):
         """The PowerShell script embeds the correct target path."""
         exe = Path(r"C:\Users\Test\.code\Code-v9.9.9.exe")

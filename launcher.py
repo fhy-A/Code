@@ -205,13 +205,29 @@ def hide_console():
         pass
 
 
-def _report_startup_failure(code, message, *, detail=None):
+def _underlying_error_text(exc):
+    """Return the chained cause's errno / winerror / filename text, or "".
+
+    The packaged entrypoint is this module, so the diagnostic detail has to be
+    forwarded here as well: tests that only exercised server's reporter missed
+    exactly this path.  Never raises and never changes startup behaviour.
+    """
+    try:
+        import server
+
+        return server._underlying_startup_error(exc)
+    except Exception:
+        return ""
+
+
+def _report_startup_failure(code, message, *, detail=None, underlying=None):
     """Surface a startup failure where a windowed build's user can see it."""
     try:
         import server
 
         return server._report_startup_failure(
-            code, message, detail=detail, data_dir=get_code_home(),
+            code, message, detail=detail, underlying=underlying,
+            data_dir=get_code_home(),
         )
     except Exception:
         return None
@@ -252,7 +268,9 @@ def main():
         else:
             message = "Code cannot start because its data directory is unavailable."
         print(message, file=sys.stderr)
-        _report_startup_failure("data_dir_owner", message)
+        _report_startup_failure(
+            "data_dir_owner", message, underlying=_underlying_error_text(exc),
+        )
         return 1
     except skill_runtime_startup.ImmutableSkillStartupError as exc:
         message = (
@@ -260,7 +278,11 @@ def main():
             f"({exc.code})."
         )
         print(message, file=sys.stderr)
-        _report_startup_failure("immutable_skill_startup", message, detail=str(exc.code))
+        _report_startup_failure(
+            "immutable_skill_startup", message,
+            detail=str(exc.code),
+            underlying=_underlying_error_text(exc),
+        )
         return 1
     except Exception:
         import traceback
