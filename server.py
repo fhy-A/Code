@@ -13909,7 +13909,19 @@ def _validate_completed_update_file(path, descriptor, target_dir, *, partial=Fal
     )
     if candidate.stat().st_size != descriptor["size"]:
         raise _UpdateFailure("download_size_mismatch", stage="verifying", reset_part=True)
-    if not hmac.compare_digest(_sha256_file(candidate), descriptor["digest"]):
+    # Reading the file is not the same verdict as rejecting it: a read failure is
+    # classified as unreadable (retryable) instead of escaping as a raw OSError
+    # that the install path would mislabel as install_launch_failed.
+    try:
+        observed_digest = _sha256_file(candidate)
+    except OSError as exc:
+        raise _UpdateFailure(
+            "download_verify_unreadable", stage="verifying", retryable=True,
+            detail="sha256 errno=%s winerror=%s message=%s" % (
+                getattr(exc, "errno", ""), getattr(exc, "winerror", ""), exc,
+            ),
+        ) from None
+    if not hmac.compare_digest(observed_digest, descriptor["digest"]):
         raise _UpdateFailure("download_digest_mismatch", stage="verifying", reset_part=True)
     # A file that cannot be read is not the same verdict as a file that was read
     # and rejected: the first stays retryable, the second never publishes.  The

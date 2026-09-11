@@ -2199,6 +2199,44 @@ class TestUpdaterHelpers(unittest.TestCase):
                 payload = json.loads(journal.read_text(encoding="utf-8"))
                 self.assertTrue((root / payload["descriptor"]["name"]).exists(), journal.name)
 
+    def test_digest_read_failure_is_classified_as_unreadable(self):
+        payload = _fake_pe_bytes(4096)
+        descriptor = {
+            "version": "0.6.7",
+            "name": "Code-v0.6.7.exe",
+            "url": "https://github.com/fhy-A/Code/releases/download/v0.6.7/Code-v0.6.7.exe",
+            "size": len(payload),
+            "digest": hashlib.sha256(payload).hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir)
+            candidate = target / descriptor["name"]
+            candidate.write_bytes(payload)
+            with mock.patch.object(
+                server, "_sha256_file", side_effect=PermissionError(13, "Permission denied"),
+            ):
+                with self.assertRaises(server._UpdateFailure) as injected:
+                    server._validate_completed_update_file(candidate, descriptor, target)
+            self.assertEqual(injected.exception.code, "download_verify_unreadable")
+            self.assertTrue(injected.exception.retryable)
+            self.assertIn("sha256", injected.exception.detail)
+            self.assertNotIn("download_verify_unreadable", server._UPDATE_INVALID_FILE_CODES)
+            if os.name == "nt":
+                import msvcrt
+
+                handle = open(candidate, "rb")
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    with self.assertRaises(server._UpdateFailure) as locked:
+                        server._validate_completed_update_file(candidate, descriptor, target)
+                finally:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    handle.close()
+                self.assertEqual(locked.exception.code, "download_verify_unreadable")
+                self.assertTrue(locked.exception.retryable)
+                self.assertIn("sha256", locked.exception.detail)
+                self.assertEqual(candidate.read_bytes(), payload)
+
     def test_update_helper_rejects_install_root_outside_formal_data_dir(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir) / "data"
