@@ -1980,6 +1980,103 @@ class TestUpdaterHelpers(unittest.TestCase):
         self.assertIn("0x1000", reader)
         self.assertNotIn("TerminateProcess", reader + enumerator)
 
+    def test_immutable_skill_startup_failure_reports_the_underlying_io_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            bundled = Path(temp_dir) / "bundled"
+            bundled.mkdir()
+            missing = str(data_dir / "skills" / "registry.json")
+            failure = FileNotFoundError(2, "No such file or directory", missing)
+            # the owner holds the sidecar lock, so it must be released before the
+            # temporary directory itself is removed
+            owner = data_dir_owner.acquire_data_dir_owner(data_dir)
+            try:
+                def broken_store_factory(*args, **kwargs):
+                    raise failure
+
+                runtime = server.skill_runtime_startup.ImmutableSkillStartupRuntime(
+                    store_factory=broken_store_factory,
+                )
+                with self.assertRaises(
+                    server.skill_runtime_startup.ImmutableSkillStartupError,
+                ) as raised:
+                    runtime.initialize(
+                        owner=owner, data_root=data_dir, bundled_root=bundled,
+                        admission_enabled=True,
+                    )
+                exc = raised.exception
+                self.assertEqual(exc.code, "skill_runtime_startup_io_failed")
+                self.assertIs(exc.__cause__, failure)
+                text = server._underlying_startup_error(exc)
+                self.assertIn("FileNotFoundError", text)
+                self.assertIn("errno=2", text)
+                self.assertIn("registry.json", text)
+                self.assertIn("No such file", text)
+                self.assertEqual(server._underlying_startup_error(RuntimeError("no cause")), "")
+            finally:
+                owner.release()
+
+    def test_immutable_startup_failure_logs_and_shows_the_underlying_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_dir = Path(temp_dir) / ".code"
+            data_dir.mkdir()
+            bundled = Path(temp_dir) / "bundled"
+            bundled.mkdir()
+            missing = str(data_dir / "skills" / "registry.json")
+            owner = data_dir_owner.acquire_data_dir_owner(data_dir)
+            try:
+                def broken_store_factory(*args, **kwargs):
+                    raise FileNotFoundError(2, "No such file or directory", missing)
+
+                runtime = server.skill_runtime_startup.ImmutableSkillStartupRuntime(
+                    store_factory=broken_store_factory,
+                )
+                try:
+                    runtime.initialize(
+                        owner=owner, data_root=data_dir, bundled_root=bundled,
+                        admission_enabled=True,
+                    )
+                    self.fail("initialize() must fail closed")
+                except server.skill_runtime_startup.ImmutableSkillStartupError as exc:
+                    failure = exc
+            finally:
+                owner.release()
+
+            dialogs = []
+            factory = mock.Mock()
+            stderr = io.StringIO()
+            with mock.patch.object(server.os, "chdir"), \
+                    mock.patch.object(server, "DATA_DIR", data_dir), \
+                    mock.patch.object(server, "_ensure_runtime_data_directories"), \
+                    mock.patch.object(
+                        server, "_initialize_immutable_skill_runtime", side_effect=failure,
+                    ), \
+                    mock.patch.object(server, "_startup_dialog_enabled", return_value=True), \
+                    mock.patch.object(
+                        server, "_show_message_box",
+                        side_effect=lambda *args, **kwargs: dialogs.append(args) or 1,
+                    ), \
+                    mock.patch("sys.stderr", stderr):
+                result = server.run_server(
+                    owner_acquire=mock.Mock(return_value=owner),
+                    server_factory=factory,
+                    tray_starter=mock.Mock(),
+                )
+
+            self.assertEqual(result, 1)
+            factory.assert_not_called()
+            self.assertIn("immutable Skill startup is unavailable", stderr.getvalue())
+            body = dialogs[0][1]
+            self.assertIn("Underlying error", body)
+            self.assertIn("errno=2", body)
+            self.assertIn("registry.json", body)
+            logged = (data_dir.parent / ".code.startup-error.log").read_text(encoding="utf-8")
+            self.assertIn("code=immutable_skill_startup", logged)
+            self.assertIn("detail=skill_runtime_startup_io_failed", logged)
+            self.assertIn("underlying=FileNotFoundError: errno=2", logged)
+            self.assertIn("registry.json", logged)
+
     def test_pending_handoff_recovery_requires_a_verified_official_candidate(self):
         descriptor = {
             "version": "9.9.9",

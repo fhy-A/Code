@@ -12996,7 +12996,37 @@ def _startup_occupancy_guidance(processes=None):
     return "\n\n".join(["\n".join(english), "\n".join(chinese)]), summary
 
 
-def _report_startup_failure(code, message, *, detail=None, data_dir=None):
+def _underlying_startup_error(exc):
+    """Return "Type: errno=… winerror=… filename=… error=…" for a startup cause.
+
+    The startup paths chain the original exception as the cause, so the concrete
+    reason (errno, Win32 error, path) can be reported without changing any startup
+    semantics.  Returns "" when there is nothing to add.
+    """
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if cause is None:
+        return ""
+    parts = []
+    for label, value in (
+        ("errno", getattr(cause, "errno", None)),
+        ("winerror", getattr(cause, "winerror", None)),
+    ):
+        if value not in (None, ""):
+            parts.append("%s=%s" % (label, value))
+    filename = getattr(cause, "filename", None)
+    if not filename:
+        filename = getattr(cause, "filename2", None)
+    if filename:
+        parts.append("filename=%s" % filename)
+    text = str(cause)
+    if text:
+        parts.append("error=%s" % text)
+    if not parts:
+        parts.append("error=%s" % type(cause).__name__)
+    return "%s: %s" % (type(cause).__name__, " ".join(parts))
+
+
+def _report_startup_failure(code, message, *, detail=None, underlying=None, data_dir=None):
     """Persist a reviewable startup failure and surface it where a user can see it."""
     log_path = _startup_error_log_path(data_dir)
     guidance = ""
@@ -13006,11 +13036,15 @@ def _report_startup_failure(code, message, *, detail=None, data_dir=None):
     line = f"stage=startup code={code} message={message}"
     if detail:
         line += f" detail={detail}"
+    if underlying:
+        line += f" underlying={underlying}"
     if occupancy:
         line += f" {occupancy}"
     written = _append_sidecar_log(log_path, line)
     if _startup_dialog_enabled():
         body = message
+        if underlying:
+            body += f"\n\n底层错误 / Underlying error: {underlying}"
         if guidance:
             body += "\n\n" + guidance
         if written:
@@ -31105,7 +31139,12 @@ def run_server(
     except skill_runtime_startup.ImmutableSkillStartupError as exc:
         message = _immutable_skill_startup_message(exc)
         print(message, file=sys.stderr)
-        _report_startup_failure("immutable_skill_startup", message, data_dir=DATA_DIR)
+        _report_startup_failure(
+            "immutable_skill_startup", message,
+            detail=exc.code,
+            underlying=_underlying_startup_error(exc),
+            data_dir=DATA_DIR,
+        )
         return 1
     handoff_state = {"owner": owner}
 
