@@ -1,4 +1,5 @@
 import inspect
+from dataclasses import replace
 import subprocess
 import tempfile
 import unittest
@@ -352,7 +353,7 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
     def test_pytest_full_uses_shared_1500_second_definition_and_durations(self):
         spec = release.CHECKS["pytest_full"]
         self.assertEqual(spec.timeout, 1500)
-        self.assertEqual(spec.command, (release.sys.executable, "-m", "pytest", "tests", "-q", "--durations=30"))
+        self.assertEqual(spec.command, (release.sys.executable, "-m", "pytest", "tests", "-v", "--tb=short", "--durations=30"))
         manifest_entry = next(
             item
             for item in verification.get_release_definition_manifest()["checks"]
@@ -360,6 +361,16 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
         )
         self.assertEqual(manifest_entry["command"], spec.command)
         self.assertEqual(manifest_entry["timeout"], 1500)
+        self.assertEqual(
+            verification.get_release_check_ids(dry_run=False, skip_tests=False),
+            ("git_diff_check", "syntax_app", "syntax_agent_runtime", "syntax_server",
+             "syntax_launcher", "syntax_build_exe", "frontend_build", "frontend_freshness",
+             "frontend_bundle_syntax", "harness_replay", "pytest_full"),
+        )
+        current_fingerprint = verification.get_release_definition_fingerprint()
+        old_command = (release.sys.executable, "-m", "pytest", "tests", "-q", "--durations=30")
+        with mock.patch.dict(verification.CHECKS, {"pytest_full": replace(spec, command=old_command)}):
+            self.assertNotEqual(verification.get_release_definition_fingerprint(), current_fingerprint)
 
         with mock.patch.object(
             release,
@@ -370,7 +381,7 @@ class TestHarnessReplayReleaseGate(unittest.TestCase):
 
         run_command.assert_called_once_with(
             list(spec.command),
-            description="pytest tests -q",
+            description="pytest tests -v --tb=short --durations=30",
             timeout=1500,
         )
         mark_ok.assert_called_once_with("全量测试通过")

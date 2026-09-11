@@ -603,7 +603,7 @@ def run_tests():
     spec = CHECKS["pytest_full"]
     rc, stdout, stderr = run(
         list(spec.command),
-        description="pytest tests -q",
+        description="pytest tests -v --tb=short --durations=30",
         timeout=spec.timeout,
     )
     if rc != 0:

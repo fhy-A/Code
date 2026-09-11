@@ -425,7 +425,9 @@ class TestFrontendRefreshRecovery(unittest.TestCase):
         recovery_end = APP_SOURCE.index("async function resumePersistedRuns()", recovery_start)
         recovery = APP_SOURCE[recovery_start:recovery_end]
         legacy_branch_start = recovery.index('if (latestRunState.executionOwner !== "server-agent")')
-        legacy_branch_end = recovery.index("const ctx = buildRecoveredRunContext", legacy_branch_start)
+        legacy_branch_end = recovery.index("    let ctx;", legacy_branch_start)
+        self.assertGreater(recovery_end, recovery_start)
+        self.assertGreater(legacy_branch_end, legacy_branch_start)
         legacy_branch = recovery[legacy_branch_start:legacy_branch_end]
 
         self.assertIn("finalizeLegacyBrowserRunMessages(session.messages)", legacy_branch)

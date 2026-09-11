@@ -57,23 +57,33 @@ def test_enqueue_freezes_intent_before_async_route_resolution():
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 const app=fs.readFileSync('app.js','utf8');let resume;const gate=new Promise(r=>resume=r);
 let intent='high',thinking='off',captured;const messages=[];
-const sandbox={structuredClone,Date,Math,t:x=>x,
+const sandbox={window:{Code:{agent:{}}},localStorage:{getItem:()=>null},structuredClone,Date,Math,t:x=>x,
  getSelectedModel:()=> 'gpt-5.5',getReasoningSelectionForModel:()=>({schemaVersion:2,intent,routeRef:'mr1_a'}),
  getThinkingLevel:()=>thinking,getModelDispatchCredentials:async()=>{await gate;return{routeRef:'mr1_a',catalogRevision:1}},
  normalizeImageRouteDispatch:()=>null,getSelectedImageRoute:()=>null,getPermissionProfile:()=> 'read',
  els:{toolPreset:{value:'default'},temperature:{value:'0.2'}},getEffectiveMaxTokens:()=>4096,getModelContextResolution:()=>({}),
  uploadImagesForStorage:async()=>[],queuedMessageCheckpoint:x=>structuredClone(x),getQueuedMessageCheckpoints:()=>[],
  setQueuedMessageCheckpoints:(_,items)=>captured=items[0],getSessionMessages:()=>messages,setSessionMessages:()=>{},
- saveSessionState:async()=>{},getSessionStats:()=>({}),renderSessionMessages:()=>{},isSessionStreaming:()=>true};
-const start=app.indexOf('async function enqueueSessionMessage('),end=app.indexOf('function followUpMessageText(',start);
-vm.runInNewContext(app.slice(start,end)+';globalThis.enqueue=enqueueSessionMessage;',sandbox);
+ saveSessionState:async(id)=>({id,revision:1}),getSessionStats:()=>({}),renderSessionMessages:()=>{},isSessionStreaming:()=>true};
+vm.runInNewContext(fs.readFileSync('src/agent/system-prompt.js','utf8'),sandbox);
+Object.assign(sandbox,sandbox.window.Code.agent.systemPrompt);
+const start=app.indexOf('const followUpSubmissions = new Set();'),end=app.indexOf('async function submitSessionSteer(',start);
+assert(start>=0 && end>start,'follow-up source slice must have ordered boundaries');
+vm.runInNewContext(app.slice(start,end)+';globalThis.enqueue=enqueueSessionMessage;globalThis.retry=retryFailedFollowUpMessage;',sandbox);
 (async()=>{
  const pending=sandbox.enqueue('s','queued fixture');intent='low';thinking='max';resume();await pending;
  assert.equal(captured.reasoningSelection.intent,'high');assert.equal(captured.thinkingLevel,'off');
  assert.equal(messages[0].meta.queuedDispatch.reasoningSelection.intent,'high');
- await sandbox.enqueue('s','retry',{length:0},{existingMessage:messages[0]});
+ await sandbox.enqueue('s','retry',[],{existingMessage:messages[0]});
  assert.equal(captured.reasoningSelection.intent,'high');assert.equal(captured.thinkingLevel,'off');
- await sandbox.enqueue('s','old',{length:0},{existingMessage:{role:'user',content:'old',_model:'gpt-5.5'}});
+ const bare={id:'old-bare',role:'user',content:'old',_model:'gpt-5.5'};
+ messages.push(bare);
+ const beforeRejected=JSON.stringify({captured,messages});
+ assert.equal(await sandbox.retry('s','old-bare'),false);
+ assert.equal(JSON.stringify({captured,messages}),beforeRejected,'ordinary message must not dispatch');
+ const legacy={id:'old-queued',role:'user',content:'old',_model:'gpt-5.5',meta:{queuedDispatch:{id:'old-queued',status:'failed',failureCode:'followup_submission_failed'}}};
+ messages.push(legacy);
+ assert.equal(await sandbox.retry('s','old-queued'),'old-queued');
  assert.equal(captured.reasoningSelection,null);
  console.log('ok');
 })().catch(e=>{console.error(e);process.exitCode=1});
@@ -89,6 +99,8 @@ const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/st
 const sandbox={window:{Code:{agent:{}}},structuredClone};
 vm.runInNewContext(fs.readFileSync('src/agent/model-request.js','utf8'),sandbox);
 vm.runInNewContext(fs.readFileSync('src/agent/subagents.js','utf8'),sandbox);
+vm.runInNewContext(fs.readFileSync('src/agent/system-prompt.js','utf8'),sandbox);
+Object.assign(sandbox,sandbox.window.Code.agent.systemPrompt);
 const api=sandbox.window.Code.agent.modelRequest;
 const copy=x=>JSON.parse(JSON.stringify(x));
 const route={modelId:'gpt-5.5',routeRef:'mr1_a',reasoning:{schemaVersion:2,capabilityRevision:'revision-a',intents:['default','low','medium','high']}};
@@ -116,6 +128,7 @@ assert.throws(()=>api.snapshotReasoningSelection({mode:'v2',intent:'default'},{.
 const selected=api.snapshotReasoningSelection({mode:'v2',intent:'high'},route);
 const app=fs.readFileSync('app.js','utf8');
 const start=app.indexOf('function queuedMessageCheckpoint('),end=app.indexOf('function findQueuedUserMessage(',start);
+assert(start>=0 && end>start,'queue source slice must have ordered boundaries');
 vm.runInNewContext(app.slice(start,end)+';globalThis.queue=queuedMessageCheckpoint;',Object.assign(sandbox,{normalizeImageRouteDispatch:()=>null}));
 const queued=sandbox.queue({id:'q',model:'gpt-5.5',thinkingLevel:'auto',reasoningSelection:selected});
 selected.intent='low';assert.equal(queued.reasoningSelection.intent,'high');
@@ -131,7 +144,9 @@ Object.assign(sandbox,{AbortController,findBackgroundUserMessage:()=>null,getSes
  backgroundJobElapsedMs:()=>0});
 for(const [from,to] of [['function syncBackgroundJobCheckpoint(','async function persistBackgroundJob('],
  ['function createBackgroundServerContext(','async function runBackgroundSubAgentJob(']]){
- const at=app.indexOf(from);vm.runInNewContext(app.slice(at,app.indexOf(to,at)),sandbox);
+ const at=app.indexOf(from),end=app.indexOf(to,at);
+ assert(at>=0 && end>at,'background source slice must have ordered boundaries');
+ vm.runInNewContext(app.slice(at,end),sandbox);
 }
 const job={id:'bg',sessionId:'s',status:'pending',model:'gpt-5.5',thinkingLevel:'off',userText:'fixture',taskPrompt:'fixture',reasoningSelection:restored.reasoningSelection};
 sandbox.syncBackgroundJobCheckpoint(job);job.reasoningSelection.intent='low';assert.equal(background.reasoningSelection.intent,'high');

@@ -23,6 +23,19 @@ from unittest import mock
 import requests
 
 import server as server_mod
+
+
+ACTION_STATUS_SCHEMA = {
+    "type": "string", "maxLength": 80,
+    "description": "Optional current action and purpose; one line, at most 80 Unicode code points. Omit when unhelpful; display only.",
+}
+
+
+def _expected_advertised_tool_definition(execution_definition):
+    """The display-only property supplements the unchanged execution schema."""
+    expected = json.loads(json.dumps(execution_definition))
+    expected["function"]["parameters"]["properties"]["_actionStatus"] = dict(ACTION_STATUS_SCHEMA)
+    return expected
 from code_runtime import skill_completion
 from code_runtime.agent_protocol import normalize_agent_event
 from code_runtime.skill_activation import SKILL_PROMPT_MARKER
@@ -3625,7 +3638,7 @@ raise SystemExit(2)
         self.assertTrue(all(payload["max_tokens"] == 4096 for payload in _AgentUpstream.payloads))
         tool_message = next(message for message in _AgentUpstream.payloads[1]["messages"] if message.get("role") == "tool")
         self.assertIn("was not executed", tool_message["content"])
-        self.assertEqual(_AgentUpstream.payloads[0]["tools"][0]["function"]["parameters"], server_mod._SERVER_TOOL_DEFINITIONS["write_file"]["function"]["parameters"])
+        self.assertEqual(_AgentUpstream.payloads[0]["tools"][0]["function"]["parameters"], _expected_advertised_tool_definition(server_mod._SERVER_TOOL_DEFINITIONS["write_file"])["function"]["parameters"])
         # Existing persisted fields carry the diagnostic across restart.
         with server_mod._agent_run_lock:
             server_mod._agent_runs.pop(run["id"], None)
@@ -3667,7 +3680,14 @@ raise SystemExit(2)
             for source, marker in [(server_mod._SERVER_TOOL_DEFINITIONS[name], "Example: "), (frontend[name], "例：")]:
                 with self.subTest(name=name, source=marker):
                     definition = source["function"]
-                    self.assertEqual(strip_descriptions(definition["parameters"]), expected)
+                    expected_parameters = json.loads(json.dumps(expected))
+                    if marker == "例：":
+                        expected_parameters["properties"]["_actionStatus"] = {"type": "string", "maxLength": 80}
+                        self.assertEqual(definition["parameters"]["properties"]["_actionStatus"], ACTION_STATUS_SCHEMA)
+                    else:
+                        self.assertNotIn("_actionStatus", definition["parameters"]["properties"])
+                    self.assertNotIn("_actionStatus", definition["parameters"].get("required", []))
+                    self.assertEqual(strip_descriptions(definition["parameters"]), expected_parameters)
                     example = json.JSONDecoder().raw_decode(definition["description"].split(marker, 1)[1])[0]
                     self.assertEqual(server_mod._registered_tool_argument_errors(name, example), [])
                     self.assertTrue(all(field.get("description") for field in definition["parameters"]["properties"].values()))
@@ -3689,7 +3709,9 @@ raise SystemExit(2)
         self.assertEqual(server_mod._agent_snapshot(run, 0)["toolExecutions"], [])
         sent = {entry["function"]["name"]: entry for entry in _AgentUpstream.payloads[0]["tools"]}
         for name in fixture["parameters"]:
-            self.assertEqual(sent[name], server_mod._SERVER_TOOL_DEFINITIONS[name])
+            self.assertEqual(sent[name], _expected_advertised_tool_definition(server_mod._SERVER_TOOL_DEFINITIONS[name]))
+            self.assertNotIn("_actionStatus", sent[name]["function"]["parameters"].get("required", []))
+            self.assertNotIn("_actionStatus", server_mod._SERVER_TOOL_DEFINITIONS[name]["function"]["parameters"]["properties"])
 
     def test_agent_rejects_invalid_tool_arguments_without_calling_executor(self):
         with _AgentUpstream.scripted_lock:

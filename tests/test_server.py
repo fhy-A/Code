@@ -2467,10 +2467,13 @@ public static class ReplacementSentinel {{
         settings_js = (
             Path(__file__).resolve().parent.parent / "src" / "features" / "settings.js"
         ).read_text(encoding="utf-8")
-        self.assertIn('versionInfo.localVersion !== remoteVersion) return;', settings_js)
+        self.assertIn(
+            'if (!isCurrent() || versionGeneration !== updateVersionGeneration || Date.now() >= deadline || versionInfo.localVersion !== expectedVersion) return;',
+            settings_js,
+        )
         self.assertIn('cache: "no-store"', settings_js)
         self.assertIn(
-            'refreshed.searchParams.set("updated", `${remoteVersion}-${Date.now()}`)',
+            'refreshed.searchParams.set("updated", `${expectedVersion}-${Date.now()}`)',
             settings_js,
         )
         self.assertIn("global.location.replace(refreshed.toString())", settings_js)

@@ -1,6 +1,6 @@
 # Code 发版指南
 
-> 适用于人工操作者和 AI Agent。最后更新：2026-09-08。
+> 适用于人工操作者和 AI Agent。最后更新：2026-09-11。
 
 ---
 
@@ -38,7 +38,7 @@ python release.py 0.5.8 --skip-tests
 | 阶段 | 操作 | 校验 |
 |------|------|------|
 | 1 | 同步版本号到 `VERSION`、`file_version_info.txt`、`README.md` | 3 个文件版本号一致；README 徽章 URL / alt 与 EXE 下载名同版 |
-| 2 | `git diff --check` → `node --check` / `py_compile` → 前端构建/freshness/语法 → `npm run verify:harness-replay`（30 秒）→ `pytest -q --durations=30`（1500 秒） | 原11项共享检查全部执行一次，廉价失败先阻断耗时步骤 |
+| 2 | `git diff --check` → `node --check` / `py_compile` → 前端构建/freshness/语法 → `npm run verify:harness-replay`（30 秒）→ `pytest tests -v --tb=short --durations=30`（1500 秒） | 原11项共享检查全部执行一次，廉价失败先阻断耗时步骤 |
 | 3 | `python build_exe.py` 打包 | EXE 文件生成 |
 | 4 | 读取 EXE 版本元数据 + 计算 SHA-256 | `ProductVersion` / `FileVersion` / `OriginalFilename` 正确 |
 | 5 | 保留预先准备的中文正文，刷新 `docs/releases/vX.Y.Z.md` 产物信息 | 正文、版本、文件大小和hash校验通过后才签发prepared凭证 |
@@ -55,7 +55,7 @@ python release.py 0.5.8 --skip-tests
 
 ## 日常验证与发布风险检查
 
-完整pytest使用已确认的1500秒（25分钟）上限，并报告最慢30项耗时；全部测试和断言保留，其他检查的超时不变。失败或超时即停止，不自动延长预算或重试prepare；新预算和命令参数进入共享定义指纹，旧凭证不能复用。
+完整pytest使用已确认的1500秒（25分钟）上限，逐例实时输出nodeid与结果，失败使用短回溯，结束时报告最慢30项耗时；全部测试和断言保留，其他检查的超时不变。失败或超时即停止，不自动延长预算或重试prepare；新预算和命令参数进入共享定义指纹，旧凭证不能复用。
 
 日常先按变更影响运行直接相关测试，再补相邻兼容、恢复与构建检查。只有影响难以界定的关键变更或冻结发布候选才运行全量；不把每个开发阶段或微小修正都变成一次全量验证。现有根目录和 Code 协作规则中的分层验证及不机械重复原则继续适用。
 
