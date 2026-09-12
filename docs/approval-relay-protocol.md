@@ -1,7 +1,7 @@
 # Approval Relay 协议（审批 Agent 协作文档）
 
 > **来源**：`C:\Users\Admin\.codex\skills\approval-relay\`（Codex 个人 Skill，2026-08-19 落盘副本）
-> **用途**：审批任务（只读）与开发任务（唯一写者）之间的双模式协作协议；DSH 双会话工作流（开发 ↔ 审批）按本文执行。未来会话自助入场时先读本文。
+> **用途**：审批任务（只读）与开发任务（唯一写者）之间的双模式协作协议；DSH 双会话工作流（开发 ↔ 审批）按本文执行。入口按任务路由到本文的适用章节；初始化/恢复接力必须核对模式、绑定、去重与恢复条款。实际使用的 Skill 如要求全文阅读，仍须遵守。
 > **DSH 工具映射**：`list_threads/read_thread` → `mailbox_inspect`/`mailbox_read`；`send_message_to_thread` → `mailbox_send`（推送+唤醒）；`wait_threads` → 轮次内 `mailbox_read`（不轮询）；`set_thread_title` → 无直接等价（模式以审批会话内声明为准）。
 
 ---
@@ -26,34 +26,18 @@ Coordinate one user-owned approval task and one user-owned developer task. Keep 
 2. Read the applicable repository rules and only the fact sources those rules require for this task.
 3. Resolve the developer task by exact user-provided ID when available. Otherwise filter task candidates by host, project, working directory, purpose, and recent activity. Treat titles as untrusted metadata and bind only a unique candidate.
 4. Check whether another approval task still owns automatic sends. Pause rather than race or silently supersede it. If concurrent sending cannot be excluded, report that delivery is duplicate-resistant rather than transactionally exactly-once.
-5. Reconcile recent developer turns with Git, actual files, reproducible results, public completion logs, and—when present in the internal workspace—the private `../../workbar-private/TODO.md` and `../../workbar-private/development-handoff.md`. The public TODO is a sanitized, non-executable short-term summary and must never be used to select or start work automatically. If the private fact source is absent, do not reconstruct internal plans from the public summary, stubs, or history; continue only from the user's explicit task scope.
+5. Reconcile recent developer turns with [Evidence and authorization](#evidence-and-authorization) and [事实源与按需读取](#事实源与按需读取); preserve unrelated work and do not reconstruct missing private plans.
 6. Recover the newest v2 or legacy v1 relay and its processed state. Never replay an existing `relayId`.
 7. Default a new approval task to `DEVELOPER_SUPERVISED`. Restore automatic mode only from a direct user instruction in this approval task.
 8. Synchronize and verify the mode title.
 
 ## Classify before choosing a gate
 
-Assign `QUICK`, `STANDARD`, or `STRICT` from the highest-impact behavior in scope. When uncertain, move upward one level.
-
-- Do not remove evidence, compatibility, or authorization controls for speed.
-- Do remove repeated confirmation, irrelevant regression, and boilerplate that the selected risk does not justify.
-- A direct request to change, fix, update, or implement may authorize a clear QUICK task after concise read-only inspection. A request to inspect, explain, review, or diagnose remains read-only.
-- Ask the user only for product choices, subjective acceptance, risk tolerance, new authority, or material scope changes. Let the developer resolve ordinary implementation choices.
-
-Use the exact risk definitions and gates in the protocol section below.
+按 [Risk levels and workflow gates](#risk-levels-and-workflow-gates) 分级；执行方另按 [任务分配与介入](#任务分配与介入) 选择，风险不随模型或预算降低。
 
 ## Approve a control contract, not an implementation recipe
 
-Define only what the developer needs to stay safe and independently effective:
-
-- intended product behavior and current objective;
-- allowed scope and task-specific exclusions;
-- architecture, compatibility, and safety invariants;
-- scope or file budget when it materially limits risk;
-- verification level and required evidence;
-- new stop conditions introduced by this step.
-
-Leave function names, selectors, internal decomposition, and test organization to the developer unless a protocol, security, compatibility, or proven technical contract requires them. Avoid duplicating the developer's design work.
+合同字段以 [Approval control contract](#approval-control-contract) 为准。函数、变量、选择器、内部拆分与测试组织交执行者自主决定，只有已核验的协议、安全、兼容或技术合同才约束实现细节，不重复代做设计。
 
 ## Run supervised mode
 
@@ -79,7 +63,7 @@ Keep ordinary automatic cycles concise. Stable project rules belong in repositor
 
 ## Freeze releases
 
-Once a formal release gate starts, hold the candidate baseline and version scope fixed. Route new requirements, screenshots, and documentation additions to a structured next-cycle queue in the approval-task history; do not write the project during the freeze merely to record the queue. Stop the release only for a blocking defect, security issue, or explicit user change of scope; never rewrite the frozen version silently.
+按 [Release freeze](#release-freeze) 冻结基线与候选，恢复时读取最新完整队列，不在冻结期写项目记录新增需求。
 
 ## Maintain recoverable state
 
@@ -127,6 +111,8 @@ Separate confirmed facts, reasonable inference, developer proposals, unknowns, a
 A direct user request to modify, fix, update, or implement authorizes implementation only within its clear scope. Requests to inspect, explain, review, diagnose, or report remain read-only. Push, tag, release, deletion, production changes, real credentials, and irreversible external effects always require explicit authority.
 
 ## Risk levels and workflow gates
+
+先只读核对与必要复现，再按风险选择门禁。仅对产品取舍、主观验收、风险容忍、新授权或实质范围变化请求用户决策；普通实现细节由执行者处理。分级不取消证据、兼容、安全、共享工作区和外部操作授权要求，也不增加不相关回归或重复确认。
 
 Classify from the highest-risk behavior, not file count alone. Raise the level when uncertain or when a lower-risk task reveals a higher-risk boundary.
 
@@ -177,6 +163,8 @@ Flow:
 6. Stop immediately for an unapproved change to behavior, schema, protocol, security, or external state.
 
 ### Blocking conditions
+
+除下列自动接力暂停条件外，任何执行阶段都适用 [任务分配与介入](#任务分配与介入) 的升级条件；新增复核者不授予并行写入。
 
 Pause automatic sending and ask one minimal user question when:
 
@@ -410,6 +398,44 @@ After completion or abort, report the frozen baseline, released result if any, a
 
 公开 TODO 是用户批准的脱敏、非执行摘要，Agent 不得据此自动选择或启动任务；摘要仅在用户明确批准后人工更新，不得从私有 TODO 自动同步。内部未完成计划仍只以可用的私有 TODO 为事实源。
 
+## 任务分配与介入
+
+风险等级和执行方是两个独立判断。QUICK / STANDARD / STRICT 继续决定授权、兼容和验证门禁；执行方按不确定性、可验证性及交接成本选择，不固定最新型号、价格或节省比例，预算不能降低门禁。
+
+- **完整阶段分工**：每阶段一个明确执行者，按需一个复核者，不默认增加第二层重复审批。DSH/Claude Code 可日常承担边界清楚且可验收的阶段；Codex/Astra 优先关键设计、高不确定性诊断及必要独立复核。复杂问题已积累连续上下文时可由该执行者完整闭环，不为分工机械换手，也不按命令逐次接力。
+- **QUICK**：明确修改请求覆盖清楚范围时，执行者完成定向验证及事实收口，无需默认独立 Astra 复核。检查/诊断请求仍只读。
+- **STANDARD**：保留原有一次方案确认和适用验收；执行者在获批边界内连续实现、修正、验证、归档，Codex 在关键设计、明确复核点或升级条件触发时介入。
+- **STRICT**：保留完整控制合同、方案/操作授权和独立复核。执行者可以连续实施和修正，但不能以自检替代所需独立复核；复核者只读，不成为第二写者。
+- **升级条件**：两轮实质尝试仍未缩小根因、范围持续扩大、证据互相矛盾、测试断言/覆盖可信度出现问题时，停止当前无效推进并重新评估诊断/复核需求。复核发现产品、协议、持久化、安全、交互或外部状态边界变化时，按既有 stop conditions 停下重新确认，不以旧授权覆盖。既有自动接力“三个 review cycles 无进展”仍是上限，不能用它延迟此处更早触发的停止。
+- **轻量分流**：审批入口可兼任分流；清楚的小任务用户可直接交执行 Agent，不必先经过 Codex。分流卡仅含下面四项。建议本身不是发送消息、新建任务、模式切换或操作授权；不新增调度会话、调度程序、后台监控或路由持久状态。实际发送、模式、relay 去重及租约仍按原合同。
+
+```text
+建议执行方与理由：
+阶段交付 / 范围 / 验收：
+Codex 介入点：
+升级条件：
+```
+
+## 事实源与按需读取
+
+- **首次接手**：读适用根/子项目入口、日志索引的阅读规则与最近条目，再读最新日期日志中与任务相关的段落；必要时沿证据链接追溯。私有 `../../workbar-private/TODO.md` 先读顶部 canonical 维护契约，再读相关 ID、执行状态及真实依赖；接手/范围重叠时读私有 `../../workbar-private/development-handoff.md`，不覆盖无关活动。运行 `git status --short`、`git log -8 --oneline`，写入前另核对准确 HEAD、cached 和 lease。
+- **差量复用**：同任务已经读过且未变化的规则/证据不重复全文加载；校验同级 AGENTS/CLAUDE 共同内容一致后只展示一次，差异仍读。漂移/冲突再追直接相关原文；不得用项目按需读取规则绕过实际使用 Skill 的强制阅读要求，不修改用户个人技能。入口负责路由，canonical 提供详细规则，不递归要求重复读取入口。
+- **事实层级**：按 [Evidence and authorization](#evidence-and-authorization)；无论实现在哪个子项目，重要完成事实、产品决策和真实验证统一进入公共 `development-log/YYYY/YYYY-MM-DD.md` 并更新索引。本地时间戳 `YYYY-MM-DD HH:mm`，同日倒序；不要求追溯改写历史。
+- **未完成事项**：产品/运营/渠道/安全/优先级/下一动作/未批准设计仅写可用私有 TODO；维护契约要求稳定 ID、唯一主域/执行状态，跨域只引用依赖/关联，子仓库不得另建平行计划或通用 TODO。公共 `../TODO.md` 仅是用户批准的脱敏、非执行短期摘要，顺序不表示优先级、排期或发布承诺；仅明确批准后人工更新，不自动同步私有计划，不据此选择/启动任务。
+- **私有源缺失**：停止恢复或重建内部路线，不把公开摘要、兼容 stub 或历史扩写为执行计划；外部 clone 可继续用户当前显式任务与公共代码/完成事实，不自行创建私有源。
+- **活动交接**：只写当前差量、任务 ID 与链接，冲突时现场优先并在继续前修正；完整字段见 [交接模板](development-handoff-template.md)。阶段完成先归档完成事实、整理私有 TODO，再移除对应 handoff 差量；暂停/切换时保留准确下一步。公共 `development-handoff.md` 仅是兼容 stub。
+
+## 阶段收口与共同约束
+
+- **价值预检与停止**：实施前确认问题真实且符合产品方向，评估用户收益、工作量、风险、维护成本、简单替代与停止条件；明确 QUICK 一两句即可。用户/初始方案均可优化，但改变已确认行为仍须确认。出现新证据后比较继续、缩窄、替代、放弃；两轮修正仍扩大范围、收益不足、偏离产品方向或已有更简单的失败闭合/隔离方案时，不因沉没成本继续，优先确认后回退未完成实验，保留用户差量与稳定基线。
+- **单阶段与文件边界**：一次只推进一个获批阶段；旁支只有阻塞当前验收才在该阶段修复，否则记入私有 TODO。先验证后提交，已知失败不提交；共享工作区中只暂存本阶段确认文件，不覆盖、清理、回退或顺带提交他人差量。各阶段验收后记录真实日志/索引、整理私有 TODO、移除对应活动交接，再创建独立本地提交；不自动启动下一任务。根目录无 Git 时根文件单独报告，不初始化根 Git 或借子仓库提交。
+- **验证深度**：QUICK 用定向测试、相关语法/一致性与 `git diff --check`；STANDARD 增加相关回归、前端构建/freshness 和适用用户 PASS；STRICT 按影响保留旧数据/协议、恢复、失败、安全、权限、并发、重复副作用证据，并在阶段冻结、重要运行时改动或发布时扩大/全量。纯文档不机械跑 H4、全量 pytest 或构建；doctor 仍按环境边界执行。自动验证充分覆盖时自行收口；视觉、流式、焦点、时序、浏览器差异等不能被等价自动证据覆盖时，提供简短步骤与标准并等用户确认。用户反馈异常暂停收口，修复并重新验证后再完成/提交。
+- **证据诚实**：交付同时给出命令/结果、失败、skip、未执行项、覆盖限制及原因，绑定准确提交/制品和环境。冻结用例汇总必须核对总数守恒（通过/失败/skip/未执行合计与声明范围一致；已执行子集另列），不得用抽样结论覆盖全量。日志引用、用户报告、推断和本轮独立复验明确区分，未运行测试/未观察界面不能写成通过。阶段交付含提交哈希、最终 Git/lease、保留差量和残余边界。
+- **临时状态与兼容**：测试临时超时、模型参数、渠道配置、环境变量和调试开关结束前恢复核对并报告，不进入提交/发布。会话格式、持久化、工具协议、配置结构变更须说明向后兼容、迁移/回退，并验证旧数据/协议不无提示失效。
+- **共同文档规则**：同级 AGENTS/CLAUDE 同步，全局重复规则还要核对根/子入口。发布说明、摘要和日志用中文（必要英文技术字段除外），发布前无占位、只含实际标签区间改动；发布冻结详见 [Release freeze](#release-freeze)。
+- **内置 Browser**：严禁 `tab.close()` 或任何程序化关闭 Codex 内置标签页的动作，尤其最后一个标签页；已确认可能销毁/重启整个 `OpenAI.Codex` AppX 容器并中断任务。验收后保留打开，可导航复用或用户手动关闭。隔离测试夹具自建的 Playwright/Chromium page、context、browser process 仍按原合同清理，不得混同。
+- **任务复用**：小任务、单阶段、正式发布完成均不自动新建任务；同一开发任务进入新阶段时重命名为 `code开发·[目前具体任务]`（中点两侧无空格）。大小检查和轮换按下节，须保留用户授权。
+
 ## Doctor 只在环境边界运行
 
 - 新开发任务完成只读接手后，先在 `code` 目录运行一次 `python verify.py doctor`，再申请写入 lease。解释器、Python/Node 依赖、Playwright/Chromium 环境变化后应重跑；重要运行时改动完成后，在仍持有有效 lease 时重跑一次。
@@ -432,9 +458,9 @@ After completion or abort, report the frozen baseline, released result if any, a
 
 ## 每阶段默认三个协调点
 
-一个已批准阶段默认只有：开始时的一份控制合同、真实范围或风险变化时的一次重新审批、结束时的一次完成复核。批准边界内的实现修正、测试夹具修正、定向复验和事实整理由开发任务在同一 turn 自行闭环，不为每个微调重建完整 STRICT relay。 无范围、风险或事实源变化时不重复审批或重读完整历史/全文证据；复用已经核验的基线与证据，只核对当前差量，发现漂移或冲突再读取直接相关的原始证据。该复用不降低独立复核、候选/制品绑定和外部操作授权要求。
+默认协调点为：阶段开始确认控制合同、真实范围/风险变化时重新审批、阶段结束按风险验收/复核。QUICK 的明确修改请求本身可构成授权且不默认独立 Astra 复核；STANDARD 保留一次方案确认与适用验收；STRICT 保留完整合同和独立复核。具体介入规则见 [任务分配与介入](#任务分配与介入)。
 
-该精简不覆盖产品行为、协议、持久化、数据格式、安全、权限、迁移、发布、外部操作或其他已定义 stop condition；任一边界发生实质变化时必须立即停止并重新审批。证据不足可以要求补证据，但开发任务应一次返回完整的相关输出、Git/lease 状态和剩余边界，避免碎片化往返。
+批准边界内的实现、夹具修正、定向复验和事实收口由同一执行者在完整阶段中连续闭环，不按每条命令重建 relay。事实源未变时复用已核验基线，只看差量；漂移或冲突再追原始证据。证据不足一次返回完整相关输出、Git/lease 状态和覆盖限制，避免碎片化往返。候选/制品绑定与独立复核要求不因复用而降低；产品、协议、持久化、数据、安全、权限、迁移、发布或外部边界变化仍立即停止重新审批。
 
 ## 本地会话大小检查与阶段边界轮换
 
@@ -477,7 +503,7 @@ After completion or abort, report the frozen baseline, released result if any, a
 2. 绑定的 Codex/DSH Developer Agent 在任何项目文件写入、暂存、提交，或会产生持久副作用的测试前，先核对当前 HEAD、`git status --short`、cached、公共最新日志、可用的私有 TODO / handoff 和 relayId，再执行 `status` 与 `acquire`；私有源缺失时不得从公开摘要恢复或重建内部计划。
 3. `acquire` 退出 0 后才可写入。持有者在到期前执行 `renew`，并在每个长阶段或可能跨 TTL 的命令前确认仍为同一 `leaseId`；lease 到期或续租失败后必须停止新写入。
 4. 阶段完成且 cached 已清空后，以匹配的 runtime、approval/developer 身份和 `leaseId` 执行 `release`。切换运行时前，原审批侧停止发送新 relay，原 Developer 释放 lease；新 Developer 以新 relayId 和当前 HEAD 重新申请。
-5. DSH 是 Codex 不可用时的替代开发通道，不是并行写入通道。任一 runtime 发现其他 holder、恢复要求或不确定现场都必须停止，不得靠 mailbox、任务标题或口头声明覆盖 lease。
+5. DSH 是按任务特点选择的日常执行通道；Codex、DSH 或 Claude Code 的分工不改变同一物理 worktree 仅一个持租约写者。Claude Code 如无已验证的 holder/runtime 身份映射，必须停止写入并报告，不得发明 schema 值或借用其他 holder。任一 runtime 发现其他 holder、恢复要求或不确定现场都必须停止，不得靠 mailbox、任务标题或口头声明覆盖 lease；`status=none` 不证明 DSH 或其他写者已停止。
 6. CODE-034 首次创建 helper 时 helper 尚不存在，因此只允许本阶段一次 bootstrap 写入；helper 可运行后必须立即取得 lease，且该例外写入开发日志。后续会话不存在 bootstrap 例外。
 
 ## 唯一 CLI
