@@ -56,34 +56,118 @@ def _temp_update_bats():
     return set(Path(tempfile.gettempdir()).glob("code-update-*.bat"))
 
 
-def _visible_product_dialog_count():
-    """Count visible Win32 dialogs belonging to this product; 0 on any failure."""
+def _product_process_pids():
+    """PIDs of this test process and its descendants; never a desktop-wide scan.
+
+    Ownership is what decides whether a window is ours: "#32770" is the standard
+    Windows dialog class, so scanning the whole desktop reports any unrelated
+    application's dialog (a game launcher, an installer, a security tool) as a
+    fixture leak.  A window can only be leaked by us if our own process tree owns
+    it.
+    """
+    pids = {os.getpid()}
     if os.name != "nt":
-        return 0
+        return pids
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _ProcessEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+        if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+            return pids
+        try:
+            entry = _ProcessEntry()
+            entry.dwSize = ctypes.sizeof(_ProcessEntry)
+            parents = {}
+            if kernel32.Process32FirstW(snapshot, ctypes.byref(entry)):
+                while True:
+                    parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                    if not kernel32.Process32NextW(snapshot, ctypes.byref(entry)):
+                        break
+            changed = True
+            while changed:
+                changed = False
+                for pid, parent in parents.items():
+                    if parent in pids and pid not in pids:
+                        pids.add(pid)
+                        changed = True
+        finally:
+            kernel32.CloseHandle(snapshot)
+    except Exception:
+        # A degraded enumeration can only under-report our own tree; it never
+        # falls back to the desktop-wide scan that produced false positives.
+        return {os.getpid()}
+    return pids
+
+
+def _enumerate_visible_windows():
+    """Return (pid, class name, title) for every visible top-level window."""
+    rows = []
+    if os.name != "nt":
+        return rows
     try:
         import ctypes
         from ctypes import wintypes
 
         user32 = ctypes.WinDLL("user32", use_last_error=True)
-        seen = [0]
         callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+        pid = wintypes.DWORD()
 
         def callback(hwnd, _lparam):
-            if not user32.IsWindowVisible(hwnd):
-                return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            title = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, title, length + 1)
-            cls = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, cls, 256)
-            if cls.value == "#32770" or title.value.startswith(_PRODUCT_DIALOG_TITLES):
-                seen[0] += 1
+            if user32.IsWindowVisible(hwnd):
+                length = user32.GetWindowTextLengthW(hwnd)
+                title = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, title, length + 1)
+                cls = ctypes.create_unicode_buffer(256)
+                user32.GetClassNameW(hwnd, cls, 256)
+                if user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid)):
+                    rows.append((int(pid.value), cls.value, title.value))
             return True
 
         user32.EnumWindows(callback_type(callback), 0)
-        return seen[0]
     except Exception:
-        return 0
+        return []
+    return rows
+
+
+def _visible_product_dialog_count(*, owner_pids=None, windows=None):
+    """Count visible product dialogs owned by this process tree; 0 on any failure.
+
+    owner_pids / windows are injectable so the ownership rule can be exercised
+    without opening a real window; production callers pass neither and get the
+    real process tree and the real desktop enumeration.
+    """
+    if windows is None:
+        if os.name != "nt":
+            return 0
+        windows = _enumerate_visible_windows()
+    if owner_pids is None:
+        owner_pids = _product_process_pids()
+    owner = {int(pid) for pid in owner_pids}
+    count = 0
+    for pid, class_name, title in windows:
+        if int(pid) not in owner:
+            continue
+        if class_name == "#32770" or title.startswith(_PRODUCT_DIALOG_TITLES):
+            count += 1
+    return count
 
 
 def _fixture_process_count():
@@ -2402,6 +2486,74 @@ class TestUpdaterHelpers(unittest.TestCase):
         self.assertEqual(_fixture_process_count(), 0)
         self.assertEqual(sorted(_temp_update_bats() - _TEMP_BATS_BEFORE), [])
         self.assertEqual(sorted(_fixture_temp_dirs() - _FIXTURE_DIRS_BEFORE), [])
+
+    def test_dialog_guard_ignores_visible_dialogs_owned_by_foreign_processes(self):
+        # "#32770" is the standard Windows dialog class: another application's
+        # dialog must never be reported as a leak of ours.
+        windows = [(os.getpid() + 4242, "#32770", "no_active_wnd")]
+        self.assertEqual(_visible_product_dialog_count(owner_pids={os.getpid()}, windows=windows), 0)
+
+    def test_dialog_guard_still_fails_on_dialogs_owned_by_our_own_process_tree(self):
+        # the guard must keep its original detection power for real leaks
+        windows = [(os.getpid(), "#32770", "anything")]
+        self.assertEqual(_visible_product_dialog_count(owner_pids={os.getpid()}, windows=windows), 1)
+
+    def test_dialog_guard_ignores_foreign_windows_with_product_titles(self):
+        own, foreign = os.getpid(), os.getpid() + 4243
+        windows = [
+            (foreign, "Notepad", _PRODUCT_DIALOG_TITLES[0]),
+            (own, "Notepad", _PRODUCT_DIALOG_TITLES[1]),
+        ]
+        self.assertEqual(_visible_product_dialog_count(owner_pids={own}, windows=windows), 1)
+
+    def test_dialog_guard_detects_a_real_dialog_window_of_our_own_process(self):
+        # end-to-end self-proof: a genuine class-#32770 window created by this
+        # process is still a leak.  It is created off-screen as a popup so it can
+        # never appear on the user's desktop, and destroyed in the same test.
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.CreateWindowExW.argtypes = [
+            wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+        ]
+        WS_VISIBLE, WS_POPUP = 0x10000000, 0x80000000
+        hwnd = user32.CreateWindowExW(
+            0, "#32770", "fixture-dialog-guard-probe", WS_VISIBLE | WS_POPUP,
+            -32000, -32000, 100, 100, None, None, None, None,
+        )
+        try:
+            self.assertTrue(hwnd, "could not create the probe window")
+            self.assertEqual(_visible_product_dialog_count(), 1)
+        finally:
+            if hwnd:
+                user32.DestroyWindow(hwnd)
+        self.assertEqual(_visible_product_dialog_count(), 0)
+
+    def test_dialog_guard_ownership_follows_the_process_tree(self):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(5)"],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            pids = set()
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                pids = _product_process_pids()
+                if child.pid in pids:
+                    break
+                time.sleep(0.1)
+            self.assertIn(os.getpid(), pids)
+            self.assertIn(child.pid, pids)
+            self.assertNotIn(os.getpid() + 4242, pids)
+        finally:
+            child.kill()
+            child.wait(timeout=30)
 
     def test_cleanup_keeps_running_and_previous_version_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
