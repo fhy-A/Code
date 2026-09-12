@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-12 | 修复续（提交 `dca21e7`，未发布）：**暂存目录名与 operation id 解耦**（`op1_/op2_<64hex>` → 前缀+16hex）并就地 `os.rename` 迁移，跑通 legacy store 的恢复路径；顺带修掉 `_atomic_json` 临时名内嵌 68 字符 id 与 `skill_store_management.py` 5 处暂存寻址（管理恢复曾 57 项失败）；实测 120→72、266→218、291→243、290→242；新增 4 项长路径用例（含迁移幂等与 rename 失败不 brick）；回归 `test_skill_store.py` 111 passed、27 个技能套件 749 passed／2 failed（既存环境失败：未跟踪 `data/skill-store-v1/` 触发 `management_client_upgrade_required`，与本 diff 无关） | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 修复 MAX_PATH 溢出（提交 `9a204c3`，未发布）：暂存区 op id `op1_<64hex>`→`op1_<16hex>`（幂等不变），`_OP_ID`/`_STORE_OP_ID`/`_TEMP` 双格式兼容，恢复旧 journal 时沿用其 id，staging 残留改为 best-effort 回收且不影响启动；实测 266→218、最长内置资源 290→242（≤260）；新增 6 条用例（含 258/259/260 边界与旧 store 兼容）；回归 247+36 passed | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 根因确认（**仅记录、未修复**）：第三方机器技能库启动失败＝**Windows MAX_PATH 溢出** —— 真机日志（用户机器实测）`underlying=FileNotFoundError: errno=2` 的 filename 长 **266** > 260；本机独立核验：换 `Admin` 后 258（差 8，故本机 `LongPathsEnabled=1` 复现不出）；脚手架占 212/266（`staging\op1_<64hex>\` 77 + `objects\sha256\xx\<64hex>\content\` 91），技能包本身仅 54；修复方向与兼容问题已入私有待办，待用户确认 | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 已排除假设（**本机独立核验**）：第三方机器 `.code` 的「只读」属性**不是**启动失败原因——整树 10912 条目带 R 属性者 0；隔离探针证明目录级 R 不阻断新建文件/子目录与删除；能写出 42 行日志本身即证明可写；Explorer 该复选框标签即「仅应用于文件夹中的文件」。后续定位改依赖诊断增强输出 `underlying=… filename=…` | [查看](2026/2026-09-12.md) |
