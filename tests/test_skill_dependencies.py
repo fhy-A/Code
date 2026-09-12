@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1060,6 +1061,93 @@ class TestDependencyOperations(unittest.TestCase):
         self.assertEqual(progress[0]["phase"], "install_packages")
         self.assertEqual(progress[-1]["phase"], "step_completed")
         self.assertNotIn("_argv", progress[0]["step"])
+
+
+class TestDependencyProbeStdinIsolation(unittest.TestCase):
+    """A dependency probe must never inherit the parent process stdin.
+
+    On Windows a child that inherits a piped stdin can hang until its timeout
+    (measured 8.15s for the python probe), which used to stall the whole boot
+    chain when the app itself was launched with piped stdio.
+    """
+
+    def test_python_probe_detaches_parent_stdin(self):
+        completed = subprocess.CompletedProcess(
+            ["python"], 0,
+            stdout=json.dumps({"demo-python": {"installed": True, "version": "1.0"}}),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            with (
+                mock.patch.object(dependencies.shutil, "which", return_value=sys.executable),
+                mock.patch.object(dependencies.subprocess, "run", return_value=completed) as run_command,
+            ):
+                result = dependencies._probe_python(
+                    [{"type": "python", "id": "demo-python", "name": "demo-python",
+                      "importName": "demo_python", "distribution": "demo-python"}],
+                    Path(temp),
+                )
+        self.assertTrue(result["demo-python"]["installed"])
+        self.assertIs(run_command.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_dependency_termination_detaches_parent_stdin(self):
+        class _RunningProcess:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        completed = subprocess.CompletedProcess(["taskkill"], 0, stdout="", stderr="")
+        with (
+            mock.patch.object(dependencies.os, "name", "nt"),
+            mock.patch.object(dependencies.subprocess, "run", return_value=completed) as run_command,
+        ):
+            dependencies._terminate_dependency_process(_RunningProcess())
+        self.assertEqual(run_command.call_args.args[0][:2], ["taskkill", "/PID"])
+        self.assertIs(run_command.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_dependency_step_process_detaches_parent_stdin(self):
+        captured = {}
+
+        class _FakeProcess:
+            returncode = 0
+
+            def __init__(self, *args, **kwargs):
+                captured.update(kwargs)
+
+            def communicate(self, *args, **kwargs):
+                return ("ok", "")
+
+            def poll(self):
+                return 0
+
+            def kill(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        plan = {
+            "actionable": True,
+            "steps": [{
+                "id": "step",
+                "type": "python",
+                "purpose": "install_packages",
+                "displayCommand": "python -c pass",
+                "_argv": [sys.executable, "-c", "pass"],
+                "_cwd": None,
+            }],
+        }
+        with mock.patch.object(dependencies.subprocess, "Popen", _FakeProcess):
+            result = dependencies.execute_dependency_operation_plan(plan, timeout_seconds=10)
+        self.assertTrue(result["ok"])
+        self.assertIs(captured["stdin"], subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

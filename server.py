@@ -18281,7 +18281,7 @@ def _skill_frontmatter_tools(meta, skill_dir):
         except (TypeError, ValueError, json.JSONDecodeError):
             metadata = {}
     capability = str(
-        (metadata or {}).get("toolCapability")
+        ((metadata or {}).get("toolCapability") or "")
         if isinstance(metadata, dict) else ""
     ).strip()
     if not capability:

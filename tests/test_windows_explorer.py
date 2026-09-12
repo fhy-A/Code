@@ -156,6 +156,7 @@ class TestWindowsExplorerPureContracts(unittest.TestCase):
         self.assertIn("$utf8.GetBytes([string]$json)", command[-1])
         self.assertEqual(runner.call_args.kwargs["encoding"], "utf-8")
         self.assertEqual(runner.call_args.kwargs["errors"], "strict")
+        self.assertIs(runner.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertNotIn("LocationName", command[-1])
         self.assertNotIn("AppActivate", command[-1])
         failing = windows_explorer.ShellWindowsProvider(

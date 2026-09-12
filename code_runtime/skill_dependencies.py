@@ -625,6 +625,7 @@ def _probe_python(requirements, data_dir):
         completed = subprocess.run(
             [executable, "-c", script, json.dumps(query, separators=(",", ":"))],
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -1342,6 +1343,7 @@ def _terminate_dependency_process(process):
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 timeout=5,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -1419,6 +1421,7 @@ def execute_dependency_operation_plan(
             process = subprocess.Popen(
                 list(step.get("_argv") or []),
                 cwd=step.get("_cwd") or None,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

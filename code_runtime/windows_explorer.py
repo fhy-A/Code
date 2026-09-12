@@ -124,6 +124,7 @@ $json = ConvertTo-Json -InputObject $items -Compress
             completed = self._runner(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command", self._SCRIPT],
                 capture_output=True,
+                stdin=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 errors="strict",
