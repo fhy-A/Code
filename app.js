@@ -5288,7 +5288,7 @@ function formatSessionTime(iso) {
   return `${y}-${m}-${day}`;
 }
 
-const PROJECT_SESSION_PREVIEW_LIMIT = 3;
+const PROJECT_SESSION_PREVIEW_LIMIT = 5;
 const UNASSIGNED_PROJECT_KEY = "__unassigned_sessions__";
 
 function normalizePathIdentity(path) {
@@ -5415,6 +5415,15 @@ function selectProjectSessionPreview(
     hiddenCount: ordered.filter(
       (session) => !items.some((visible) => visible.id === session.id),
     ).length,
+  };
+}
+
+function projectSessionToggleState(preview, expanded = false) {
+  const total = Number(preview?.total || 0);
+  if (!total || total <= PROJECT_SESSION_PREVIEW_LIMIT) return null;
+  return {
+    mode: expanded ? "collapse" : "expand",
+    remaining: total - PROJECT_SESSION_PREVIEW_LIMIT,
   };
 }
 
@@ -6162,12 +6171,13 @@ function renderProjectSection(project, sessions, pinnedIds, collapsedProjects, e
   } else {
     html += '<div class="project-empty-sessions">' + t("noProjectSessions") + '</div>';
   }
-  if (preview.total > PROJECT_SESSION_PREVIEW_LIMIT) {
+  const sessionToggle = projectSessionToggleState(preview, expanded);
+  if (sessionToggle) {
     html += '<button class="project-sessions-toggle" type="button" data-project-key="' +
       escapeHtml(sectionKey) + '">' +
-      (expanded
+      (sessionToggle.mode === "collapse"
         ? t("collapseSessions")
-        : t("showAllSessions")) +
+        : t("showAllSessions", { count: sessionToggle.remaining })) +
       '</button>';
   }
   html += '</div></div>';

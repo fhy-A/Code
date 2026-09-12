@@ -30508,14 +30508,18 @@ process.stdout.write(JSON.stringify({{
         self.assertIn('uiIcon(name', icon_source)
         self.assertIn("projectEditorIcons();", APP_SOURCE)
 
-    def test_sidebar_does_not_render_session_counts(self):
+    def test_sidebar_session_toggle_shows_the_remaining_session_count(self):
         render_start = APP_SOURCE.index("function renderProjectSection")
         render_end = APP_SOURCE.index("function renderSessions()", render_start)
         render_source = APP_SOURCE[render_start:render_end]
         self.assertNotIn("project-count", render_source)
-        self.assertNotIn('t("showAllSessions", { count:', render_source)
-        self.assertEqual(I18N_SOURCE.count('showAllSessions: "显示全部"'), 1)
-        self.assertEqual(I18N_SOURCE.count('showAllSessions: "Show all"'), 1)
+        # the collapsed toggle names how many sessions are still hidden, and the
+        # count comes from the shared helper instead of an inline subtraction
+        self.assertIn("projectSessionToggleState(preview, expanded)", render_source)
+        self.assertIn('t("showAllSessions", { count: sessionToggle.remaining })', render_source)
+        self.assertIn("PROJECT_SESSION_PREVIEW_LIMIT = 5", APP_SOURCE)
+        self.assertEqual(I18N_SOURCE.count('showAllSessions: "展开其余 {count} 个会话"'), 1)
+        self.assertEqual(I18N_SOURCE.count('showAllSessions: "Show {count} more"'), 1)
 
     def test_unassigned_sessions_have_concise_explanatory_copy(self):
         self.assertEqual(I18N_SOURCE.count('otherSessions: "无项目会话"'), 1)
@@ -30576,9 +30580,11 @@ const sessions = [
   {{ id: "s3", updatedAt: "2026-07-26T10:00:00" }},
   {{ id: "s4", updatedAt: "2026-07-26T09:00:00" }},
   {{ id: "s5", updatedAt: "2026-07-26T08:00:00" }},
+  {{ id: "s6", updatedAt: "2026-07-26T07:00:00" }},
+  {{ id: "s7", updatedAt: "2026-07-26T06:00:00" }},
 ];
-const limited = selectProjectSessionPreview(sessions, ["s4"], "s5", false);
-const expanded = selectProjectSessionPreview(sessions, ["s4"], "s5", true);
+const limited = selectProjectSessionPreview(sessions, ["s6"], "s7", false);
+const expanded = selectProjectSessionPreview(sessions, ["s6"], "s7", true);
 process.stdout.write(JSON.stringify({{
   limited: limited.items.map((item) => item.id),
   hiddenCount: limited.hiddenCount,
@@ -30593,9 +30599,58 @@ process.stdout.write(JSON.stringify({{
             check=True,
         )
         data = json.loads(completed.stdout)
-        self.assertEqual(data["limited"], ["s4", "s1", "s2", "s5"])
+        # five most recent (pinned first) plus the still-visible active session
+        self.assertEqual(data["limited"], ["s6", "s1", "s2", "s3", "s4", "s7"])
         self.assertEqual(data["hiddenCount"], 1)
-        self.assertEqual(data["expanded"], ["s4", "s1", "s2", "s3", "s5"])
+        self.assertEqual(
+            data["expanded"], ["s6", "s1", "s2", "s3", "s4", "s5", "s7"],
+        )
+
+    def test_project_session_toggle_counts_are_exact_at_the_boundaries(self):
+        helper_start = APP_SOURCE.index("const PROJECT_SESSION_PREVIEW_LIMIT")
+        helper_end = APP_SOURCE.index("async function refreshProjects", helper_start)
+        helper_source = APP_SOURCE[helper_start:helper_end]
+        script = f"""
+{helper_source}
+const build = (count) => Array.from({{ length: count }}, (_, index) => ({{
+  id: "s" + index,
+  updatedAt: "2026-07-26T" + String(23 - index).padStart(2, "0") + ":00:00",
+}}));
+const seen = {{}};
+for (const total of [3, 5, 6, 10]) {{
+  const preview = selectProjectSessionPreview(build(total), [], "", false);
+  seen[total] = {{
+    visible: preview.items.length,
+    hiddenCount: preview.hiddenCount,
+    collapsed: projectSessionToggleState(preview, false),
+    expanded: projectSessionToggleState(preview, true),
+  }};
+}}
+process.stdout.write(JSON.stringify(seen));
+"""
+        completed = subprocess.run(
+            ["node", "-e", script],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        data = json.loads(completed.stdout)
+        # total <= 5: everything is already visible, so the control must not exist
+        self.assertEqual(data["3"]["visible"], 3)
+        self.assertEqual(data["5"]["visible"], 5)
+        self.assertIsNone(data["3"]["collapsed"])
+        self.assertIsNone(data["5"]["collapsed"])
+        # total 6: five shown, exactly one remaining
+        self.assertEqual(data["6"]["visible"], 5)
+        self.assertEqual(data["6"]["hiddenCount"], 1)
+        self.assertEqual(data["6"]["collapsed"], {"mode": "expand", "remaining": 1})
+        self.assertEqual(data["6"]["expanded"], {"mode": "collapse", "remaining": 1})
+        # total 10: five shown, five remaining - never zero, never negative
+        self.assertEqual(data["10"]["visible"], 5)
+        self.assertEqual(data["10"]["hiddenCount"], 5)
+        self.assertEqual(data["10"]["collapsed"], {"mode": "expand", "remaining": 5})
+        self.assertEqual(data["10"]["expanded"], {"mode": "collapse", "remaining": 5})
 
     def test_project_session_order_uses_conversation_time_after_pins(self):
         helper_start = APP_SOURCE.index("const PROJECT_SESSION_PREVIEW_LIMIT")
@@ -30648,7 +30703,7 @@ process.stdout.write(JSON.stringify(orderProjects(projects, ["c"]).map((item) =>
 
     def test_preview_expansion_is_persisted_per_project(self):
         self.assertIn("code-expanded-project-sessions", APP_SOURCE)
-        self.assertIn("PROJECT_SESSION_PREVIEW_LIMIT = 3", APP_SOURCE)
+        self.assertIn("PROJECT_SESSION_PREVIEW_LIMIT = 5", APP_SOURCE)
 
     def test_new_session_inherits_project_without_filter_dropdown(self):
         navigation_start = SESSIONS_SOURCE.index("function createSessionNavigation(")

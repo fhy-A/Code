@@ -25059,6 +25059,11 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
     expect(response.body.lastMessageTime).toBe(lastMessageTime);
     return response.body;
   };
+  // Two filler sessions keep the project longer than the collapsed preview (5).
+  // They are created first and carry the oldest times, so the focused session
+  // stays the newest one exactly as this scenario assumed before.
+  const fillerTwo = await createSession("H4 session order filler two", "2026-08-20T06:00:00Z");
+  const fillerOne = await createSession("H4 session order filler one", "2026-08-20T07:00:00Z");
   const older = await createSession("H4 session order older", "2026-08-20T09:00:00Z");
   const middle = await createSession("H4 session order middle", "2026-08-20T10:00:00Z");
   const newer = await createSession("H4 session order newer", "2026-08-20T11:00:00Z");
@@ -25081,8 +25086,9 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
   expect(branch.body.lastMessageTime).toBe("2026-08-20T10:00:00Z");
 
   const tied = [middle.id, branch.body.id].sort((left, right) => left.localeCompare(right));
-  let expectedOrder = [newer.id, ...tied, older.id];
-  const defaultVisibleOrder = expectedOrder.slice(0, 3);
+  const trailing = [fillerOne.id, fillerTwo.id];
+  let expectedOrder = [newer.id, ...tied, older.id, ...trailing];
+  const defaultVisibleOrder = expectedOrder.slice(0, 5);
   const allowedBlockedStaticPaths = [
     "/npm/katex@0.16.11/dist/katex.min.css",
     "/npm/katex@0.16.11/dist/katex.min.js",
@@ -25125,7 +25131,8 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
   if (runtime === "classic") await assertDirectClassicEntry(page);
   await expect.poll(readDomOrder).toEqual(defaultVisibleOrder);
   await expect(sessionToggle).toBeVisible();
-  await expect(sessionToggle).toHaveText("Show all");
+  // six sessions with five collapsed: the toggle names exactly the remaining one
+  await expect(sessionToggle).toHaveText("Show 1 more");
   const beforeSwitch = await readApiProjection();
   expect(beforeSwitch.order).toEqual(expectedOrder);
   expect(beforeSwitch.times).toEqual({
@@ -25187,7 +25194,7 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
   assertSameExplicitIsoInstant(continuation.body.lastMessageTime, continuedUtcTime);
   expect(continuation.body.createdAt).toMatch(/Z$/);
   expect(continuation.body.updatedAt).toMatch(/Z$/);
-  expectedOrder = [older.id, newer.id, ...tied];
+  expectedOrder = [older.id, newer.id, ...tied, ...trailing];
   const afterContinuation = await readApiProjection();
   expect(afterContinuation.order).toEqual(expectedOrder);
   assertSameExplicitIsoInstant(afterContinuation.times[older.id], continuedUtcTime);
@@ -30528,11 +30535,12 @@ async function exerciseSessionArchiveProductSurface(h4, runtime) {
     await expect.poll(async () => {
       if (await allFixtureSessionsVisible()) return true;
       if (await toggle.count() !== 1 || !await toggle.isVisible()) return false;
-      return String(await toggle.textContent() || "").trim() === "Show all";
+      // the collapsed toggle names how many sessions are still hidden
+      return /^Show \d+ more$/.test(String(await toggle.textContent() || "").trim());
     }).toBe(true);
     if (!await allFixtureSessionsVisible()) {
       await expect(toggle).toBeVisible();
-      await expect(toggle).toHaveText("Show all");
+      await expect(toggle).toHaveText(/^Show \d+ more$/);
       await toggle.click();
       await expect(toggle).toHaveText("Show less");
     }
