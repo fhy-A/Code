@@ -3,7 +3,7 @@
 > 仅在未完成阶段暂停/换手时更新私有 `../../workbar-private/development-handoff.md`，不覆盖无关活动。公共 handoff 是兼容 stub。此处只存当前差量；完成历史引用日志，未完成引用私有 TODO 的稳定 ID，不复制全文或另建事实源。
 
 
-人工委托或交付时引用 [委托包短模板](approval-relay-protocol.md#委托包短模板) / [交付包短模板](approval-relay-protocol.md#交付包短模板)，本交接只保存差量与链接，不复制包正文。
+人工委托、接收回执或交付时引用 [委托包短模板](approval-relay-protocol.md#委托包短模板) / [接收回执短模板](approval-relay-protocol.md#接收回执短模板) / [交付包短模板](approval-relay-protocol.md#交付包短模板)，本交接只保存差量与链接，不复制包正文。
 
 ## 元数据与目标
 
