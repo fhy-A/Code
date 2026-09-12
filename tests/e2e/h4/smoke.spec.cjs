@@ -17159,10 +17159,31 @@ const test = base.test.extend({
             : `${host.ready.codeUrl}/`;
           diagnosticSteps.push({ step: "navigate", runtime });
           await page.goto(target, { waitUntil: "domcontentloaded" });
-          await expect(page.locator("#modelPillBtn")).toHaveAttribute("data-model", MODEL_ID);
-          await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
-            element.value = fakeUrl;
-          }, host.ready.fakeUrl);
+          // The isolated upstream only exists in this host, so hand it to the app
+          // BEFORE waiting for a model route and drive the product's own refresh
+          // entry (the Models dialog button) until the synthetic model appears.
+          // The button sits behind the settings modal, so its click is dispatched
+          // programmatically; the refresh request still comes from the product
+          // code path, never from a hand-written fetch. The base URL is re-applied
+          // on every attempt because early startup rewrites the hidden input.
+          const modelDeadline = Date.now() + 30_000;
+          let modelReady = false;
+          while (!modelReady && Date.now() < modelDeadline) {
+            await page.locator("#baseUrl").evaluate((element, fakeUrl) => {
+              element.value = fakeUrl;
+            }, host.ready.fakeUrl);
+            await page.evaluate(() => {
+              document.getElementById("refreshModelsBtn")?.dispatchEvent(
+                new MouseEvent("click", { bubbles: true }),
+              );
+            });
+            modelReady = (
+              await page.locator("#modelPillBtn").getAttribute("data-model")
+            ) === MODEL_ID;
+            if (!modelReady) await page.waitForTimeout(500);
+          }
+          await expect(page.locator("#modelPillBtn"))
+            .toHaveAttribute("data-model", MODEL_ID, { timeout: 30_000 });
         },
         async proveNonLoopbackBlocked() {
           const result = await page.evaluate(async () => {
@@ -25140,6 +25161,8 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
     [tied[0]]: "2026-08-20T10:00:00Z",
     [tied[1]]: "2026-08-20T10:00:00Z",
     [older.id]: "2026-08-20T09:00:00Z",
+    [fillerOne.id]: "2026-08-20T07:00:00Z",
+    [fillerTwo.id]: "2026-08-20T06:00:00Z",
   });
   await sessionToggle.click();
   await assertExpandedOrder();
@@ -25170,26 +25193,48 @@ async function exerciseSessionLastMessageOrder(h4, runtime) {
 
   const continuedLocalTime = "2026-08-24T13:37:00";
   const continuedUtcTime = new Date(continuedLocalTime).toISOString();
-  const continuation = await sendProductionJson(
-    page,
-    `/api/sessions/${encodeURIComponent(older.id)}`,
-    "PUT",
-    {
-      title: "H4 session order older renamed",
-      messages: [
-        {
-          role: "user",
-          content: "H4 session order older message",
-          _time: "2026-08-20T09:00:00Z",
-        },
-        {
-          role: "user",
-          content: "H4 session order continued message",
-          _time: continuedLocalTime,
-        },
-      ],
-    },
-  );
+  // Full-message Session writes are guarded by the revision CAS, and the running
+  // app is a concurrent writer of the same Session, so the fixture must echo the
+  // authoritative current revision instead of relying on the legacy upgrade.
+  const continuationPayload = {
+    title: "H4 session order older renamed",
+    messages: [
+      {
+        role: "user",
+        content: "H4 session order older message",
+        _time: "2026-08-20T09:00:00Z",
+      },
+      {
+        role: "user",
+        content: "H4 session order continued message",
+        _time: continuedLocalTime,
+      },
+    ],
+  };
+  let continuation = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    // /api/sessions deliberately omits the CAS revision, so read the authoritative
+    // value from the single-session projection before writing messages back.
+    const revisionResponse = await fetchProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(older.id)}`,
+    );
+    expect(revisionResponse.status).toBe(200);
+    const expectedRevision = revisionResponse.body?.revision;
+    h4.diagnosticSteps.push({
+      step: "session-order-continuation-attempt",
+      attempt,
+      expectedRevision,
+    });
+    continuation = await sendProductionJson(
+      page,
+      `/api/sessions/${encodeURIComponent(older.id)}`,
+      "PUT",
+      { ...continuationPayload, expectedRevision },
+    );
+    if (continuation.status !== 409) break;
+    await page.waitForTimeout(250);
+  }
   expect(continuation.status).toBe(200);
   assertSameExplicitIsoInstant(continuation.body.lastMessageTime, continuedUtcTime);
   expect(continuation.body.createdAt).toMatch(/Z$/);
