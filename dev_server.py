@@ -144,7 +144,12 @@ def run_dev_server(
     ensure_frontend=ensure_frontend_build,
     owner_acquire=data_dir_owner.acquire_data_dir_owner,
 ):
-    """Run the source instance without invoking ``server.py`` cleanup."""
+    """Run the source instance without invoking ``server.py`` cleanup.
+
+    The post-listener step is shared with launcher and run_server, so the dev
+    entrypoint has no third copy of that sequence; its image reclaim is a no-op
+    because a dev instance is never frozen.
+    """
     port, data_dir = configure_dev_environment()
     owner = owner_acquire(data_dir)
 
@@ -162,8 +167,6 @@ def run_dev_server(
     server_module._migrate_sessions_to_hierarchy()
     server_module._migrate_codex_project_sessions_support()
     server_module._migrate_project_root_paths()
-    server_module._start_agent_run_nonterminal_index_build()
-    server_module._start_agent_run_session_index_build()
 
     handler = create_dev_handler(server_module.CodeHandler, ensure_frontend)
     httpd = server_factory(("127.0.0.1", port), handler)
@@ -173,6 +176,10 @@ def run_dev_server(
     print(f"Code Dev is running: http://127.0.0.1:{port}")
     print(f"Development data: {data_dir}")
     print(f"Project root: {server_module.load_config()['projectRoot']}")
+    # Same shared post-listener step as launcher and run_server: the listener is
+    # bound and the data-directory owner is held.  In a dev instance the reclaim
+    # is a no-op (never frozen) and the AgentRun index prewarm is idempotent.
+    server_module._startup_after_listener(owner, httpd)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

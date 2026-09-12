@@ -31115,6 +31115,41 @@ def _initialize_immutable_skill_runtime(owner, legacy_sync_result=None):
     )
 
 
+def _startup_after_listener(owner, server_obj, *, frozen=None, owner_is_current=True):
+    """Post-listener startup work shared by the packaged and source entrypoints.
+
+    launcher._main (the packaged entrypoint) and run_server used to run different
+    startup sequences, and the packaged path silently skipped every step here --
+    including the old-image reclaim promised by the v0.6.12 notes.  Both paths now
+    call this function once the data-directory lock is held and the listener is
+    bound, so they cannot diverge again.
+
+    service_ready keeps its original meaning: the owner is held, the listener has
+    a socket, and a pending handoff did not replace the owner.  The reclaim stays
+    gated on a frozen build and stays best-effort; the AgentRun index prewarm is a
+    derived, self-healing cache that the request path rebuilds on demand.  No
+    failure here may change startup or an exit code.  Returns service_ready.
+    """
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    try:
+        _start_agent_run_nonterminal_index_build()
+        _start_agent_run_session_index_build()
+    except Exception:
+        pass
+    service_ready = (
+        owner is not None
+        and getattr(server_obj, "socket", None) is not None
+        and bool(owner_is_current)
+    )
+    if frozen and service_ready:
+        try:
+            _cleanup_old_update_images(_update_target_dir(), log_path=DATA_DIR / "update.log")
+        except Exception:
+            pass
+    return service_ready
+
+
 def run_server(
     *,
     owner_acquire=data_dir_owner.acquire_data_dir_owner,
@@ -31168,31 +31203,23 @@ def run_server(
     _migrate_sessions_to_hierarchy()
     _migrate_codex_project_sessions_support()
     _migrate_project_root_paths()
-    _start_agent_run_nonterminal_index_build()
-    _start_agent_run_session_index_build()
     server = server_factory(("127.0.0.1", PORT), CodeHandler)
     server.socket.settimeout(2.0)
     tray_starter(PORT, server)
     print(f"Code is running: http://127.0.0.1:{PORT}")
     print(f"Proxy upstream: {NEW_API_BASE_URL}")
     print(f"Project root: {load_config()['projectRoot']}")
-    # Old images are reclaimed only once this instance is the running, uniquely
-    # owning service.  A spawned process is not a working app: removing the
-    # previous image before the new version serves would destroy the rollback
-    # safety net.  Every failure path above (owner unavailable, immutable Skill
-    # startup, a completed handover) returns before this point, so reaching here
-    # means the data-directory lock is held and the listener is bound.  The
-    # cleanup itself stays best-effort and can never break startup.
-    service_ready = (
-        owner is not None
-        and getattr(server, "socket", None) is not None
-        and handoff_state.get("owner") is owner
+    # The shared post-listener step reclaims old images only once this instance
+    # is the running, uniquely owning service.  A spawned process is not a
+    # working app: removing the previous image before the new version serves
+    # would destroy the rollback safety net.  Every failure path above (owner
+    # unavailable, immutable Skill startup, a completed handover) returns before
+    # this point, so reaching here means the data-directory lock is held and the
+    # listener is bound.  launcher._main calls the same function at the same
+    # point, so the packaged build now performs it too.
+    _startup_after_listener(
+        owner, server, owner_is_current=handoff_state.get("owner") is owner,
     )
-    if getattr(sys, "frozen", False) and service_ready:
-        try:
-            _cleanup_old_update_images(_update_target_dir(), log_path=DATA_DIR / "update.log")
-        except Exception:
-            pass
     try:
         server.serve_forever()
     except KeyboardInterrupt:

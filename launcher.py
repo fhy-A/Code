@@ -385,6 +385,12 @@ def _main(*, owner_acquire=data_dir_owner.acquire_data_dir_owner):
     if not had_browser:
         webbrowser.open(f"http://127.0.0.1:{port}")
 
+    # The packaged entrypoint must run the same post-listener startup step as
+    # server.run_server: the listener is bound and the data-directory owner is
+    # held, so the old-image reclaim (promised by the 0.6.12 notes) actually
+    # happens here too.  The step is best-effort and cannot change the exit code.
+    server._startup_after_listener(owner, server_obj)
+
     try:
         tray_started = server.run_tray_main_thread(port, server_obj)
         if not tray_started:

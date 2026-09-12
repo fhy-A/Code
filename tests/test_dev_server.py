@@ -89,13 +89,10 @@ class TestDevServer(unittest.TestCase):
         fake_module._migrate_project_root_paths.side_effect = (
             lambda: events.append("roots")
         )
-        fake_module._start_agent_run_nonterminal_index_build.side_effect = (
-            lambda: events.append("nonterminal-index")
-        )
-        fake_module._start_agent_run_session_index_build.side_effect = (
-            lambda: events.append("session-index")
-        )
         fake_module.start_tray.side_effect = lambda port, httpd: events.append("tray")
+        fake_module._startup_after_listener.side_effect = (
+            lambda owner, httpd: events.append("post-listener")
+        )
 
         def server_factory(address, handler):
             events.append("http")
@@ -124,10 +121,10 @@ class TestDevServer(unittest.TestCase):
         fake_module._migrate_sessions_to_hierarchy.assert_called_once_with()
         fake_module._migrate_codex_project_sessions_support.assert_called_once_with()
         fake_module._migrate_project_root_paths.assert_called_once_with()
-        fake_module._start_agent_run_nonterminal_index_build.assert_called_once_with()
-        fake_module._start_agent_run_session_index_build.assert_called_once_with()
         fake_module._initialize_immutable_skill_runtime.assert_called_once_with(owner)
         fake_module.start_tray.assert_called_once_with(3011, instance)
+        # the third entrypoint shares launcher's and run_server's post-listener step
+        fake_module._startup_after_listener.assert_called_once_with(owner, instance)
         ensure_frontend.assert_called_once_with()
         self.assertTrue(issubclass(instance.handler, fake_module.CodeHandler))
         self.assertEqual(
@@ -141,13 +138,49 @@ class TestDevServer(unittest.TestCase):
                 "sessions",
                 "projects",
                 "roots",
-                "nonterminal-index",
-                "session-index",
                 "http",
                 "tray",
+                "post-listener",
             ],
         )
         owner.release.assert_not_called()
+
+    def test_dev_runner_runs_the_real_shared_post_listener_step(self):
+        # The dev entrypoint must reach the same shared step as the packaged one:
+        # its prewarm is real, while the image reclaim stays a no-op because a dev
+        # instance is never frozen.
+        import server as server_mod
+
+        events, calls = [], []
+        fake_module = mock.Mock()
+        fake_module.CodeHandler = object
+        fake_module.load_config.return_value = {"projectRoot": str(ROOT)}
+        fake_module._startup_after_listener = server_mod._startup_after_listener
+        owner = mock.Mock()
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.dict(
+            os.environ,
+            {"CODE_DEV_PORT": "3011", "CODE_DEV_DATA_DIR": temp_dir},
+            clear=False,
+        ), mock.patch.object(
+            server_mod, "_start_agent_run_nonterminal_index_build",
+            side_effect=lambda: events.append("nonterminal-index"),
+        ), mock.patch.object(
+            server_mod, "_start_agent_run_session_index_build",
+            side_effect=lambda: events.append("session-index"),
+        ), mock.patch.object(
+            server_mod, "_cleanup_old_update_images",
+            side_effect=lambda *args, **kwargs: calls.append((args, kwargs)),
+        ):
+            dev_server.run_dev_server(
+                fake_module,
+                lambda address, handler: _FakeHttpServer(address, handler),
+                ensure_frontend=lambda: False,
+                owner_acquire=lambda data_dir: owner,
+            )
+
+        self.assertEqual(events, ["nonterminal-index", "session-index"])
+        self.assertEqual(calls, [])
 
     def test_busy_owner_stops_before_frontend_or_server_initialization(self):
         owner_acquire = mock.Mock(

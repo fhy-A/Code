@@ -4717,10 +4717,10 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
                 "sessions",
                 "projects",
                 "roots",
-                "nonterminal-index",
-                "session-index",
                 "http",
                 "tray",
+                "nonterminal-index",
+                "session-index",
                 "serve",
             ],
         )
@@ -4913,15 +4913,74 @@ class TestServerDataDirOwnerStartup(unittest.TestCase):
         self.assertNotIn("unlink", launcher_source)
         self.assertNotIn("Remove-Item", launcher_source)
         server_source = Path(server.__file__).resolve().read_text(encoding="utf-8")
+        # Exactly one reclaim call site, and it lives inside the shared
+        # post-listener step that both entrypoints call.
         self.assertEqual(server_source.count("_cleanup_old_update_images(_update_target_dir("), 1)
+        helper_start = server_source.index("def _startup_after_listener(")
+        helper = server_source[helper_start:server_source.index("\ndef ", helper_start + 1)]
+        self.assertIn("_cleanup_old_update_images(_update_target_dir(", helper)
+        self.assertIn('getattr(sys, "frozen", False)', helper)
+        self.assertIn("service_ready", helper)
+        # run_server wires it once the service is up and before it serves
+        run = server_source[server_source.index("def run_server("):]
         self.assertLess(
-            server_source.index('print(f"Code is running: http://127.0.0.1:{PORT}")'),
-            server_source.index("_cleanup_old_update_images(_update_target_dir("),
+            run.index('print(f"Code is running: http://127.0.0.1:{PORT}")'),
+            run.index("_startup_after_listener("),
         )
         self.assertLess(
-            server_source.index("_cleanup_old_update_images(_update_target_dir("),
-            server_source.index("server.serve_forever()"),
+            run.index("_startup_after_listener("),
+            run.index("server.serve_forever()"),
         )
+        # the packaged entrypoint shares the same post-listener step
+        self.assertIn("server._startup_after_listener(", launcher_source)
+
+    def test_post_listener_reclaim_stays_gated_on_frozen_and_ready(self):
+        def call(*, owner_ok=True, socket_ok=True, frozen=True, current=True):
+            calls = []
+            owner = mock.Mock() if owner_ok else None
+            server_obj = mock.Mock()
+            if not socket_ok:
+                server_obj.socket = None
+
+            def spy(*args, **kwargs):
+                calls.append((args, kwargs))
+
+            with mock.patch.object(server, "_start_agent_run_nonterminal_index_build"), \
+                 mock.patch.object(server, "_start_agent_run_session_index_build"), \
+                 mock.patch.object(server, "_cleanup_old_update_images", side_effect=spy):
+                ready = server._startup_after_listener(
+                    owner, server_obj, frozen=frozen, owner_is_current=current,
+                )
+            return ready, calls
+
+        ready, calls = call()
+        self.assertTrue(ready)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], (server._update_target_dir(),))
+        self.assertEqual(calls[0][1]["log_path"], server.DATA_DIR / "update.log")
+
+        # a non-frozen build still has a ready service; it just never reclaims
+        ready, calls = call(frozen=False)
+        self.assertTrue(ready)
+        self.assertEqual(calls, [])
+
+        for overrides in ({"owner_ok": False}, {"socket_ok": False}, {"current": False}):
+            ready, calls = call(**overrides)
+            self.assertFalse(ready, overrides)
+            self.assertEqual(calls, [], overrides)
+
+    def test_post_listener_step_never_changes_startup_or_the_exit_code(self):
+        owner, server_obj = mock.Mock(), mock.Mock()
+        boom = OSError("no space left")
+        with mock.patch.object(server, "_start_agent_run_nonterminal_index_build", side_effect=boom), \
+             mock.patch.object(server, "_start_agent_run_session_index_build", side_effect=boom), \
+             mock.patch.object(server, "_cleanup_old_update_images", side_effect=boom):
+            ready = server._startup_after_listener(owner, server_obj, frozen=True)
+        self.assertTrue(ready)
+        with mock.patch.object(server, "_cleanup_old_update_images", side_effect=boom):
+            self.assertFalse(
+                server._startup_after_listener(None, server_obj, frozen=True)
+            )
 
     def test_run_server_busy_owner_stops_before_runtime_initialization(self):
         owner_acquire = mock.Mock(
@@ -5062,6 +5121,7 @@ class TestLauncherInstall(unittest.TestCase):
             _initialize_immutable_skill_runtime=lambda owner, legacy_sync_result=None: events.append("skills"),
             _initialize_runtime_data_services=lambda: events.append("route-catalogs"),
             run_tray_main_thread=lambda port, httpd: events.append("tray") or True,
+            _startup_after_listener=lambda owner, server_obj: events.append("post-listener"),
         )
 
         def owner_acquire(target):
@@ -5103,6 +5163,7 @@ class TestLauncherInstall(unittest.TestCase):
                 "thread",
                 "thread-start",
                 "browser-open",
+                "post-listener",
                 "tray",
                 "shutdown",
                 "close",
@@ -5110,6 +5171,91 @@ class TestLauncherInstall(unittest.TestCase):
             ],
         )
         owner.release.assert_not_called()
+
+    def test_launcher_runs_the_shared_post_listener_step_and_reclaims_images(self):
+        # The packaged entrypoint is launcher.main.  Before this fix it never ran
+        # the post-listener step, so the reclaim promised by the 0.6.12 notes was
+        # dead code in every installed build: update.log on a real profile has 0
+        # cleanup lines while the old images stay on disk.
+        data_dir = Path(tempfile.mkdtemp()) / ".code"
+        data_dir.mkdir(parents=True)
+        self.addCleanup(shutil.rmtree, data_dir.parent, ignore_errors=True)
+        events = []
+        calls = []
+        owner = mock.Mock()
+
+        class FakeHttpServer:
+            def __init__(self, address, handler):
+                events.append("http")
+                self.socket = mock.Mock()
+
+            def serve_forever(self):
+                events.append("serve")
+
+            def shutdown(self):
+                events.append("shutdown")
+
+            def server_close(self):
+                events.append("close")
+
+        class FakeThread:
+            def __init__(self, *, target, daemon, name):
+                self.daemon = daemon
+
+            def start(self):
+                events.append("thread-start")
+
+            def join(self, timeout=None):
+                events.append("thread-join")
+
+        def spy_cleanup(*args, **kwargs):
+            calls.append((args, kwargs))
+            events.append("cleanup")
+
+        # The fixture clears the environment, so the install root and the log
+        # target are pinned instead of depending on the ambient home directory.
+        update_root = data_dir.parent / "install-root"
+        fake_server = types.SimpleNamespace(
+            CodeHandler=object,
+            _ensure_runtime_data_directories=lambda: events.append("directories"),
+            _initialize_immutable_skill_runtime=lambda owner, legacy_sync_result=None: events.append("skills"),
+            _initialize_runtime_data_services=lambda: events.append("route-catalogs"),
+            run_tray_main_thread=lambda port, httpd: events.append("tray") or True,
+            # the real shared step, so the reclaim runs end to end
+            _startup_after_listener=server._startup_after_listener,
+        )
+
+        def owner_acquire(target):
+            events.append("owner")
+            return owner
+
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(launcher, "get_code_home", return_value=data_dir), \
+             mock.patch.object(launcher, "migrate_old_data_dir", side_effect=lambda: events.append("migrate")), \
+             mock.patch.object(launcher, "ensure_installed", side_effect=lambda **kwargs: events.append("install")), \
+             mock.patch.object(launcher, "get_base_dir", return_value=data_dir.parent), \
+             mock.patch.object(launcher, "ensure_dirs", side_effect=lambda: events.append("dirs") or data_dir), \
+             mock.patch.object(launcher, "should_reuse_browser", side_effect=lambda port: events.append("browser-check") or False), \
+             mock.patch.object(launcher.os, "chdir", side_effect=lambda path: events.append("chdir")), \
+             mock.patch.object(launcher.webbrowser, "open", side_effect=lambda url: events.append("browser-open")), \
+             mock.patch("http.server.ThreadingHTTPServer", side_effect=FakeHttpServer), \
+             mock.patch("threading.Thread", FakeThread), \
+             mock.patch.object(server, "_start_agent_run_nonterminal_index_build", side_effect=lambda: events.append("nonterminal-index")), \
+             mock.patch.object(server, "_start_agent_run_session_index_build", side_effect=lambda: events.append("session-index")), \
+             mock.patch.object(server, "_cleanup_old_update_images", side_effect=spy_cleanup), \
+             mock.patch.object(server, "_update_target_dir", return_value=update_root), \
+             mock.patch.object(server, "DATA_DIR", data_dir), \
+             mock.patch.object(server.sys, "frozen", True, create=True), \
+             mock.patch.dict(sys.modules, {"server": fake_server}):
+            result = launcher._main(owner_acquire=owner_acquire)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [((update_root,), {"log_path": data_dir / "update.log"})])
+        self.assertLess(events.index("nonterminal-index"), events.index("cleanup"))
+        self.assertLess(events.index("session-index"), events.index("cleanup"))
+        # only after the listener is bound and before the tray takes over
+        self.assertLess(events.index("http"), events.index("cleanup"))
+        self.assertLess(events.index("cleanup"), events.index("tray"))
 
     def test_launcher_main_reports_busy_owner_without_creating_crash_log(self):
         stderr = io.StringIO()
