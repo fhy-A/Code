@@ -186,7 +186,7 @@ def create_run(runtime, upstream, model, intent="high", messages=None, session="
     return run
 
 
-@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-5"])
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "claude-opus-4-6", "claude-opus-4-7", "claude-sonnet-4-5"])
 def test_http_tool_replay_durable_and_next_user(runtime, upstream, model):
     fixture, harness = runtime
     server = harness.server_mod
@@ -494,7 +494,7 @@ def test_strict_upstream_really_rejects_missing_assistant_reasoning(upstream):
     assert upstream[0].protocol_errors == [[0]]
 
 
-@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"])
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"])
 @pytest.mark.parametrize("history_kind", ["legacy", "cross_model", "changed_prefix", "compacted"])
 def test_strict_deepseek_history_handoff_completes_tools(runtime, upstream, model, history_kind):
     fixture, harness = runtime
@@ -565,7 +565,7 @@ def test_admitted_static_models_need_no_review_contract(tmp_path, source, model)
 
 
 @pytest.mark.parametrize("source", ["manual", "workbar"])
-@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "claude-opus-4-6", "gpt-5.5"])
+@pytest.mark.parametrize("model", ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp", "claude-opus-4-6", "gpt-5.5"])
 @pytest.mark.parametrize("intent", rc.INTENTS)
 def test_static_unverified_routes_compile_and_complete_real_local_http(runtime, upstream, source, model, intent):
     fixture, harness = runtime

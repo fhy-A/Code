@@ -41,7 +41,15 @@ _add(("gpt-5.4", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
       "gpt-5.4-mini", "gpt-5.4-mini-2026-03-17", "o3", "o3-2025-04-16",
       "o4-mini", "o4-mini-2025-04-16"), "openai", "openai-chat-native-v1",
      ("low", "medium", "high"), "https://developers.openai.com/api/docs/guides/reasoning")
-_add(("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"),
+# DeepSeek official naming (reviewed 2026-09-12 against Models & Pricing): the
+# current model name is deepseek-flash (DeepSeek-V4.1-Flash); deepseek-v4-flash
+# and deepseek-v4-flash-vision-exp stay accepted legacy names served by that same
+# model, and deepseek-v4-pro remains current.  The Thinking Mode guide documents
+# the OpenAI-format contract already compiled below: reasoning_effort
+# low/high/max plus thinking {"type": "enabled"}.
+# https://api-docs.deepseek.com/quick_start/pricing
+# https://api-docs.deepseek.com/guides/thinking_mode/
+_add(("deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro", "deepseek-v4-flash-vision-exp"),
      "deepseek", "deepseek-chat-v4-v1", ("low", "high", "max"),
      "https://api-docs.deepseek.com/guides/thinking_mode/", replay="deepseek")
 MODELS["deepseek-v4-pro"]["override"] = {
