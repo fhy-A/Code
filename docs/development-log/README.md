@@ -29,6 +29,7 @@
 
 | 日期或范围 | 摘要 | 详细记录 |
 |---|---|---|
+| 2026-09-12 | 修复夹具自检守卫的**桌面级假阳性**（提交 `cd276b2`，未发布）：`_visible_product_dialog_count()` 原用 `EnumWindows` 统计整个桌面的 `#32770`（Windows 标准对话框类），任何第三方弹窗（实测 wegame.exe）都会让 25–40 分钟的门禁失败——R006 的 `--reprepare` 因此白跑 2261s；改为**只统计本测试进程及其后代**的窗口（`_product_process_pids()` 后代闭包，失败退化为本进程且绝不回退桌面级），检测能力不变并有屏外真实 `#32770` 窗口自证；教训：**夹具自检判据必须绑定可证明归属，不得桌面级匹配**；6 用例通过、全模块 310 passed | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 修复续（提交 `dca21e7`，未发布）：**暂存目录名与 operation id 解耦**（`op1_/op2_<64hex>` → 前缀+16hex）并就地 `os.rename` 迁移，跑通 legacy store 的恢复路径；顺带修掉 `_atomic_json` 临时名内嵌 68 字符 id 与 `skill_store_management.py` 5 处暂存寻址（管理恢复曾 57 项失败）；实测 120→72、266→218、291→243、290→242；新增 4 项长路径用例（含迁移幂等与 rename 失败不 brick）；回归 `test_skill_store.py` 111 passed、27 个技能套件 749 passed／2 failed（既存环境失败：未跟踪 `data/skill-store-v1/` 触发 `management_client_upgrade_required`，与本 diff 无关） | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 修复 MAX_PATH 溢出（提交 `9a204c3`，未发布）：暂存区 op id `op1_<64hex>`→`op1_<16hex>`（幂等不变），`_OP_ID`/`_STORE_OP_ID`/`_TEMP` 双格式兼容，恢复旧 journal 时沿用其 id，staging 残留改为 best-effort 回收且不影响启动；实测 266→218、最长内置资源 290→242（≤260）；新增 6 条用例（含 258/259/260 边界与旧 store 兼容）；回归 247+36 passed | [查看](2026/2026-09-12.md) |
 | 2026-09-12 | 根因确认（**仅记录、未修复**）：第三方机器技能库启动失败＝**Windows MAX_PATH 溢出** —— 真机日志（用户机器实测）`underlying=FileNotFoundError: errno=2` 的 filename 长 **266** > 260；本机独立核验：换 `Admin` 后 258（差 8，故本机 `LongPathsEnabled=1` 复现不出）；脚手架占 212/266（`staging\op1_<64hex>\` 77 + `objects\sha256\xx\<64hex>\content\` 91），技能包本身仅 54；修复方向与兼容问题已入私有待办，待用户确认 | [查看](2026/2026-09-12.md) |
