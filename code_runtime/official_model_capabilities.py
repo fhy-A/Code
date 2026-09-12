@@ -2,8 +2,8 @@
 
 CATALOG_JSON = r'''{
   "schema": "code-official-model-capabilities/v1",
-  "catalogRevision": "2026-08-21.c1",
-  "verifiedAt": "2026-08-21",
+  "catalogRevision": "2026-09-12.c1",
+  "verifiedAt": "2026-09-12",
   "entries": [
     {
       "provider": "openai",
@@ -343,17 +343,23 @@ CATALOG_JSON = r'''{
     },
     {
       "provider": "deepseek",
-      "modelId": "deepseek-v4-flash",
-      "aliases": [],
+      "modelId": "deepseek-flash",
+      "aliases": [
+        {"id": "deepseek-v4-flash", "moving": false},
+        {"id": "deepseek-v4-flash-vision-exp", "moving": false}
+      ],
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 384000,
       "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing/",
-      "asOf": "2026-08-21",
+      "asOf": "2026-09-12",
       "confidence": "official_direct",
       "status": "active",
       "maxAgeDays": 30,
       "aliasAmbiguity": "retired-legacy-aliases-excluded",
-      "conditions": ["Thinking and non-thinking modes share the model ID; deepseek-chat and deepseek-reasoner are retired."]
+      "conditions": [
+        "Official model name deepseek-flash maps to DeepSeek-V4.1-Flash; the aliases deepseek-v4-flash and deepseek-v4-flash-vision-exp remain accepted but their models are retired and their requests are served by DeepSeek-V4.1-Flash.",
+        "Thinking and non-thinking modes share the model ID; thinking defaults to enabled with effort high, and deepseek-chat / deepseek-reasoner remain retired."
+      ]
     },
     {
       "provider": "deepseek",
@@ -362,12 +368,15 @@ CATALOG_JSON = r'''{
       "contextWindowTokens": 1000000,
       "maxOutputTokens": 384000,
       "sourceUrl": "https://api-docs.deepseek.com/quick_start/pricing/",
-      "asOf": "2026-08-21",
+      "asOf": "2026-09-12",
       "confidence": "official_direct",
       "status": "active",
       "maxAgeDays": 30,
       "aliasAmbiguity": "retired-legacy-aliases-excluded",
-      "conditions": ["Thinking and non-thinking modes share the model ID; deepseek-chat and deepseek-reasoner are retired."]
+      "conditions": [
+        "Official model version DeepSeek-V4-Pro-0813; the pricing page footnote keeps serving it after 2026-09-14 with unchanged billing.",
+        "Thinking and non-thinking modes share the model ID; thinking defaults to enabled with effort high, and deepseek-chat / deepseek-reasoner remain retired."
+      ]
     },
     {
       "provider": "kimi",

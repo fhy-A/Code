@@ -115,7 +115,8 @@ class ContextWindowResolverTest(unittest.TestCase):
         catalog = context_window.load_official_catalog(data=data)
         entries = catalog["entries"]
         self.assertEqual(catalog["schema"], "code-official-model-capabilities/v1")
-        self.assertEqual(catalog["catalogRevision"], "2026-08-21.c1")
+        self.assertEqual(catalog["catalogRevision"], "2026-09-12.c1")
+        self.assertEqual(catalog["verifiedAt"], dt.date(2026, 9, 12))
         self.assertEqual(len(entries), 37)
         self.assertEqual(
             sum(entry["status"] == "active" for entry in entries),
@@ -130,7 +131,38 @@ class ContextWindowResolverTest(unittest.TestCase):
             {"openai", "anthropic", "google", "xai", "deepseek", "kimi", "qwen"},
         )
         self.assertTrue(all(entry["sourceUrl"].startswith("https://") for entry in entries))
-        self.assertTrue(all(entry["asOf"] == dt.date(2026, 8, 21) for entry in entries))
+        # the DeepSeek rows were re-audited on 2026-09-12 (official naming and
+        # capability values); every other row keeps its 2026-08-21 audit date
+        self.assertTrue(all(entry["asOf"] <= catalog["verifiedAt"] for entry in entries))
+        self.assertEqual(
+            {
+                entry["modelId"]: entry["asOf"]
+                for entry in entries
+                if entry["provider"] == "deepseek"
+            },
+            {
+                "deepseek-flash": dt.date(2026, 9, 12),
+                "deepseek-v4-pro": dt.date(2026, 9, 12),
+            },
+        )
+        self.assertTrue(all(
+            entry["asOf"] == dt.date(2026, 8, 21)
+            for entry in entries
+            if entry["provider"] != "deepseek"
+        ))
+        # the current official name and its accepted legacy aliases resolve to the
+        # same audited row (1M context / 384K max output), so configured routes that
+        # still use a legacy modelId keep their official capability values
+        for identity in (
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-vision-exp",
+        ):
+            with self.subTest(identity=identity):
+                resolution = context_window.official_resolution(identity)
+                self.assertEqual(resolution["contextWindowTokens"], 1_000_000)
+                self.assertEqual(resolution["maxOutputTokens"], 384_000)
+                self.assertEqual(resolution["officialCatalogRevision"], "2026-09-12.c1")
         self.assertTrue(all(
             entry["contextWindowTokens"] is None
             for entry in entries
@@ -151,7 +183,7 @@ class ContextWindowResolverTest(unittest.TestCase):
         self.assertFalse(normalized["contextWindowHard"])
         self.assertEqual(normalized["maxOutputTokens"], 128000)
         self.assertEqual(normalized["officialProvider"], "openai")
-        self.assertEqual(normalized["officialCatalogRevision"], "2026-08-21.c1")
+        self.assertEqual(normalized["officialCatalogRevision"], "2026-09-12.c1")
         context_window._catalog.clear()
         expected = {
             "gpt-5.4-mini": 400000,
