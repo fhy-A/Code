@@ -11201,7 +11201,8 @@ async function buildModelRequestPayload(ctx = null, useNativeTools = true, toolO
     primaryRoot: ctx?.primaryRoot,
     rootPaths: ctx?.rootPaths,
     projectContext: ctx?.projectContext,
-    goalContextInstruction: ctx?.goalContextInstruction,
+    // Foreground Goal snapshots are rebuilt by the server for every model request.
+    goalContextInstruction: "",
     goalOperationsEnabled: Boolean(ctx && !ctx.isSubAgent && !ctx.isDetachedBackground),
     canonicalSkillActivation: Boolean(
       ctx && !ctx.isSubAgent && !ctx.isDetachedBackground

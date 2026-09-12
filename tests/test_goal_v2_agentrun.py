@@ -505,6 +505,12 @@ def test_foreground_worker_runs_autonomous_goal_sequence_and_simple_run_stays_go
             "finishReason": "tool_calls",
         },
         {
+            "content": "", "toolCalls": [{"id": "explicit-wait", "type": "function", "function": {
+                "name": "goal_raise_gate", "arguments": json.dumps({"gateType": "waiting_user",
+                    "summary": "Remaining criterion requires user input; resume after it is supplied."}),
+            }}], "finishReason": "tool_calls", "usage": {},
+        },
+        {
             "content": "Goal work is underway and the first stage is complete.",
             "toolCalls": [],
             "finishReason": "stop",
@@ -534,7 +540,8 @@ def test_foreground_worker_runs_autonomous_goal_sequence_and_simple_run_stays_go
     state = server_mod.goal_v2_runtime().read(SESSION_ID).state
     assert state.goal["sourceKind"] == "autonomous"
     assert state.goal["steps"][0]["status"] == "completed"
-    assert len(model_payloads) == 5
+    assert len(model_payloads) == 6
+    assert state.goal["gate"]["type"] == "waiting_user"
     first_tool_names = {
         definition["function"]["name"]
         for definition in model_payloads[0].get("tools", [])
@@ -1139,6 +1146,12 @@ def test_worker_crosses_round_40_with_read_tool_without_fixed_handoff(
             "usage": {},
         },
         {
+            "content": "", "toolCalls": [{"id": "explicit-wait", "type": "function", "function": {
+                "name": "goal_raise_gate", "arguments": json.dumps({"gateType": "waiting_user",
+                    "summary": "Remaining criterion requires user input; resume after it is supplied."}),
+            }}], "finishReason": "tool_calls", "usage": {},
+        },
+        {
             "content": "continued beyond the former Goal round boundary",
             "reasoning": "",
             "toolCalls": [],
@@ -1165,8 +1178,8 @@ def test_worker_crosses_round_40_with_read_tool_without_fixed_handoff(
 
     server_mod._agent_run_worker(run)
 
-    assert len(model_payloads) == 2
-    assert len(run["rounds"]) == 41
+    assert len(model_payloads) == 3
+    assert len(run["rounds"]) == 42
     assert run["tool_executions"]["boundary-read"]["status"] == "completed"
     assert run["status"] == "completed"
     assert run["result"]["content"] == "continued beyond the former Goal round boundary"
@@ -1223,6 +1236,18 @@ def test_goal_round_50_continues_without_fixed_failure_when_gated(
             "usage": {},
         },
         {
+            "content": "",
+            "toolCalls": [{"id": "hard-boundary-wait", "type": "function", "function": {
+                "name": "goal_read", "arguments": json.dumps({
+                    "goalId": state.goal["goalId"],
+                    "expectedRevision": server_mod.goal_v2_runtime().read(SESSION_ID).state.revision,
+                    "relation": "related", "reason": "The required user decision is still pending.",
+                    "decision": "wait", "criterionIds": ["criterion-1"],
+                    "nextAction": "Wait for the user decision; resume when that decision is supplied.",
+                }),
+            }}], "finishReason": "tool_calls", "usage": {},
+        },
+        {
             "content": "continued beyond the former hard boundary",
             "reasoning": "",
             "toolCalls": [],
@@ -1248,10 +1273,11 @@ def test_goal_round_50_continues_without_fixed_failure_when_gated(
 
     server_mod._agent_run_worker(run)
 
-    assert len(run["rounds"]) == 51
+    assert len(run["rounds"]) == 52
     assert run["status"] == "completed"
     assert run["error_code"] == ""
     assert run["tool_executions"]["hard-boundary-read"]["status"] == "completed"
+    assert run["tool_executions"]["hard-boundary-wait"]["result"]["ok"]
     assert "continuation" not in run["result"]
     assert server_mod.goal_v2_runtime().read(SESSION_ID).state.goal["gate"]["type"] == "waiting_user"
 
