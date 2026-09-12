@@ -1,3 +1,4 @@
+import builtins
 import copy
 import json
 import os
@@ -138,10 +139,13 @@ def test_staging_reclaim_failure_never_breaks_startup(tmp_path):
     data, bundle, catalog = _fixture(tmp_path)
     _store(data, bundle).bootstrap(catalog)
     residue = _legacy_staging_residue(data)
+    # the startup rename happens first, so the leftover is the short directory
+    short_residue = residue.with_name(skill_store._staging_dir_name(residue.name))
     with mock.patch.object(skill_store, "_remove_safe_tree", side_effect=OSError("locked")):
         registry = _store(data, bundle).bootstrap(catalog)
     assert registry["schema"] == skill_store.REGISTRY_SCHEMA
-    assert residue.exists()
+    assert not residue.exists()
+    assert short_residue.exists()
 
 
 def test_max_path_budget_reproduces_the_reported_boundary():
@@ -194,6 +198,184 @@ def test_longest_bundled_resource_fits_under_max_path():
 
 
 
+class _MaxPath:
+    """Simulate a Windows host with LongPathsEnabled=0: every path API fails above 260.
+
+    This machine has long paths enabled, so a literal reproduction is impossible here;
+    the shim reproduces the platform contract the affected users run under.
+    """
+
+    def __init__(self, limit=260):
+        self.limit, self.blocked = limit, []
+
+    def _check(self, *paths):
+        for path in paths:
+            if isinstance(path, (str, bytes, os.PathLike)):
+                text = os.fspath(path)
+                if len(text) > self.limit:
+                    self.blocked.append((text, len(text)))
+                    raise FileNotFoundError(2, "No such file or directory", text)
+
+    def __enter__(self):
+        self._saved = {name: getattr(os, name) for name in ("lstat", "stat", "rename", "replace")}
+        self._saved["open"] = builtins.open
+
+        def wrap(func, nargs):
+            def guarded(*args, **kwargs):
+                self._check(*args[:nargs])
+                return func(*args, **kwargs)
+            return guarded
+
+        builtins.open = wrap(self._saved["open"], 1)
+        for name in ("lstat", "stat"):
+            setattr(os, name, wrap(self._saved[name], 1))
+        for name in ("rename", "replace"):
+            setattr(os, name, wrap(self._saved[name], 2))
+        return self
+
+    def __exit__(self, *exc):
+        builtins.open = self._saved["open"]
+        for name in ("lstat", "stat", "rename", "replace"):
+            setattr(os, name, self._saved[name])
+        return False
+
+
+_DEEP_RESOURCE = "vendor/scripts/pptx_shapes/data/LICENSE-APACHE-2.0.txt"
+
+
+class _CrashOnce:
+    def __init__(self, point):
+        self.point, self.done = point, False
+
+    def __call__(self, point):
+        if point == self.point and not self.done:
+            self.done = True
+            raise skill_store.SkillStoreInterruption(point)
+
+
+def _long_fixture(tmp_path):
+    """A fixture whose data root is long enough for deep staging paths to matter."""
+    data = tmp_path / ("p" * 40) / "profile"
+    data.mkdir(parents=True)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir(parents=True)
+    bundled = _write_skill(bundle, "alpha", extra={_DEEP_RESOURCE: "x" * 16})
+    (data / "skills").mkdir()
+    shutil.copytree(bundled, data / "skills" / "alpha")
+    catalog = revisions.build_bundled_catalog(bundle, {"alpha": "code.bundle/alpha"})
+    return data, bundle, catalog
+
+
+def _legacy_midflight(data, bundle, catalog):
+    """Stop a bootstrap at staged-verified, then rewrite it into the legacy 64-hex form."""
+    with pytest.raises(skill_store.SkillStoreInterruption):
+        _store(data, bundle, fault=_CrashOnce("after-journal-staged-verified-publish")).bootstrap(catalog)
+    store_root = data / skill_store.STORE_DIRECTORY
+    journal_path = next((store_root / "transactions").glob("op1_*.json"))
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    short = journal["operationId"]
+    legacy = skill_store._operation_id_legacy(journal["dataRootId"], journal["requestHash"])
+    journal["operationId"] = legacy
+    journal["targetRegistry"]["operationReceipts"][0]["operationId"] = legacy
+    _reseal(journal["targetRegistry"])
+    (store_root / "transactions" / f"{legacy}.json").write_bytes(skill_store._canonical(journal) + b"\n")
+    journal_path.unlink()
+    os.rename(store_root / "staging" / short, store_root / "staging" / legacy)
+    return store_root, short, legacy, journal
+
+
+def _staged_content_path(store_root, staging_name, revision_id, relative=_DEEP_RESOURCE):
+    digest = revision_id.split(":", 1)[1]
+    return store_root / "staging" / staging_name / "objects" / "sha256" / digest[:2] / digest / "content" / relative
+
+
+def _calibrated_shim(legacy_path, short_path):
+    """A shim whose limit sits between the legacy and the repaired layout.
+
+    On the reported machine the limit is literally 260 (legacy 266, repaired 218);
+    this keeps the same relationship whatever the checkout path length is.
+    """
+    assert len(str(legacy_path)) > len(str(short_path))
+    return _MaxPath(limit=len(str(legacy_path)) - 1)
+
+
+def test_legacy_journal_with_long_root_recovers_under_max_path(tmp_path):
+    data, bundle, catalog = _long_fixture(tmp_path)
+    store_root, short, legacy, journal = _legacy_midflight(data, bundle, catalog)
+    revision_id = journal["objectRevisionIds"][0]
+    legacy_deep = _staged_content_path(store_root, legacy, revision_id)
+    short_deep = _staged_content_path(store_root, short, revision_id)
+    shim = _calibrated_shim(legacy_deep, short_deep)
+    assert len(str(legacy_deep)) > shim.limit >= len(str(short_deep))
+
+    with shim:
+        assert _store(data, bundle).inspect_startup_state()["phase"] == "staged-verified"
+        registry = _store(data, bundle).bootstrap(catalog)
+
+    assert registry["schema"] == skill_store.REGISTRY_SCHEMA
+    assert registry["operationReceipts"][0]["operationId"] == legacy
+    # the legacy directory is gone and the commit left no staging residue
+    assert not (store_root / "staging" / legacy).exists()
+    staging = store_root / "staging"
+    assert ([] if not staging.exists() else sorted(p.name for p in staging.iterdir())) == []
+    assert shim.blocked == []
+
+
+def test_legacy_staging_residue_with_long_root_does_not_brick_startup(tmp_path):
+    data, bundle, catalog = _long_fixture(tmp_path)
+    registry = _store(data, bundle).bootstrap(catalog)
+    revision_id = registry["installations"][0]["revisionId"]
+    digest = revision_id.split(":", 1)[1]
+    residue = data / skill_store.STORE_DIRECTORY / "staging" / ("op1_" + "c" * 64)
+    (residue / "objects" / "sha256" / digest[:2] / digest).mkdir(parents=True)
+    residue_deep = residue / "objects" / "sha256" / digest[:2] / digest
+    short_deep = residue.with_name("op1_" + "c" * 16) / "objects" / "sha256" / digest[:2] / digest
+
+    with _calibrated_shim(residue_deep, short_deep):
+        reopened = _store(data, bundle)
+        assert reopened.inspect_startup_state()["state"] == "committed"
+        assert reopened.read_registry() == registry
+    assert not residue.exists()
+
+
+def test_staging_migration_is_idempotent_and_does_not_rebootstrap(tmp_path):
+    data, bundle, catalog = _long_fixture(tmp_path)
+    store_root, short, legacy, journal = _legacy_midflight(data, bundle, catalog)
+    shim = _calibrated_shim(
+        _staged_content_path(store_root, legacy, journal["objectRevisionIds"][0]),
+        _staged_content_path(store_root, short, journal["objectRevisionIds"][0]),
+    )
+    with shim:
+        first = _store(data, bundle).bootstrap(catalog)
+        second = _store(data, bundle).bootstrap(catalog)
+    assert first == second
+    assert first["operationReceipts"][0]["operationId"] == legacy
+    assert first["installations"] == second["installations"]
+    journal_now = json.loads((store_root / "transactions" / f"{legacy}.json").read_text(encoding="utf-8"))
+    assert journal_now["phase"] == "committed"
+
+
+def test_staging_rename_failure_never_breaks_startup(tmp_path):
+    # A failed rename must not introduce a new failure of its own; the legacy
+    # directory stays addressable through the fallback resolution.
+    data, bundle, catalog = _fixture(tmp_path)
+    store_root, short, legacy, _journal = _legacy_midflight(data, bundle, catalog)
+    real_rename = os.rename
+
+    def flaky(source, destination, *args, **kwargs):
+        path = Path(source)
+        # only the staging scaffold rename is made to fail; moving staged objects
+        # into the object store is a genuine requirement of recovery
+        if path.parent.name == "staging" and len(path.name) > len(skill_store._staging_dir_name(path.name)):
+            raise OSError("locked")
+        return real_rename(source, destination, *args, **kwargs)
+
+    with mock.patch.object(skill_store.os, "rename", side_effect=flaky):
+        registry = _store(data, bundle).bootstrap(catalog)
+        assert _store(data, bundle).inspect_startup_state()["state"] == "committed"
+    assert registry["schema"] == skill_store.REGISTRY_SCHEMA
+    assert registry["operationReceipts"][0]["operationId"] == legacy
+    assert not (store_root / "staging" / legacy).exists()
 def test_store_is_explicit_and_default_off(tmp_path):
     data, bundle, catalog = _fixture(tmp_path)
     with pytest.raises(ValueError):

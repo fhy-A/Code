@@ -79,7 +79,10 @@ def _checked_package(value, request):
 
 def _stage_check(store, journal, *, cleanup=False, contents=None):
     """Identify only this journal's staging; unknown data is never cleaned."""
-    root = store.root / "staging" / journal["operationId"]
+    # A legacy long directory name is renamed first, so the deep reads below stay
+    # inside MAX_PATH; addressing always goes through the store's resolution.
+    store._migrate_staging_directory(journal["operationId"])
+    root = store._staging_directory(journal["operationId"])
     if not root.exists():
         return
     legacy._safe_dir(root)
@@ -183,11 +186,12 @@ def inspect_managed_state(store, journals, object_ids):
         legacy._fail("store_object_unknown")
     if metadata.retained_ids(actual) - object_ids:
         legacy._fail("object_missing")
-    by_operation = {item["operationId"]: item for item in changes}
+    by_operation = {legacy._operation_key(item["operationId"]): item for item in changes}
     for staged in (store.root / "staging").iterdir():
-        if staged.name not in by_operation:
+        owner = by_operation.get(legacy._operation_key(staged.name))
+        if owner is None:
             legacy._fail("staging_unknown")
-        _stage_check(store, by_operation[staged.name])
+        _stage_check(store, owner)
     if active is not None:
         return {"state": "recoverable", "management": True,
                 "operationId": active["operationId"], "phase": active["phase"]}
@@ -320,7 +324,10 @@ class SkillStoreManager:
         """Only an explicit exact retry may discard an unpublished prepare."""
         op_id = journal["operationId"]
         owned = []
-        for path in (self.store.root / "transactions").glob(f".{op_id}.json.{op_id}.*.tmp"):
+        # the temp name keeps the journal's operation id but the suffix group uses
+        # the short staging form, exactly as _atomic_json writes it
+        key = legacy._operation_key(op_id)
+        for path in (self.store.root / "transactions").glob(f".{op_id}.json.{key}.*.tmp"):
             if not legacy._TEMP.fullmatch(path.name):
                 legacy._fail("store_temp_unknown")
             raw, value = self.store._load_json(path, legacy.MAX_JOURNAL_BYTES, "store_temp_unknown")
@@ -434,21 +441,22 @@ class SkillStoreManager:
         for journal in journals:
             if journal["schema"] != metadata.TRANSACTION_SCHEMA or journal["phase"] not in metadata.TERMINAL:
                 continue
-            path = self.store.root / "staging" / journal["operationId"]
+            self.store._migrate_staging_directory(journal["operationId"])
+            path = self.store._staging_directory(journal["operationId"])
             if path.exists():
                 _stage_check(self.store, journal, cleanup=True, contents=contents)
                 legacy._remove_safe_tree(path)
         self._clean_temps(journals)
 
     def _clean_temps(self, journals):
-        by_id = {item["operationId"]: item for item in journals}
+        by_id = {legacy._operation_key(item["operationId"]): item for item in journals}
         owned = []
         for directory in (self.store.root, self.store.root / "transactions"):
             for path in directory.iterdir():
                 match = legacy._TEMP.fullmatch(path.name)
                 if match is None:
                     continue
-                journal = by_id.get(match.group(1))
+                journal = by_id.get(legacy._operation_key(match.group(1)))
                 if journal is None:
                     legacy._fail("store_temp_unknown")
                 if journal["schema"] == legacy.TRANSACTION_SCHEMA:

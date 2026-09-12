@@ -101,6 +101,18 @@ def _operation_key(value):
     return prefix + "_" + remainder[:16]
 
 
+def _staging_dir_name(operation_id):
+    """Return the short staging directory name for an operation id.
+
+    The staging directory is transient scaffolding and its name is never persisted
+    (journals record revision digests, not staging paths), so it can be decoupled
+    from the operation id: a legacy store whose journal carries a 64-hex id would
+    otherwise keep a 68-character directory name and overflow MAX_PATH on long
+    Windows profiles even though the journal itself stays byte-identical.
+    """
+    return _operation_key(operation_id)
+
+
 def _operation_id_legacy(root_id, request_hash):
     """The pre-0.6.12 id form (full digest); still valid for existing stores."""
     return "op1_" + _operation_digest(root_id, request_hash)
@@ -225,7 +237,12 @@ class SkillStore:
         if staging.exists():
             # Staging residue from an older release must never brick startup: every
             # entry only has to be a well-formed staging directory (both id forms),
-            # and leftovers are reclaimed best-effort by the write paths.
+            # and leftovers are reclaimed best-effort by the write paths.  Legacy
+            # long directory names are renamed to their short form first, because the
+            # tree walk below would otherwise traverse paths beyond MAX_PATH.
+            for item in list(staging.iterdir()):
+                if not _STORE_OP_ID.fullmatch(item.name): _fail("store_layout_unknown")
+                self._migrate_staging_directory(item.name)
             for item in staging.iterdir():
                 if not _STORE_OP_ID.fullmatch(item.name): _fail("store_layout_unknown")
                 _safe_dir(item)
@@ -348,7 +365,9 @@ class SkillStore:
         self._hit("after-skeleton")
     def _atomic_json(self, path, value, operation_id, label):
         payload, preserve = _canonical(value) + b"\n", False
-        temporary = path.with_name(f".{path.name}.{operation_id}.{uuid.uuid4().hex}.tmp")
+        # The temp name embeds the operation id; use its short comparable form so a
+        # legacy 64-hex id cannot push this path beyond MAX_PATH during recovery.
+        temporary = path.with_name(f".{path.name}.{_operation_key(operation_id)}.{uuid.uuid4().hex}.tmp")
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_BINARY"): flags |= os.O_BINARY
@@ -382,7 +401,7 @@ class SkillStore:
         return value
     def _object_path(self, revision_id, *, staging=None):
         value = str(revision_id).removeprefix("sha256:")
-        base = self.root / "objects" if staging is None else self.root / "staging" / staging / "objects"
+        base = self.root / "objects" if staging is None else self._staging_directory(staging) / "objects"
         return base / "sha256" / value[:2] / value
     def _verify_object(self, directory, expected_revision=None):
         kind = revisions._path_kind(directory)
@@ -601,16 +620,45 @@ class SkillStore:
         """Best-effort removal of staging residue; never fails the startup path."""
         staging = self.root / "staging"
         if not staging.exists(): return
-        keep = {_operation_key(item) for item in known}
+        keep = {_staging_dir_name(item) for item in known}
         for item in list(staging.iterdir()):
-            if not _STORE_OP_ID.fullmatch(item.name) or _operation_key(item.name) in keep:
+            if not _STORE_OP_ID.fullmatch(item.name) or _staging_dir_name(item.name) in keep:
                 continue
             try:
                 _remove_safe_tree(item)
             except (SkillStoreError, OSError):
                 continue
+    def _staging_directory(self, operation_id):
+        """Return the staging directory of an operation, preferring the short name."""
+        staging = self.root / "staging"
+        short = _staging_dir_name(operation_id)
+        if str(short) == str(operation_id):
+            return staging / short
+        candidate = staging / short
+        if candidate.exists():
+            return candidate
+        legacy = staging / str(operation_id)
+        return legacy if legacy.exists() else candidate
+    def _migrate_staging_directory(self, operation_id):
+        """Best-effort rename of a legacy long staging directory to its short name.
+
+        Renaming a directory does not walk its contents, so this is unaffected by
+        the very deep paths it repairs, and nothing persisted refers to the staging
+        name.  Any failure leaves the legacy directory in place (addressing falls
+        back to it) and never fails the startup path.
+        """
+        staging = self.root / "staging"
+        if not self.write_enabled or not staging.exists(): return
+        short = _staging_dir_name(operation_id)
+        if str(short) == str(operation_id): return
+        legacy, target = staging / str(operation_id), staging / short
+        if not legacy.exists() or target.exists(): return
+        try:
+            os.rename(legacy, target)
+        except OSError:
+            return
     def _clean_stage(self, operation_id, allowed_ids):
-        path = self.root / "staging" / operation_id
+        path = self._staging_directory(operation_id)
         if not path.exists(): return
         _safe_dir(path); objects = path / "objects"
         if {item.name for item in path.iterdir()} - {"objects"}: _fail("staging_unknown")
@@ -650,7 +698,12 @@ class SkillStore:
         return (isinstance(registry, dict) and registry.get("schema") == "code-skill-install-registry/v2"
                 or next((self.root / "transactions").glob("op2_*.json"), None) is not None)
     def inspect_startup_state(self):
-        """Classify startup without reading mutable Skill sources or writing state."""
+        """Classify startup without reading mutable Skill sources.
+
+        The only write it may perform is a best-effort rename of transient staging
+        scaffolding to its short name (see _migrate_staging_directory); no persisted
+        value is ever changed.
+        """
         if self._initial_state() == "empty":
             return {"state": "empty"}
         object_ids = self._inspect_layout()
@@ -683,8 +736,10 @@ class SkillStore:
             staging_root = self.root / "staging"
             # Leftover staging directories of other operations are tolerated here
             # (their names were validated by _inspect_layout); only the active
-            # operation's tree is inspected in depth.
-            staged_operation = staging_root / journal["operationId"]
+            # operation's tree is inspected in depth.  A legacy long directory name
+            # is renamed first so the deep reads below stay inside MAX_PATH.
+            self._migrate_staging_directory(journal["operationId"])
+            staged_operation = self._staging_directory(journal["operationId"])
             if staged_operation.exists():
                 _safe_dir(staged_operation)
                 if {item.name for item in staged_operation.iterdir()} - {"objects"}:
@@ -758,6 +813,7 @@ class SkillStore:
         }
     def _recover_captured(self, journal, root, registry):
         operation_id, target = journal["operationId"], journal["targetRegistry"]
+        self._migrate_staging_directory(operation_id)
         if root is None:
             self._atomic_json(self.root / "root.json", {"schema": ROOT_SCHEMA, "dataRootId": journal["dataRootId"]}, operation_id, "root")
             root = self._load_root()
@@ -796,6 +852,8 @@ class SkillStore:
             registry = self._load_registry() if (self.root / "registry.json").exists() else None
             active = [item for item in journals if item["phase"] != "committed"]
             known = {item["operationId"] for item in journals}
+            for item in known:
+                self._migrate_staging_directory(item)
             self._discard_stale_staging(known)
             referenced = {item["revisionId"] for item in (registry or {}).get("installations", [])}
             referenced.update(revision_id for item in journals for revision_id in item["objectRevisionIds"])

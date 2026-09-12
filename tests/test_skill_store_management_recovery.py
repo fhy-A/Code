@@ -195,7 +195,8 @@ def test_unknown_staging_and_objects_are_preserved(managed):
         apply(manager, "edit", request, package=package)
     manager.store.fault_injector = None
     journal = next(item for item in manager.store._journals() if item["phase"] == "prepared")
-    unknown = manager.store.root / "staging" / journal["operationId"] / "user-file.txt"
+    # staging is addressed through the store: its directory name is the short form
+    unknown = manager.store._staging_directory(journal["operationId"]) / "user-file.txt"
     unknown.write_text("must survive", encoding="utf-8")
     with pytest.raises(legacy.SkillStoreError) as caught:
         manager.abort("edit")
