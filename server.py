@@ -28000,6 +28000,9 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         data = file_path.read_bytes()
+        if file_path == APP_DIR / "index.html" and INSTANCE_MODE == "dev":
+            # Set the initial tab title before the frontend heartbeat arrives.
+            data = data.replace(b"<title>Code</title>", b"<title>Code Dev</title>", 1)
         self.send_response(200)
         self.send_header("Content-Type", content_type + "; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
