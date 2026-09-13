@@ -1,0 +1,405 @@
+{
+  "baseline": "943baa01c0015656c8e9a40feaf357fff5d40097",
+  "tools": {
+    "goal_read": {
+      "type": "function",
+      "function": {
+        "name": "goal_read",
+        "description": "Read the latest same-Session Goal (never create one to read it) and record this Run's relationship. This does not change Goal events, clear a gate, or authorize work. Use stable IDs/revision from server context. A continue decision must identify unfinished criteria and the already-authorized next action; status/unrelated requests must not advance the Goal.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "goalId": {
+              "type": "string"
+            },
+            "expectedRevision": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "relation": {
+              "type": "string",
+              "enum": [
+                "related",
+                "status",
+                "unrelated"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            },
+            "stepId": {
+              "type": "string",
+              "description": "Optional: page one criterion of this step. Without stepId, offset is a character cursor into the objective."
+            },
+            "offset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 20000
+            },
+            "textOffset": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4000,
+              "description": "For a step page, read up to 400 characters of step/criterion descriptions at this character cursor; follow descriptionNextOffset."
+            },
+            "decision": {
+              "type": "string",
+              "enum": [
+                "inspect",
+                "continue",
+                "wait"
+              ],
+              "description": "wait confirms this input still waits on the current gate; requires criterionIds and nextAction naming waiting party and resume condition."
+            },
+            "criterionIds": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 20
+            },
+            "nextAction": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          },
+          "required": [
+            "goalId",
+            "expectedRevision",
+            "relation",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_create": {
+      "type": "function",
+      "function": {
+        "name": "goal_create",
+        "description": "Create or reuse the current Session's long-running Goal for a genuinely complex, multi-step task that may span Agent runs. Call before project side effects. Do not use for simple one-turn work.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "objective": {
+              "type": "string",
+              "description": "Concise durable objective."
+            }
+          },
+          "required": [
+            "objective"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_set_plan": {
+      "type": "function",
+      "function": {
+        "name": "goal_set_plan",
+        "description": "Set the first 3-8 step plan for the current Goal. Each step needs bounded acceptance criteria.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "steps": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "acceptanceCriteria": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "machine",
+                            "agent",
+                            "user"
+                          ]
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "kind",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "description",
+                  "acceptanceCriteria"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "steps"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_revise_plan": {
+      "type": "function",
+      "function": {
+        "name": "goal_revise_plan",
+        "description": "Revise the current Goal objective and/or plan without replacing trusted progress. Started steps remain protected by the reducer.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "objective": {
+              "type": "string"
+            },
+            "steps": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 8,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "acceptanceCriteria": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "machine",
+                            "agent",
+                            "user"
+                          ]
+                        },
+                        "description": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "kind",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "description",
+                  "acceptanceCriteria"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "minProperties": 1,
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_start_step": {
+      "type": "function",
+      "function": {
+        "name": "goal_start_step",
+        "description": "Mark the next pending Goal step in progress before doing its work.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "stepId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "stepId"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_complete_step": {
+      "type": "function",
+      "function": {
+        "name": "goal_complete_step",
+        "description": "Complete the current step only with bounded evidence covering every acceptance criterion. Evidence provenance is bound by the server. In this tool-calling round, accompanying public content must be progress or a brief stage summary, never the complete user-facing final answer. Completing the final planned step atomically completes the Goal; do not call a second completion operation. After its successful terminal receipt, the existing next no-tool turn must provide the one complete, self-contained final answer and must not refer the user to an earlier summary.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "stepId": {
+              "type": "string"
+            },
+            "evidence": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 100,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "criterionId": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "machine",
+                      "agent",
+                      "user"
+                    ]
+                  },
+                  "summary": {
+                    "type": "string"
+                  },
+                  "artifactDigest": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "criterionId",
+                  "kind",
+                  "summary"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "stepId",
+            "evidence"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_raise_gate": {
+      "type": "function",
+      "function": {
+        "name": "goal_raise_gate",
+        "description": "Record a bounded user, blocked, or failed gate when Goal work cannot safely continue. This does not create a fourth public step status.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "gateType": {
+              "type": "string",
+              "enum": [
+                "waiting_user",
+                "blocked",
+                "failed"
+              ]
+            },
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "gateType",
+            "summary"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_clear_gate": {
+      "type": "function",
+      "function": {
+        "name": "goal_clear_gate",
+        "description": "Clear the current Goal gate after its cause has been resolved.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_ready_for_acceptance": {
+      "type": "function",
+      "function": {
+        "name": "goal_ready_for_acceptance",
+        "description": "Legacy compatibility operation for already persisted runs. New AgentRuns do not receive this tool; the final step completes the Goal directly.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_complete": {
+      "type": "function",
+      "function": {
+        "name": "goal_complete",
+        "description": "Compatibility-only completion for an already persisted ready_for_acceptance Goal. New Goal flows complete with their final goal_complete_step call.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "summary": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "summary"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    "goal_cancel": {
+      "type": "function",
+      "function": {
+        "name": "goal_cancel",
+        "description": "Cancel the current nonterminal Goal when the user explicitly asks to stop, abandon, or cancel it. This records terminal Goal metadata only; it does not cancel the Session or AgentRun transport. For unambiguous intent call it directly without a redundant questionnaire or gate.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000,
+              "description": "Concise user-grounded reason for cancelling the current Goal."
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  }
+}

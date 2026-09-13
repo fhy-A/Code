@@ -13,6 +13,38 @@
     return String(content);
   }
 
+  function toolMarkupRanges(content) {
+    if (typeof content !== "string") return [];
+    const open = '<｜｜DSML｜｜ calls>', close = '</｜｜DSML｜｜ calls>';
+    const found = []; let offset = 0, skipUntil = 0, fence = null;
+    for (const line of content.match(/[^\n]*\n|[^\n]+$/g) || []) {
+      const start = offset; offset += line.length;
+      if (start < skipUntil) continue;
+      const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+      if (fence) {
+        if (marker && marker[1][0] === fence[0] && marker[1].length >= fence[1] && !line.slice(marker[0].length).trim()) fence = null;
+        continue;
+      }
+      if (marker) { fence = [marker[1][0], marker[1].length]; continue; }
+      const leading = line.match(/^ */)[0].length;
+      if (leading > 3 || line.startsWith('\t') || !line.slice(leading).startsWith(open)) continue;
+      const begin = start + leading; let end = content.indexOf(close, begin + open.length);
+      if (end < 0) continue;
+      end += close.length;
+      const tailEnd = content.indexOf('\n', end);
+      if (content.slice(end, tailEnd < 0 ? content.length : tailEnd).trim()) continue;
+      if (content.slice(begin, end).includes('<｜｜DSML｜｜ invoke ')) { found.push([begin, end]); skipUntil = end; }
+    }
+    return found;
+  }
+
+  function isUnexecutedToolMarkup(content) { return toolMarkupRanges(content).length > 0; }
+
+  function replaceUnexecutedToolMarkup(content, replacement = "") {
+    for (const [start, end] of toolMarkupRanges(content).reverse()) content = content.slice(0, start) + replacement + content.slice(end);
+    return content;
+  }
+
   const GENERATED_ASSET_ID_PATTERN = /^ga1_[A-Za-z0-9_-]{32,96}$/;
   const GENERATED_ASSET_MIME_TYPES = new Set([
     "image/jpeg",
@@ -184,6 +216,7 @@
 
     if (message.role === "assistant") {
       const visibleText = getMessageText(message);
+      if (!message.meta?.toolCalls?.length && isUnexecutedToolMarkup(visibleText)) return null;
       const protocolRef = message.meta?.protocolRef &&
         (message.meta.protocolDisplayContent === undefined || visibleText === message.meta.protocolDisplayContent)
         ? message.meta.protocolRef : null;
@@ -505,6 +538,8 @@
   }
 
   agent.modelRequest = Object.freeze({
+    isUnexecutedToolMarkup,
+    replaceUnexecutedToolMarkup,
     assembleModelRequestPayload,
     initialReasoningPreference,
     snapshotReasoningSelection,

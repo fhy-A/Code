@@ -119,6 +119,8 @@ def project(projection, *, step_id="", offset=None, text_offset=0):
                 "acceptanceCriteria": [], "evidence": []}
         for criterion in chosen:
             item["acceptanceCriteria"].append({"id": criterion["id"], "kind": criterion["kind"],
+                **({'sourceReference': copy.deepcopy(criterion['sourceReference'])}
+                   if criterion.get('sourceReference') else {}),
                 "description": brief(str(criterion.get("description") or "")[text_start:],
                                      400 if step_id else 100, criterion["id"]),
                 "descriptionOffset": text_start})

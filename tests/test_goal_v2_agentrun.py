@@ -655,6 +655,11 @@ def test_user_acceptance_step_stays_in_progress_until_gate_is_cleared(
     request_id = "foreground-user-gated-final-step"
     _persist_session(SESSION_ID, [_origin_message(request_id)])
     run = _create_run(request_id)
+    # Preserve this pre-source-policy Run's gate/kind contract after recovery.
+    # New-policy source and actual user-answer paths are exercised separately.
+    record = server_mod._agent_run_record(run)
+    record.pop("goalAcceptancePolicy")
+    run = server_mod._agent_run_from_record(record)
     plan = _plan()
     plan[-1]["acceptanceCriteria"][0]["kind"] = "user"
     _call(run, "goal_create", {"objective": "User-gated Goal"}, "create")

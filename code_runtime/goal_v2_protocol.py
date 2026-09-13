@@ -68,7 +68,7 @@ _EVENT_FIELDS = frozenset({
     "payload",
 })
 _STEP_PLAN_FIELDS = frozenset({"id", "description", "acceptanceCriteria"})
-_CRITERION_FIELDS = frozenset({"id", "description", "kind"})
+_CRITERION_FIELDS = frozenset({"id", "description", "kind", "sourceReference"})
 _EVIDENCE_FIELDS = frozenset({
     "id",
     "criterionId",
@@ -78,6 +78,7 @@ _EVIDENCE_FIELDS = frozenset({
     "sourceToolCallId",
     "artifactDigest",
     "recordedAt",
+    "sourceReference",
 })
 _PAYLOAD_FIELDS = {
     "goal_created": frozenset({
@@ -199,6 +200,20 @@ def require_revision(value: Any, label: str, *, allow_zero: bool = False) -> int
     return value
 
 
+def normalize_source_reference(value):
+    reference = _require_dict(value, 'Goal sourceReference')
+    fields = {'version', 'messageId', 'quote', 'purpose', 'contentHash'}
+    if (set(reference) != fields or type(reference.get('version')) is not int or reference['version'] != 1
+            or reference['purpose'] not in ('input', 'judgment', 'authorization')):
+        raise GoalV2ProtocolError('Goal sourceReference is invalid')
+    require_identifier(reference['messageId'], 'Goal sourceReference.messageId')
+    _require_text(reference['quote'], 'Goal sourceReference.quote', maximum=1000)
+    digest = _require_text(reference['contentHash'], 'Goal sourceReference.contentHash', maximum=64)
+    if not _SHA256_RE.fullmatch(digest):
+        raise GoalV2ProtocolError('Goal sourceReference.contentHash must be SHA-256')
+    return copy.deepcopy(reference)
+
+
 def _normalize_criterion(value: Any, step_id: str) -> dict[str, Any]:
     criterion = _require_dict(value, f"step {step_id} criterion")
     _reject_unknown_fields(criterion, _CRITERION_FIELDS, f"step {step_id} criterion")
@@ -218,6 +233,7 @@ def _normalize_criterion(value: Any, step_id: str) -> dict[str, Any]:
             maximum=_MAX_DESCRIPTION_LENGTH,
         ),
         "kind": kind,
+        **({'sourceReference': normalize_source_reference(criterion['sourceReference'])} if 'sourceReference' in criterion else {}),
     }
 
 
@@ -305,6 +321,7 @@ def _normalize_evidence(
             f"evidence {evidence_id}.recordedAt",
             maximum=64,
         ),
+        **({'sourceReference': normalize_source_reference(evidence['sourceReference'])} if 'sourceReference' in evidence else {}),
     }
 
 

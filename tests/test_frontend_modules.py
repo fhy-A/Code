@@ -22822,6 +22822,7 @@ process.stdout.write(JSON.stringify({negative:negative.length,unavailable:unavai
 
     def test_tool_round_projection_is_structured_compact_and_reasoning_safe(self):
         render_start = MESSAGES_SOURCE.index("function projectMessages(")
+        render_start = MESSAGES_SOURCE.index("for (let index = 0; index < messages.length; index += 1)", render_start)
         assistant_start = MESSAGES_SOURCE.index('if (msg.role === "assistant") {', render_start)
         assistant_end = MESSAGES_SOURCE.index('if (msg.role === "user") {', assistant_start)
         assistant_block = MESSAGES_SOURCE[assistant_start:assistant_end]

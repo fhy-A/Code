@@ -65,6 +65,8 @@ from code_runtime.image_runtime import (
 from code_runtime.model_route_registry import ModelRouteError, ModelRouteRegistry
 from code_runtime import reasoning_capabilities
 from code_runtime import output_budget, output_truncation
+from code_runtime import tool_markup
+from code_runtime import goal_acceptance
 from code_runtime import protocol_replay
 from code_runtime.ppt_master_runtime import (
     PptMasterRuntimeError,
@@ -1671,6 +1673,10 @@ def _model_runtime_worker(run):
                     truncated = output_truncation.classify(complete)
                     if truncated:
                         _finish_runtime_run(run, "failed", truncated, error_code=truncated, transient=False)
+                        return
+                    if not complete.get('toolCalls') and tool_markup.is_unexecuted(complete.get('content')):
+                        _finish_runtime_run(run, "failed", "Model returned unexecuted tool markup as text",
+                                            error_code="tool_protocol_error", transient=False)
                         return
                     _finish_runtime_run(run, "completed")
                 else:
@@ -3953,6 +3959,8 @@ def _agent_run_record(run):
         "forceFinalReason": str(run.get("force_final_reason") or ""),
         **({"goalCloseout": goal_closeout.normalize(run.get("goal_closeout"), run["id"], len(run.get("rounds") or []))}
            if run.get("goal_closeout_enabled") else {}),
+        **({'goalAcceptancePolicy': goal_acceptance.policy(run['goal_acceptance_policy'])}
+           if run.get('goal_acceptance_policy') is not None else {}),
         **({'outputBudget': output_budget.restore(run['output_budget'], model_id=run['request']['model'],
                 route_ref=str(run.get('route_ref') or ''), requested_tokens=_agent_requested_max_tokens(run['request']))}
            if run.get('output_budget') is not None else {}),
@@ -5551,6 +5559,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         "origin_message_id": origin_message_id,
         "goal_operations_enabled": goal_operations_enabled,
         "goal_closeout_enabled": "goalCloseout" in record,
+        "goal_acceptance_policy": goal_acceptance.policy(record.get('goalAcceptancePolicy')),
         'output_budget': output_budget.restore(record.get('outputBudget'), model_id=request_options.get('model'),
             route_ref=str(record.get('routeRef') or ''), requested_tokens=_agent_requested_max_tokens(request_options)),
         'output_diagnostic': output_truncation.restore(record.get('outputDiagnostic'), _agent_requested_max_tokens(request_options)),
@@ -8222,6 +8231,164 @@ def _agent_goal_idempotency_key(run, call_id, name):
     return f"agent-goal-{digest}"
 
 
+def _agent_goal_persisted_user_sources(run, goal):
+    start_id = str((goal or {}).get('originMessageId') or run.get('origin_message_id') or '')
+    end_id = str(run.get('origin_message_id') or '')
+    path = messages_path(run['session_id'])
+    stat = path.stat()
+    identity = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns, start_id, end_id)
+    cached = run.get('_goal_user_sources_cache')
+    if cached and cached['identity'] == identity:
+        return dict(cached['sources'])
+    max_bytes, max_rows, max_chars, max_sources = 64 * 1024 * 1024, 50000, 2 * 1024 * 1024, 256
+    with path.open('rb') as stream:
+        begin = max(0, stat.st_size - max_bytes)
+        stream.seek(begin)
+        blob = stream.read(max_bytes)
+    if begin:
+        blob = blob.partition(b'\n')[2]  # discard the partial first record
+    lines = blob.splitlines()
+    limited = bool(begin or len(lines) > max_rows)
+    lines = lines[-max_rows:]
+    found, seen, duplicates = {}, set(), set()
+    related_runs, clients, receipt_messages, receipt_chars = {}, set(), [], 0
+    active, ended, current, source_chars, omitted = False, False, None, 0, 0
+    for line in lines:
+        if not line.strip():
+            continue
+        message = json.loads(line.decode('utf-8-sig'))
+        mid = str(message.get('id') or '') if isinstance(message, dict) else ''
+        if mid:
+            if mid in seen: duplicates.add(mid)
+            seen.add(mid)
+        metadata = message.get('meta') if isinstance(message, dict) and isinstance(message.get('meta'), dict) else {}
+        if active and not ended and metadata.get('agentRunId') and not metadata.get('detachedFromMain'):
+            related_runs[str(metadata['agentRunId'])] = True
+        if not isinstance(message, dict) or message.get('role') != 'user':
+            continue
+        meta = message.get('meta') if isinstance(message.get('meta'), dict) else {}
+        if (not meta.get('_system') and not meta.get('detachedFromMain')
+                and isinstance(message.get('content'), (str, list))):
+            text_size = len(json.dumps(message['content'], ensure_ascii=False))
+            receipt_messages.append({'role': 'user', 'content': message['content']})
+            receipt_chars += text_size
+            while receipt_messages and (receipt_chars > max_chars or len(receipt_messages) > max_sources):
+                receipt_chars -= len(json.dumps(receipt_messages.pop(0)['content'], ensure_ascii=False))
+        origin = meta.get('goalOrigin') if isinstance(meta.get('goalOrigin'), dict) else {}
+        if (not mid or meta.get('_system') or meta.get('detachedFromMain')
+                or origin.get('messageId') != mid or not origin.get('clientRequestId')
+                or not isinstance(message.get('content'), str)):
+            continue
+        try:
+            require_identifier(mid, 'Goal source message id')
+            require_identifier(origin['clientRequestId'], 'Goal source request id')
+        except GoalV2ProtocolError:
+            continue
+        if mid == end_id and origin['clientRequestId'] == run.get('client_request_id'):
+            current = message['content']
+        if mid == start_id and not active and not ended:
+            expected = (goal or {}).get('clientRequestId') or run.get('client_request_id')
+            if origin['clientRequestId'] == expected: active = True
+        if active and not ended:
+            clients.add(origin['clientRequestId'])
+            text = message['content']
+            if len(text) <= max_chars:
+                found[mid] = text; source_chars += len(text)
+                while len(found) > max_sources or source_chars > max_chars:
+                    oldest = next(iter(found)); source_chars -= len(found.pop(oldest)); omitted += 1
+            else:
+                omitted += 1
+        if active and mid == end_id and current is not None:
+            ended = True
+    if end_id in duplicates or current is None:
+        raise GoalV2ProtocolError('Current Goal user source is missing or ambiguous')
+    complete_boundary = active and ended and start_id not in duplicates
+    if not complete_boundary:
+        # A compacted or very long Session may lack the historical origin in the
+        # bounded window. Only the independently admitted current user input is
+        # eligible then; do not guess that arbitrary older messages belong here.
+        found = {end_id: current} if len(current) <= max_chars else {}
+    found = {mid: text for mid, text in found.items() if mid not in duplicates}
+    info = {'historyBoundaryKnown': complete_boundary, 'scanLimited': limited,
+            'omittedSources': omitted, 'scannedBytes': len(blob), 'scannedRows': len(lines)}
+    run['_goal_user_sources_cache'] = {'identity': identity, 'sources': dict(found), 'info': info,
+        'relatedRuns': list(related_runs)[-32:] if complete_boundary else [], 'clients': clients,
+        'receiptMessages': receipt_messages}
+    return found
+
+
+def _agent_goal_user_sources(run, goal):
+    sources = _agent_goal_persisted_user_sources(run, goal)
+    cache = run['_goal_user_sources_cache']
+    current = goal_acceptance.receipt_sources(run, cache.get('receiptMessages', []))
+    related = run.setdefault('_goal_related_sources_cache', {})
+    read_bytes, omitted, ambiguous = 0, 0, set()
+    received = {}
+    for rid in cache.get('relatedRuns', []):
+        if rid == run['id']:
+            continue
+        try:
+            path = Path(DATA_DIR) / 'agent-runs' / (_safe_agent_run_id(rid) + '.json')
+            stat = path.stat()
+            if stat.st_size > 8 * 1024 * 1024 or read_bytes + stat.st_size > 32 * 1024 * 1024:
+                omitted += 1; continue
+            read_bytes += stat.st_size
+            fingerprint = (stat.st_ino, stat.st_size, stat.st_mtime_ns, cache['identity'])
+            entry = related.get(rid)
+            if not entry or entry['fingerprint'] != fingerprint:
+                record = json.loads(path.read_bytes())
+                if (record.get('id') != rid or record.get('sessionId') != run['session_id']
+                        or record.get('runKind') != 'foreground' or record.get('parentAgentRunId')):
+                    continue
+                entry = {'fingerprint': fingerprint, 'client': record.get('clientRequestId'),
+                         'sources': goal_acceptance.receipt_sources(record, cache.get('receiptMessages', []))}
+                related[rid] = entry
+            if entry['client'] in cache.get('clients', set()):
+                received.update(entry['sources'])
+        except (OSError, ValueError, TypeError):
+            omitted += 1
+    for rid in list(related):
+        if rid not in cache.get('relatedRuns', []): del related[rid]
+    received.update(current)
+    for mid, text in received.items():
+        if mid in sources:
+            ambiguous.add(mid)
+        else:
+            sources[mid] = text
+    for mid in ambiguous: sources.pop(mid, None)
+    retained_chars = sum(len(t) for t in sources.values())
+    while len(sources) > 256 or retained_chars > 2 * 1024 * 1024:
+        retained_chars -= len(sources.pop(next(iter(sources)))); omitted += 1
+    run['_goal_receipt_source_info'] = {'relatedRunsOmitted': omitted, 'receiptSources': len(received)}
+    return sources
+
+
+def _agent_goal_source_view(run, goal, *, offset=None, message_id=None, text_offset=0):
+    sources = _agent_goal_user_sources(run, goal)
+    if message_id is not None:
+        if message_id not in sources or type(text_offset) is not int or not 0 <= text_offset <= len(sources[message_id]):
+            raise GoalV2ProtocolError('Goal user source page is unavailable')
+        text = sources[message_id]; end = min(len(text), text_offset + 100)
+        return {'messageId': message_id, 'excerpt': text[text_offset:end], 'textOffset': text_offset,
+                'nextTextOffset': end if end < len(text) else None}
+    ids = list(sources)
+    start = max(0, len(ids) - 4) if offset is None else offset
+    if type(start) is not int or not 0 <= start <= len(ids):
+        raise GoalV2ProtocolError('Goal user source offset is invalid')
+    selected = ids[start:start + 4]
+    result = {'total': len(ids), 'offset': start, 'nextOffset': start + 4 if start + 4 < len(ids) else None,
+              'items': [{'messageId': mid, 'excerpt': sources[mid][:40]} for mid in selected],
+              **run.get('_goal_user_sources_cache', {}).get('info', {})}
+    result.update(run.get('_goal_receipt_source_info', {}))
+    while len(json.dumps(result, ensure_ascii=True)) > 1000:
+        if any(item['excerpt'] for item in result['items']):
+            for item in result['items']: item['excerpt'] = item['excerpt'][:len(item['excerpt']) // 2]
+        else:
+            result['items'].pop()
+            result['nextOffset'] = start + len(result['items'])
+    return result
+
+
 def _agent_goal_prepare_operation(run, call, execution):
     prepared = execution.get("goalOperation")
     if isinstance(prepared, dict):
@@ -8262,6 +8429,11 @@ def _agent_goal_prepare_operation(run, call, execution):
                 or _agent_skill_evidence_gap(run)):
             raise GoalV2ContextError("Resolve the existing Skill completion/evidence requirements before completing the Goal")
     call_id = str(call.get("id") or "")
+    sources = (_agent_goal_user_sources(run, goal) if run.get('goal_acceptance_policy') == 1
+               and name in {'goal_set_plan', 'goal_revise_plan', 'goal_complete_step'} else {})
+    if run.get('goal_acceptance_policy') == 1 and name in {'goal_set_plan', 'goal_revise_plan'} and 'steps' in arguments:
+        arguments['steps'] = goal_acceptance.plan(arguments['steps'], sources,
+            previous=goal.get('steps') if name == 'goal_revise_plan' else None)
     prepared = {
         "name": name,
         "goalId": str((goal or {}).get("goalId") or ""),
@@ -8286,6 +8458,16 @@ def _agent_goal_prepare_operation(run, call, execution):
                 "sourceToolCallId": call_id,
                 "recordedAt": recorded_at,
             }
+            if run.get('goal_acceptance_policy') == 1 and source.get('kind') == 'user':
+                reference = goal_acceptance.bind(source.get('sourceReference'), sources)
+                criterion = next((c for s in goal.get('steps') or [] if s['id'] == arguments.get('stepId')
+                                  for c in s.get('acceptanceCriteria') or [] if c['id'] == source.get('criterionId')), {})
+                required = criterion.get('sourceReference')
+                if required and reference['purpose'] != required['purpose']:
+                    raise GoalV2ProtocolError('User evidence purpose differs from the criterion source')
+                if reference['purpose'] in {'judgment', 'authorization'} and reference['messageId'] == (required['messageId'] if required else goal.get('originMessageId')):
+                    raise GoalV2ProtocolError('The original requirement to wait is not later supplied input, judgment or authorization')
+                normalized['sourceReference'] = reference
             if source.get("artifactDigest") not in (None, ""):
                 normalized["artifactDigest"] = source.get("artifactDigest")
             evidence.append(normalized)
@@ -10131,9 +10313,13 @@ def _agent_wait_for_model(run, model_run, *, checkpoint_round=0):
 
 
 def _agent_goal_input_key(run):
-    return hashlib.sha256(json.dumps({
+    data = {
         "origin": run.get("origin_message_id"), "steers": run.get("steer_receipts") or [],
-    }, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
+    }
+    if run.get('goal_acceptance_policy') == 1:
+        data['userInputReceipts'] = [{k: (e.get('data') or {}).get(k) for k in ('requestId', 'toolCallId')}
+            for e in run.get('events') or [] if e.get('type') == 'user_input_submitted']
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=True).encode()).hexdigest()
 
 
 def _agent_goal_state(run, projection):
@@ -10194,6 +10380,9 @@ def _agent_goal_context_message(run):
     data = goal_closeout.project(projection)
     data["runBinding"] = ({**state, "reason": state["reason"][:100],
                            "reasonTruncated": len(state["reason"]) > 100} if state else None)
+    if run.get('goal_acceptance_policy') == 1:
+        data['userSourceReferences'] = _agent_goal_source_view(run, projection.get('goal'))
+        data['sourceReferenceMeaning'] = 'Server-bound user text provenance only; purpose is agent-declared, never an authorization or acceptance verdict.'
     if not run.get("goal_closeout_enabled"):
         data.pop("read", None)
         return {"role": "system", "content": (
@@ -10208,6 +10397,17 @@ def _agent_goal_context_message(run):
         "This fresh snapshot supersedes stale Goal snapshots in history. goal_read reads only this Session, "
         "including paged step criteria/evidence; never use goal_create as a read operation. "
         "Before deciding the Goal's disposition, record related/status/unrelated with goal_read and a concrete reason. "
+        + (
+        "Objective execution/comparison with supplied expected values uses machine acceptance; do not invent a second user confirmation. "
+        "A user criterion is only for missing user input, user judgment or an explicit authorization requirement and must cite "
+        "sourceReference {messageId, quote, purpose: input|judgment|authorization} from eligible real user text. "
+        "Exact quote binding proves provenance only, not consent: interpret the user's actual requirement, not your own summary. "
+        "Already-provided input is evidence, not a request for another confirmation. User evidence must cite its actual message. "
+        "Unknown historical user criteria cannot be downgraded or satisfied with machine evidence. Preserve their meaning and gates; "
+        "after actual later user input/review, the existing user evidence path can cite that real message without rewriting the old plan. "
+        "goal_read(userSourceOffset=0) pages eligible user references; userSourceMessageId with userSourceTextOffset reads a bounded excerpt. "
+        if run.get('goal_acceptance_policy') == 1 else "")
+        +
         "An active Goal alone does not make a status question or unrelated message a continuation. "
         "For related work, satisfy the user-confirmed criteria and call the existing completion tools; rely on their "
         "successful receipts, not final-answer text. Recorded evidence has tool provenance, NOT independent proof "
@@ -10257,6 +10457,10 @@ def _agent_goal_read(run, call, execution):
         raise GoalV2ContextError("Goal relationship is fixed for this input; a new user message/steer is required")
     result = goal_closeout.project(projection, step_id=str(args.get("stepId") or ""),
                                    offset=args.get("offset", 0), text_offset=args.get("textOffset", 0))
+    if run.get('goal_acceptance_policy') == 1:
+        result['userSourceReferences'] = _agent_goal_source_view(run, goal,
+            offset=args.get('userSourceOffset'), message_id=args.get('userSourceMessageId'),
+            text_offset=args.get('userSourceTextOffset', 0))
     if args.get("decision") == "wait":
         unfinished = {c["id"] for step in goal.get("steps", []) if step["status"] != "completed"
                       for c in step.get("acceptanceCriteria", [])}
@@ -10715,6 +10919,14 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0, *, keys_override=
                 'compactionId': compaction_id, 'reason': str(reason), 'error': diagnostic['code'],
                 'errorCode': diagnostic['code'], 'attempts': attempt, 'retryAfter': ''})
             return {'status': 'failed', 'errorCode': diagnostic['code'], 'outputDiagnostic': diagnostic}
+        if (snapshot.get('errorCode') == 'tool_protocol_error' or snapshot['status'] == 'completed') and (
+                not (snapshot.get('result') or {}).get('toolCalls')
+                and tool_markup.is_unexecuted((snapshot.get('result') or {}).get('content'))):
+            _append_agent_event(run, 'context_compaction_failed', {
+                'compactionId': compaction_id, 'reason': str(reason), 'errorCode': 'tool_protocol_error',
+                'attempts': attempt, 'retryAfter': ''})
+            return {'status': 'failed', 'errorCode': 'tool_protocol_error',
+                    'toolMarkupResult': snapshot['result'], 'runtimeRunId': compaction_run['id']}
         if snapshot["status"] != "completed":
             error_message = snapshot.get("error") or "context compaction failed"
             error_code = snapshot.get("errorCode") or "context_compaction_failed"
@@ -11675,6 +11887,25 @@ def _agent_stop_output_truncation(run, result, runtime_id):
     _finish_agent_run(run, 'failed', diagnostic['code'], error_code=diagnostic['code'])
 
 
+def _agent_stop_tool_markup(run, result, runtime_id):
+    diagnostic = {'version': 1, 'kind': 'dsml_text', 'characters': len(result.get('content') or ''),
+                  'finishReason': str(result.get('finishReason') or '')[:32]}
+    run['model_checkpoint'] = None
+    run['recovery_state'] = None
+    run['result'] = {'toolProtocolDiagnostic': diagnostic}
+    usage = result.get('usage') if isinstance(result.get('usage'), dict) else {}
+    usage = {k: usage[k] for k in ('prompt_tokens', 'completion_tokens', 'total_tokens')
+             if type(usage.get(k)) is int and usage[k] >= 0}
+    _agent_usage_add(run['usage'], usage)
+    record = {'round': len(run['rounds']) + 1, 'runtimeRunId': runtime_id, 'content': tool_markup.public_text(result.get('content') or ''), 'reasoning': '',
+              'toolCalls': [], 'finishReason': diagnostic['finishReason'], 'usage': usage,
+              'completedAt': now_iso(), 'outcome': 'tool_protocol_error', 'toolProtocolDiagnostic': diagnostic}
+    run['rounds'].append(record)
+    _append_agent_event(run, 'model_completed', record)
+    _finish_agent_run(run, 'failed', 'Model returned tool markup as ordinary text; this round executed no tool.',
+                      error_code='tool_protocol_error')
+
+
 def _agent_stop_compaction_truncation(run, diagnostic):
     run['output_diagnostic'] = diagnostic
     run['model_checkpoint'] = None
@@ -11760,6 +11991,9 @@ def _agent_run_worker(run):
                             if compacted.get('outputDiagnostic'):
                                 _agent_stop_compaction_truncation(run, compacted['outputDiagnostic'])
                                 return
+                            if compacted.get('toolMarkupResult'):
+                                _agent_stop_tool_markup(run, compacted['toolMarkupResult'], compacted['runtimeRunId'])
+                                return
                             _agent_enter_recovery(
                                 run,
                                 kind="context_compaction_failed",
@@ -11808,6 +12042,9 @@ def _agent_run_worker(run):
                 if compacted.get('outputDiagnostic'):
                     _agent_stop_compaction_truncation(run, compacted['outputDiagnostic'])
                     return
+                if compacted.get('toolMarkupResult'):
+                    _agent_stop_tool_markup(run, compacted['toolMarkupResult'], compacted['runtimeRunId'])
+                    return
                 if compacted.get("status") == "completed":
                     payload, force_final_round = _agent_model_payload(run)
                     estimated_tokens = _agent_estimate_request_tokens(payload)
@@ -11852,6 +12089,9 @@ def _agent_run_worker(run):
                     _agent_rollback_context_calibration(run, retry_pending)
                 if model_snapshot.get('errorCode') in output_truncation.CODES:
                     _agent_stop_output_truncation(run, model_snapshot.get('result') or {}, model_run['id'])
+                    return
+                if model_snapshot.get('errorCode') == 'tool_protocol_error' and tool_markup.is_unexecuted((model_snapshot.get('result') or {}).get('content')):
+                    _agent_stop_tool_markup(run, model_snapshot.get('result') or {}, model_run['id'])
                     return
                 error_code = model_snapshot.get("errorCode") or ""
                 if (
@@ -11919,6 +12159,9 @@ def _agent_run_worker(run):
             model_result = model_snapshot["result"]
             if output_truncation.classify(model_result):
                 _agent_stop_output_truncation(run, model_result, model_run['id'])
+                return
+            if not model_result.get('toolCalls') and tool_markup.is_unexecuted(model_result.get('content')):
+                _agent_stop_tool_markup(run, model_result, model_run['id'])
                 return
             with run["condition"]:
                 run["model_checkpoint"] = None
@@ -12592,6 +12835,7 @@ def _create_agent_run(
         "origin_message_id": origin_message_id,
         "goal_operations_enabled": goal_operations_enabled,
         "goal_closeout_enabled": True,
+        "goal_acceptance_policy": 1 if goal_operations_enabled else None,
         "output_budget": output_summary,
         "output_diagnostic": None,
         "goal_closeout": None,
@@ -26141,6 +26385,17 @@ def execute_run_command_tool(
     }
 
 
+_GOAL_SOURCE_REFERENCE_SCHEMA = {
+    'type': 'object',
+    'description': 'Trace the actual user requirement or supplied evidence. This is provenance, not a permission grant; objective comparisons use machine, never extra user confirmation.',
+    'properties': {'messageId': {'type': 'string', 'minLength': 1, 'maxLength': 128},
+                   'version': {'type': 'integer', 'enum': [1]},
+                   'contentHash': {'type': 'string', 'minLength': 64, 'maxLength': 64},
+                   'quote': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
+                   'purpose': {'type': 'string', 'enum': ['input', 'judgment', 'authorization']}},
+    'required': ['messageId', 'quote', 'purpose'], 'additionalProperties': False,
+}
+
 _SERVER_TOOL_DEFINITIONS = {
     "request_user_input": {
         "type": "function",
@@ -26537,6 +26792,9 @@ _SERVER_TOOL_DEFINITIONS = {
             "parameters": {"type": "object", "properties": {
                 "goalId": {"type": "string"},
                 "expectedRevision": {"type": "integer", "minimum": 0},
+                "userSourceOffset": {"type": "integer", "minimum": 0, "maximum": 256},
+                "userSourceMessageId": {"type": "string", "maxLength": 128},
+                "userSourceTextOffset": {"type": "integer", "minimum": 0, "maximum": 2097152},
                 "relation": {"type": "string", "enum": ["related", "status", "unrelated"]},
                 "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
                 "stepId": {"type": "string", "description": "Optional: page one criterion of this step. Without stepId, offset is a character cursor into the objective."},
@@ -26569,7 +26827,7 @@ _SERVER_TOOL_DEFINITIONS = {
         "type": "function",
         "function": {
             "name": "goal_set_plan",
-            "description": "Set the first 3-8 step plan for the current Goal. Each step needs bounded acceptance criteria.",
+            "description": "Set the first 3-8 step plan for the current Goal. Objective tests and comparisons require machine evidence; do not invent a second user confirmation. New user criteria require a real user sourceReference and distinguish input, judgment or authorization. A quoted source is traceability, never consent. Unknown historical human conditions must not be removed or downgraded.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -26587,6 +26845,7 @@ _SERVER_TOOL_DEFINITIONS = {
                                         "properties": {
                                             "id": {"type": "string"},
                                             "kind": {"type": "string", "enum": ["machine", "agent", "user"]},
+                                            "sourceReference": _GOAL_SOURCE_REFERENCE_SCHEMA,
                                             "description": {"type": "string"},
                                         },
                                         "required": ["id", "kind", "description"],
@@ -26627,6 +26886,7 @@ _SERVER_TOOL_DEFINITIONS = {
                                         "properties": {
                                             "id": {"type": "string"},
                                             "kind": {"type": "string", "enum": ["machine", "agent", "user"]},
+                                            "sourceReference": _GOAL_SOURCE_REFERENCE_SCHEMA,
                                             "description": {"type": "string"},
                                         },
                                         "required": ["id", "kind", "description"],
@@ -26673,6 +26933,7 @@ _SERVER_TOOL_DEFINITIONS = {
                             "properties": {
                                 "criterionId": {"type": "string"},
                                 "kind": {"type": "string", "enum": ["machine", "agent", "user"]},
+                                            "sourceReference": _GOAL_SOURCE_REFERENCE_SCHEMA,
                                 "summary": {"type": "string"},
                                 "artifactDigest": {"type": "string"},
                             },

@@ -7,6 +7,7 @@
   const COPY_SVG = '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M761.088 715.3152a38.7072 38.7072 0 0 1 0-77.4144 37.4272 37.4272 0 0 0 37.4272-37.4272V265.0112a37.4272 37.4272 0 0 0-37.4272-37.4272H425.6256a37.4272 37.4272 0 0 0-37.4272 37.4272 38.7072 38.7072 0 1 1-77.4144 0 115.0976 115.0976 0 0 1 114.8416-114.8416h335.4624a115.0976 115.0976 0 0 1 114.8416 114.8416v335.4624a115.0976 115.0976 0 0 1-114.8416 114.8416z"/><path d="M589.4656 883.0976H268.1856a121.1392 121.1392 0 0 1-121.2928-121.2928v-322.56a121.1392 121.1392 0 0 1 121.2928-121.344h321.28a121.1392 121.1392 0 0 1 121.2928 121.2928v322.56c1.28 67.1232-54.1696 121.344-121.2928 121.344zM268.1856 395.3152a43.52 43.52 0 0 0-43.8784 43.8784v322.56a43.52 43.52 0 0 0 43.8784 43.8784h321.28a43.52 43.52 0 0 0 43.8784-43.8784v-322.56a43.52 43.52 0 0 0-43.8784-43.8784z"/></svg>';
   const COPY_DONE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>';
   const INTERNAL_GOAL_TOOL_NAMES = new Set([
+    "goal_read",
     "goal_create",
     "goal_set_plan",
     "goal_revise_plan",
@@ -1063,6 +1064,7 @@
         /^正在.+(?:…|\.{3})$/.test(line)
         || /^(?:Listing|Reading|Searching|Running|Executing|Checking|Inspecting|Viewing|Editing|Writing|Creating|Deleting|Opening|Calling|Waiting)\b.+(?:…|\.{3})$/i.test(line)
         || /^→\s*request_user_input$/.test(line)
+        || INTERNAL_GOAL_TOOL_NAMES.has(line.match(/^→\s*(\w+)$/)?.[1])
       )
     ));
   }
@@ -2644,14 +2646,34 @@
       const rows = [];
       const queuedTailMessages = [];
       const claimedToolResultIndexes = new Set();
+      const renderedToolIdentities = new Set();
       const renderedGeneratedImageCalls = new Set();
       let pendingGeneratedImageRows = [];
       const toolResultsByIdentity = new Map();
+      const toolStartsByIdentity = new Map();
+      const legacyScopes = [];
+      let legacyScope = -1;
       messages.forEach((message, index) => {
+        if (message?.role === "user" && !isSteerProjectionMessage(message)
+            && !isDetachedProjectionMessage(message)
+            && !["pending", "canceled"].includes(message.meta?.queuedDispatch?.status)) legacyScope = index;
+        legacyScopes[index] = legacyScope;
+      });
+      const toolIdentity = (message, id, index) => `${String(message.meta?.agentRunId || `legacy-turn-${legacyScopes[index]}`)}\u0000${String(id)}`;
+      const resultIsTerminal = (message) => ["succeeded", "failed", "cancelled", "completed", "interrupted"].includes(
+        getProcessCallView({args: {}, resultMessage: message,
+          result: message.meta?.result || message.meta?.authorizationResult || null}).outcome,
+      );
+      messages.forEach((message, index) => {
+        if (message?.role === "tool-call" && message.meta?.toolCallId && !isInternalGoalTool(message)) {
+          toolStartsByIdentity.set(toolIdentity(message, message.meta.toolCallId, index), {msg: message, index});
+        }
         if (message?.role !== "tool-result" || !message.meta?.toolCallId || isInternalGoalTool(message)) return;
-        const identity = `${String(message.meta?.agentRunId || "")}\u0000${String(message.meta.toolCallId)}`;
-        if (!toolResultsByIdentity.has(identity)) toolResultsByIdentity.set(identity, []);
-        toolResultsByIdentity.get(identity).push({ msg: message, index });
+        const identity = toolIdentity(message, message.meta.toolCallId, index);
+        const prior = toolResultsByIdentity.get(identity);
+        if (!prior || !resultIsTerminal(prior.msg) || resultIsTerminal(message)) {
+          toolResultsByIdentity.set(identity, { msg: message, index });
+        }
       });
       let pendingProcess = [];
       let pendingProcessAfterRows = [];
@@ -2718,24 +2740,42 @@
       };
       const flushProcess = (options = {}) => {
         if (!pendingProcess.length) return false;
+        // Reconcile data before grouping. An edit card can split a native batch,
+        // but cannot create a second execution row for the same Run/call.
+        pendingProcess = pendingProcess.flatMap(({msg, index}) => {
+          if (msg.role === "assistant") {
+            const calls = visibleAssistantToolCalls(msg).filter(call => !call.id
+              || !renderedToolIdentities.has(toolIdentity(msg, call.id, index)));
+            return calls.length ? [{msg: {...msg, meta: {...msg.meta, toolCalls: calls}}, index}] : [];
+          }
+          return msg.meta?.toolCallId && renderedToolIdentities.has(toolIdentity(msg, msg.meta.toolCallId, index))
+            ? [] : [{msg, index}];
+        });
+        if (!pendingProcess.length) {
+          if (pendingProcessAfterRows.length) rows.push(...pendingProcessAfterRows);
+          pendingProcessAfterRows = [];
+          return false;
+        }
         const existingIndexes = new Set(pendingProcess.map((item) => item.index));
         const callIdentities = new Set();
-          pendingProcess.forEach(({ msg }) => {
+          pendingProcess.forEach(({ msg, index }) => {
             if (msg?.role === "assistant") {
             visibleAssistantToolCalls(msg).forEach((call) => {
               if (call?.id) {
-                callIdentities.add(`${String(msg.meta?.agentRunId || "")}\u0000${String(call.id)}`);
+                callIdentities.add(toolIdentity(msg, call.id, index));
               }
             });
           } else if (msg?.role === "tool-call" && msg.meta?.toolCallId) {
-            callIdentities.add(`${String(msg.meta?.agentRunId || "")}\u0000${String(msg.meta.toolCallId)}`);
+            callIdentities.add(toolIdentity(msg, msg.meta.toolCallId, index));
+          } else if (msg?.role === "tool-result" && msg.meta?.toolCallId) {
+            callIdentities.add(toolIdentity(msg, msg.meta.toolCallId, index));
           }
         });
         callIdentities.forEach((identity) => {
-          const resultEntry = (toolResultsByIdentity.get(identity) || []).find((entry) => (
-            !existingIndexes.has(entry.index) && !claimedToolResultIndexes.has(entry.index)
-          ));
-          if (!resultEntry) return;
+          const startEntry = toolStartsByIdentity.get(identity);
+          if (startEntry && !existingIndexes.has(startEntry.index)) pendingProcess.push(startEntry);
+          const resultEntry = toolResultsByIdentity.get(identity);
+          if (!resultEntry || existingIndexes.has(resultEntry.index)) return;
           pendingProcess.push(resultEntry);
           claimedToolResultIndexes.add(resultEntry.index);
         });
@@ -2755,6 +2795,7 @@
           expandedToolProcesses,
           expandedToolItems,
         }));
+        callIdentities.forEach(identity => renderedToolIdentities.add(identity));
         queueGeneratedImageOutputs(
           collectToolProcess(pendingProcess).calls.map((call) => getProcessCallView(call, runOwnership)),
         );
@@ -2801,6 +2842,11 @@
         let msg = messages[index];
         if (!msg) continue;
         msg = interruptedModelProjection(msg, messages, runOwnership);
+        if (msg.role === "assistant" && !msg.streaming && !msg.meta?.toolCalls?.length
+            && global.Code?.agent?.modelRequest?.isUnexecutedToolMarkup(getMessageText(msg))) {
+          msg = {...msg, content: global.Code.agent.modelRequest.replaceUnexecutedToolMarkup(getMessageText(msg), t("toolMarkupNotExecuted")),
+            meta: {...msg.meta, skipApi: true, protocolRef: undefined, protocolContent: undefined}};
+        }
         if (msg.role === "user" && ["pending", "canceled"].includes(msg.meta?.queuedDispatch?.status)) {
           queuedTailMessages.push({ msg, index });
           continue;
@@ -2825,6 +2871,10 @@
           continue;
         }
         if (isInternalMessage(msg)) continue;
+        if (msg.role === "tool-result" && msg.meta?.toolCallId) {
+          const preferred = toolResultsByIdentity.get(toolIdentity(msg, msg.meta.toolCallId, index));
+          if (preferred && preferred.index !== index) continue;
+        }
         if (isEditSuggestionMessage(msg)) {
           if (msg.role === "tool-result" && !claimedToolResultIndexes.has(index)) {
             pendingProcess.push({ msg, index });

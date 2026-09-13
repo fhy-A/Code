@@ -2570,6 +2570,7 @@ const GOAL_AUTONOMOUS_AGENT_INSTRUCTION = `
 `.trim();
 
 const INTERNAL_GOAL_TOOL_NAMES = new Set([
+  "goal_read",
   "goal_create",
   "goal_set_plan",
   "goal_revise_plan",
@@ -13976,6 +13977,14 @@ function projectAgentModelCompleted(ctx, event) {
   if (data.protocolRef) {
     assistant.meta.protocolContent = projectedContent.content;
     assistant.meta.protocolDisplayContent = assistant.content;
+  }
+  if (data.outcome === "tool_protocol_error") {
+    assistant.content = [String(data.content || '').trim(), t("toolMarkupNotExecuted")].filter(Boolean).join('\n\n');
+    assistant.meta.skipApi = true;
+    assistant.meta.toolCalls = [];
+    delete assistant.meta.protocolRef;
+    delete assistant.meta.protocolContent;
+    delete assistant.meta.protocolDisplayContent;
   }
   if (data.outcome === "output_truncated") {
     assistant.meta.skipApi = true;
