@@ -17,18 +17,34 @@ def policy(value):
 
 def bind(reference, sources):
     raw_fields = {'messageId', 'quote', 'purpose'}
-    if not isinstance(reference, dict) or set(reference) not in (raw_fields, raw_fields | {'version', 'contentHash'}):
-        raise GoalV2ProtocolError('User criteria require sourceReference: messageId, exact quote and purpose; objective comparisons use machine evidence, not an extra user confirmation')
+    if not isinstance(reference, dict):
+        raise GoalV2ProtocolError('sourceReference must be an object with messageId, quote and purpose')
+    missing = raw_fields - set(reference)
+    if missing:
+        raise GoalV2ProtocolError('sourceReference is missing required fields: ' + ', '.join(sorted(missing)))
+    if set(reference) - raw_fields - {'version', 'contentHash'}:
+        raise GoalV2ProtocolError('sourceReference has unknown fields; remove fields outside the declared schema')
+    if 'version' in reference and (type(reference['version']) is not int or reference['version'] != 1):
+        raise GoalV2ProtocolError('sourceReference.version must be integer 1 when provided')
+    if 'contentHash' in reference:
+        supplied_hash = reference['contentHash']
+        if (not isinstance(supplied_hash, str) or len(supplied_hash) != 64
+                or any(c not in '0123456789abcdef' for c in supplied_hash)):
+            raise GoalV2ProtocolError('sourceReference.contentHash must be a 64-character lowercase SHA-256 when provided')
     message_id, quote, purpose = (reference[k] for k in ('messageId', 'quote', 'purpose'))
-    if (not isinstance(message_id, str) or message_id not in sources
-            or not isinstance(quote, str) or not quote.strip() or len(quote) > 1000
-            or quote not in sources[message_id] or purpose not in PURPOSES):
-        raise GoalV2ProtocolError('Goal source reference does not match an eligible persisted user message')
+    if not isinstance(message_id, str) or not 1 <= len(message_id) <= 128 or message_id not in sources:
+        raise GoalV2ProtocolError('sourceReference.messageId must identify an eligible user source; use a supplied source ID')
+    if not isinstance(purpose, str) or purpose not in PURPOSES:
+        raise GoalV2ProtocolError('sourceReference.purpose must be input, judgment or authorization')
+    if not isinstance(quote, str) or not quote.strip() or len(quote) > 1000:
+        raise GoalV2ProtocolError('sourceReference.quote must contain 1-1000 characters of nonblank source text')
+    if quote not in sources[message_id]:
+        raise GoalV2ProtocolError('sourceReference.quote is not an exact substring of the selected user source; copy its original wording')
     compiled = {'version': 1, 'messageId': message_id, 'quote': quote, 'purpose': purpose,
                 'contentHash': hashlib.sha256(sources[message_id].encode('utf-8')).hexdigest()}
-    if 'version' in reference and normalize_source_reference(reference) != compiled:
-        raise GoalV2ProtocolError('Goal canonical source reference no longer matches the supplied source')
-    return compiled
+    if 'contentHash' in reference and reference['contentHash'] != compiled['contentHash']:
+        raise GoalV2ProtocolError('sourceReference.contentHash does not match the selected source; supply its matching SHA-256')
+    return normalize_source_reference(compiled)
 
 
 def plan(steps, sources, previous=None):

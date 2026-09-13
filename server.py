@@ -26387,10 +26387,11 @@ def execute_run_command_tool(
 
 _GOAL_SOURCE_REFERENCE_SCHEMA = {
     'type': 'object',
-    'description': 'Trace the actual user requirement or supplied evidence. This is provenance, not a permission grant; objective comparisons use machine, never extra user confirmation.',
+    'description': 'Require messageId, quote and purpose. version and contentHash are independently optional; supplied version must be 1 and supplied contentHash must match the entire source text. The server returns all five canonical fields. Provenance is not permission; objective comparisons use machine evidence.',
     'properties': {'messageId': {'type': 'string', 'minLength': 1, 'maxLength': 128},
-                   'version': {'type': 'integer', 'enum': [1]},
-                   'contentHash': {'type': 'string', 'minLength': 64, 'maxLength': 64},
+                   'version': {'type': 'integer', 'enum': [1], 'description': 'Optional independently of contentHash; when provided, use integer 1.'},
+                   'contentHash': {'type': 'string', 'minLength': 64, 'maxLength': 64,
+                                   'description': 'Optional independently of version; lowercase SHA-256 of the entire selected source text. A supplied hash is verified, never ignored.'},
                    'quote': {'type': 'string', 'minLength': 1, 'maxLength': 1000},
                    'purpose': {'type': 'string', 'enum': ['input', 'judgment', 'authorization']}},
     'required': ['messageId', 'quote', 'purpose'], 'additionalProperties': False,
