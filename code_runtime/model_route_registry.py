@@ -389,7 +389,7 @@ class ModelRouteRegistry:
                 failures.append({"connectionId": connection_id, "code": "route_credentials_unavailable"})
                 continue
             try:
-                models = _clean_models(fetch_models({**raw, "baseUrl": base_url, "key": key}))
+                models = _clean_models(fetch_models({**raw, "connectionId": connection_id, "baseUrl": base_url, "key": key}))
             except Exception:
                 next_routes.extend(prior)
                 failures.append({"connectionId": connection_id, "code": "route_catalog_unavailable"})

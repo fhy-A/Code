@@ -3595,19 +3595,16 @@ raise SystemExit(2)
         self.assertEqual(target.read_bytes(), source)
         self.assertEqual(target.stat().st_mtime_ns, before.st_mtime_ns)
 
-    def test_budget_truncated_arguments_use_existing_correction_round_without_extra_execution(self):
+    def test_budget_truncated_arguments_stop_without_correction_or_execution(self):
         def frame(call_id, arguments, finish):
             return {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": call_id, "type": "function", "function": {"name": "write_file", "arguments": arguments}}]}, "finish_reason": finish}]}
         raw = '{"path":"created.txt","content":"unfinished'
         content = 'UTF-8 中文 "quotes" \\ slash\nsecond\r\n'
         good = json.dumps({"path": "created.txt", "content": content}, ensure_ascii=False)
-        # The invalid round is real streamed fragments; the next valid length
-        # round must still execute rather than being categorically blocked.
         with _AgentUpstream.scripted_lock:
             _AgentUpstream.scripted_rounds = [
                 [frame("budget-bad", raw[:22], None), {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": raw[22:]}}]}, "finish_reason": "length"}]}],
                 [frame("budget-good", good, "length")],
-                [{"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]}],
             ]
         with mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:
             run = server_mod._create_agent_run(
@@ -3616,40 +3613,41 @@ raise SystemExit(2)
             )
             self._wait_terminal(run)
         snapshot = server_mod._agent_snapshot(run, 0)
-        self.assertEqual(snapshot["status"], "completed")
-        self.assertEqual(_AgentUpstream.calls, 3)
+        self.assertEqual(snapshot["status"], "failed")
+        self.assertEqual(snapshot["errorCode"], "output_truncated_tools")
+        self.assertEqual(_AgentUpstream.calls, 1)
+        self.assertEqual(execute_mock.call_count, 0)
+        self.assertEqual(snapshot["toolExecutions"], [])
+        self.assertFalse((self.project_dir / "created.txt").exists())
+        self.assertEqual(snapshot["outputDiagnostic"]["requestedTokens"], 4096)
+        restored = server_mod._agent_run_from_record(server_mod._agent_run_record(run))
+        self.assertEqual(restored["output_diagnostic"], run["output_diagnostic"])
+        self.assertEqual(restored["request"]["max_tokens"], 4096)
+        self.assertEqual(_AgentUpstream.calls, 1)
+
+        # A separately authorized, complete response still supports escaped UTF-8 file data.
+        with _AgentUpstream.scripted_lock:
+            _AgentUpstream.scripted_rounds = [[frame("budget-good", good, "tool_calls")],
+                [{"choices": [{"delta": {"content": "done"}, "finish_reason": "stop"}]}]]
+            _AgentUpstream.calls = 0
+        with mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:
+            normal = server_mod._create_agent_run(
+                "session-budget-normal", {"model": "test-model", "max_tokens": 4096, "messages": [{"role": "user", "content": "write the complete synthetic file"}]},
+                self.base_url, ["fixture-budget-key"], allowed_tools=["write_file"], permission_profile="bypass", max_rounds=4,
+            )
+            self._wait_terminal(normal)
+        self.assertEqual(normal["status"], "completed")
         self.assertEqual(execute_mock.call_count, 1)
-        executions = snapshot["toolExecutions"]
-        self.assertEqual(len(executions), 2)
-        failure, success = executions
-        self.assertEqual(failure["result"]["errorCode"], "invalid_tool_arguments")
-        self.assertEqual(failure["result"]["fieldErrors"], [])
-        self.assertIn("output token limit", failure["result"]["error"])
-        self.assertIn("Unterminated string", failure["result"]["error"])
-        # Existing UI compacts an error to 220 characters; preserve all core facts.
-        for detail in ("Unterminated string", "finish_reason=length", "was not executed"):
-            self.assertIn(detail, failure["result"]["error"][:220])
-        private_executions = server_mod._agent_run_record(run)["toolExecutions"]
-        self.assertFalse(private_executions["budget-bad"].get("operationId"))
-        self.assertFalse(private_executions["budget-bad"].get("authorizationDecision"))
-        self.assertTrue(success["result"]["ok"])
-        self.assertTrue(private_executions["budget-good"].get("operationId"))
+        self.assertEqual(_AgentUpstream.calls, 2)
+        self.assertTrue(normal["tool_executions"]["budget-good"]["operationId"])
         self.assertEqual((self.project_dir / "created.txt").read_bytes(), server_mod.normalize_text_newlines(content).encode("utf-8"))
         self.assertTrue(all(payload["max_tokens"] == 4096 for payload in _AgentUpstream.payloads))
-        tool_message = next(message for message in _AgentUpstream.payloads[1]["messages"] if message.get("role") == "tool")
-        self.assertIn("was not executed", tool_message["content"])
-        self.assertEqual(_AgentUpstream.payloads[0]["tools"][0]["function"]["parameters"], _expected_advertised_tool_definition(server_mod._SERVER_TOOL_DEFINITIONS["write_file"])["function"]["parameters"])
-        # Existing persisted fields carry the diagnostic across restart.
-        with server_mod._agent_run_lock:
-            server_mod._agent_runs.pop(run["id"], None)
-        restored = server_mod._get_agent_run(run["id"])
-        self.assertIn("output token limit", restored["tool_executions"]["budget-bad"]["result"]["error"])
-        self.assertEqual(_AgentUpstream.calls, 3)
 
     def test_budget_parse_failure_preserves_existing_repeated_failure_signal(self):
+        # Complete non-length responses retain the existing argument-validation retry guard.
         rounds = []
         for index in range(3):
-            rounds.append([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": f"budget-repeat-{index}", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"unfinished'}}]}, "finish_reason": "length"}]}])
+            rounds.append([{"choices": [{"delta": {"tool_calls": [{"index": 0, "id": f"budget-repeat-{index}", "type": "function", "function": {"name": "read_file", "arguments": '{"path":"unfinished'}}]}, "finish_reason": "tool_calls"}]}])
         with _AgentUpstream.scripted_lock:
             _AgentUpstream.scripted_rounds = rounds + [[{"choices": [{"delta": {"content": "cannot complete the arguments"}, "finish_reason": "stop"}]}]]
         with mock.patch.object(server_mod, "execute_registered_tool", wraps=server_mod.execute_registered_tool) as execute_mock:

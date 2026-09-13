@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from .reasoning_capabilities import ReasoningError
+from . import output_truncation
 
 LIMIT = 16 * 1024 * 1024
 
@@ -117,6 +118,7 @@ class Response:
         self.started = False
         self.bytes = 0
         self.finish_reason = None
+        self.invalid_tool_json = False
 
     def feed(self, data):
         self.bytes += len(data.encode("utf-8"))
@@ -205,7 +207,9 @@ class Response:
                 try:
                     self.blocks[index]["input"] = json.loads(self.partial[index])
                 except ValueError:
-                    fail()
+                    # A provider may close a tool block at its output limit.
+                    # Defer classification until the strict terminal marker; never repair JSON.
+                    self.invalid_tool_json = True
             elif self.blocks[index].get("type") == "tool_use":
                 delta = {"tool_calls": [{"index": index, "function": {"arguments": json.dumps(self.blocks[index].get("input", {}))}}]}
             self.open_blocks.remove(index)
@@ -230,6 +234,22 @@ class Response:
 
     def complete(self, message):
         if not self.stopped or not self.finished:
+            fail()
+        if self.finish_reason in output_truncation.FINISH_REASONS:
+            if self.protocol == 'deepseek':
+                if not self.reasoning_seen:
+                    fail()
+            else:
+                # Signatures and non-tool native blocks remain strictly validated.
+                # This validation-only projection is never returned or archived for replay.
+                blocks = [self.blocks[i] for i in sorted(self.blocks)
+                          if self.blocks[i].get('type') != 'tool_use']
+                validate_native(self.protocol, blocks or [{'type': 'text', 'text': ''}],
+                                {'content': message.get('content', '')})
+            result = {**message, 'finishReason': self.finish_reason, 'reasoning': self.reasoning or any(
+                b.get('type') == 'thinking' and b.get('thinking') for b in self.blocks.values())}
+            raise output_truncation.OutputTruncated(output_truncation.classify(result))
+        if self.invalid_tool_json:
             fail()
         if message.get("tool_calls") and self.finish_reason not in {"tool_use", "tool_calls"}:
             fail()

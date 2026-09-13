@@ -3607,6 +3607,9 @@ const createSystemPromptSnapshotData = (values, metadata) => ({{
         loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
         loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
         loop_source = APP_SOURCE[loop_start:loop_end]
+        guard_start = APP_SOURCE.index("function assertAutoOutputSupported(")
+        guard_end = APP_SOURCE.index("\n}", guard_start) + 2
+        loop_source = APP_SOURCE[guard_start:guard_end] + "\n" + loop_source
         send_start = APP_SOURCE.index("async function sendMessage(userText, options = {})")
         send_end = APP_SOURCE.index("async function resolveAtImages()", send_start)
         send_source = APP_SOURCE[send_start:send_end]
@@ -3973,6 +3976,9 @@ const setAgentProjectionShadowEnabled = () => {{}};
         loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
         loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
         loop_source = APP_SOURCE[loop_start:loop_end]
+        guard_start = APP_SOURCE.index("function assertAutoOutputSupported(")
+        guard_end = APP_SOURCE.index("\n}", guard_start) + 2
+        loop_source = APP_SOURCE[guard_start:guard_end] + "\n" + loop_source
         self.assertLess(
             loop_source.index("if (!ctx.agentRunId)"),
             loop_source.index("const dispatch = await resolveRunDispatch()"),
@@ -5778,8 +5784,8 @@ process.stdout.write(JSON.stringify(globalThis.__invalidFallback));
         self.assertIn('localStorage.setItem("code-max-tokens", els.maxTokens.value)', APP_SOURCE)
         self.assertIn('const savedMax = localStorage.getItem("code-max-tokens") || "auto"', APP_SOURCE)
         self.assertIn("els.maxTokens.value = savedMax", APP_SOURCE)
-        self.assertIn('temperature: "温度", maxTokens: "最大输出"', I18N_SOURCE)
-        self.assertIn('temperature: "Temperature", maxTokens: "Max Tokens"', I18N_SOURCE)
+        self.assertIn('temperature: "温度", maxTokens: "单次输出"', I18N_SOURCE)
+        self.assertIn('temperature: "Temperature", maxTokens: "Output per request"', I18N_SOURCE)
         self.assertIn('contextBudget: "最大上下文窗口"', I18N_SOURCE)
         self.assertIn('contextBudget: "Maximum context window"', I18N_SOURCE)
         self.assertIn("contextBudgetPlaceholder", I18N_SOURCE)

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN" data-frontend-runtime="bundle">
+<html lang="zh-CN" data-frontend-runtime="bundle" data-instance-mode="release">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -316,17 +316,20 @@
             <span data-i18n="temperature">温度</span>
             <input id="temperature" type="number" min="0" max="2" step="0.1" value="0.2" />
           </label>
+          <div class="field output-budget-field">
+            <span id="outputBudgetLabel" data-i18n="maxTokens">单次输出</span>
+            <details class="output-budget-advanced">
+              <summary class="output-budget-control" aria-labelledby="outputBudgetLabel outputBudgetSummary"><span id="outputBudgetSummary" data-i18n="auto">自动</span></summary>
           <label class="field">
-            <span data-i18n="maxTokens">最大输出</span>
-            <select id="maxTokens">
-              <option value="auto" data-i18n="auto">自动</option>
-              <option value="1024">1024</option>
-              <option value="2048">2048</option>
-              <option value="4096">4096</option>
-              <option value="8192">8192</option>
-              <option value="16384">16384</option>
-            </select>
+            <span data-i18n="outputBudgetCustom">自动或自定义正整数</span>
+            <input id="maxTokens" type="text" value="auto" list="outputBudgetPresets" autocomplete="off" />
+            <datalist id="outputBudgetPresets">
+              <option value="auto"></option><option value="16384"></option>
+              <option value="32768"></option><option value="65536"></option>
+            </datalist>
           </label>
+            </details>
+          </div>
         </div>
         <label class="field context-budget-field">
           <span data-i18n="contextBudget">上下文预算</span>

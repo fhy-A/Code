@@ -936,7 +936,15 @@
             <div class="model-parameter-grid context-settings-primary">
               <label class="field"><span data-i18n="responseDetail">${t("responseDetail")}</span><select id="settingsResponseDetail">${styleOptions(styleApi.RESPONSE_DETAILS, "responseDetail_", replyStyle.snapshot.detail)}</select></label>
               <label class="field"><span data-i18n="responseTone">${t("responseTone")}</span><select id="settingsResponseTone">${styleOptions(styleApi.RESPONSE_TONES, "responseTone_", replyStyle.snapshot.tone)}</select></label>
-              <label class="field"><span data-i18n="maxTokens">${t("maxTokens")}</span><select id="settingsMaxTokens">${els.maxTokens.innerHTML}</select></label>
+              <div class="field output-budget-field"><span id="settingsOutputBudgetLabel" data-i18n="maxTokens">${t("maxTokens")}</span>
+                <details class="output-budget-advanced">
+                  <summary class="output-budget-control" aria-labelledby="settingsOutputBudgetLabel settingsOutputBudgetSummary"><span id="settingsOutputBudgetSummary" data-i18n="${els.maxTokens.value === "auto" ? "auto" : "outputBudgetManual"}">${t(els.maxTokens.value === "auto" ? "auto" : "outputBudgetManual")}</span></summary>
+                  <label class="field output-budget-custom"><span data-i18n="outputBudgetCustom">${t("outputBudgetCustom")}</span>
+                    <input id="settingsMaxTokens" type="text" autocomplete="off" list="settingsOutputBudgetPresets" value="${escapeHtml(els.maxTokens.value)}" />
+                    <datalist id="settingsOutputBudgetPresets"><option value="auto"></option><option value="16384"></option><option value="32768"></option><option value="65536"></option></datalist>
+                  </label>
+                </details>
+              </div>
               <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>
             </div>
             <p id="settingsResponseStyleStatus" class="field-hint" role="status">${replyStyle.error ? t(replyStyle.error) : ""}</p>
@@ -979,9 +987,22 @@
       const settingsMaxTokens = byId("settingsMaxTokens");
       if (settingsMaxTokens) settingsMaxTokens.value = els.maxTokens.value;
       settingsMaxTokens?.addEventListener("change", (event) => {
-        els.maxTokens.value = event.currentTarget.value;
-        saveLocalSettings();
+        const value = String(event.currentTarget.value).trim().toLowerCase();
+        const tokens = Number(value);
+        if (value !== "auto" && (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(tokens) || tokens < 1 || tokens > 2000000)) {
+          event.currentTarget.setCustomValidity(t("outputBudgetInvalid"));
+          event.currentTarget.reportValidity();
+          return;
+        }
+        event.currentTarget.setCustomValidity("");
+        els.maxTokens.value = value;
+        els.maxTokens.dispatchEvent(new global.Event("change"));
         event.currentTarget.value = els.maxTokens.value;
+        const summary = byId("settingsOutputBudgetSummary");
+        if (summary) {
+          summary.dataset.i18n = value === "auto" ? "auto" : "outputBudgetManual";
+          summary.textContent = t(summary.dataset.i18n);
+        }
       });
       const settingsContextBudget = byId("settingsContextBudget");
       if (settingsContextBudget) settingsContextBudget.value = els.contextBudget.value;

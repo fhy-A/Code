@@ -30,6 +30,7 @@ METADATA_FIELDS = (
 )
 _catalog_lock = threading.RLock()
 _catalog: dict[tuple[str, str], dict] = {}
+_output_catalog: dict[tuple[str, str, str], dict] = {}
 _official_catalog = None
 _official_catalog_error = ""
 
@@ -339,10 +340,13 @@ def normalize_metadata(item):
     return min(values), "conflict" if len(set(values)) > 1 else "valid"
 
 
-def normalize_catalog(base_url, items):
+def normalize_catalog(base_url, items, *, output_scope=''):
     cid = connection_id(base_url)
     output = []
     with _catalog_lock:
+        for key in list(_output_catalog):
+            if key[:2] == (cid, output_scope):
+                del _output_catalog[key]
         for raw in items if isinstance(items, list) else []:
             model = canonical_model_id(raw.get("id") if isinstance(raw, dict) else "")
             if not model:
@@ -383,8 +387,34 @@ def normalize_catalog(base_url, items):
                 "connectionId": cid,
             }
             _catalog[key] = {**entry, "hard": bool(entry["contextWindowHard"])}
+            # Output declarations are independent of context metadata/hardness.
+            output_limits = [raw.get(k) for k in ('max_output_tokens', 'maxOutputTokens')
+                             if type(raw.get(k)) is int and 1 <= raw[k] <= MAX_TOKENS]
+            support = raw.get('supports_reasoning')
+            output_key = (cid, output_scope, model.lower())
+            previous_output = _output_catalog.get(output_key, {})
+            if previous_output.get('limit') is not None:
+                output_limits.append(previous_output['limit'])
+            support = support if type(support) is bool else None
+            if previous_output and previous_output.get('reasoning') != support:
+                support = None
+            _output_catalog[output_key] = {'limit': min(output_limits) if output_limits else None, 'reasoning': support}
             output.append({**raw, **entry})
     return output
+
+
+def output_capability(model, base_url, *, output_scope=''):
+    """Use separately declared output limits, never infer them from contextHard."""
+    model_id = canonical_model_id(model)
+    with _catalog_lock:
+        metadata = dict(_output_catalog.get((connection_id(base_url), output_scope, model_id.lower())) or {})
+    official = official_resolution(model_id) or {}
+    model_limit = official.get('maxOutputTokens') if official.get('contextWindowSource') == 'official' else None
+    route_limit = metadata.get('limit')
+    return {'modelLimit': model_limit, 'routeLimit': route_limit,
+            'modelLimitSource': 'official' if model_limit is not None else 'unknown',
+            'routeLimitSource': 'metadata' if route_limit is not None else 'unknown',
+            'reasoningSupported': metadata.get('reasoning')}
 
 
 def resolve(

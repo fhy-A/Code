@@ -255,6 +255,8 @@
         sessionId,
         payload,
         ...(reasoningSelection !== null ? { reasoningSelection } : {}),
+        ...(payload?.max_tokens !== undefined ? { outputPreference: payload.max_tokens === 0
+          ? { version: 1, mode: "auto" } : { version: 1, mode: "manual", tokens: payload.max_tokens } } : {}),
         ...(routeRef
           ? { routeRef, catalogRevision }
           : { baseUrl, keys }),
@@ -300,6 +302,8 @@
         }),
         payload,
         ...(reasoningSelection !== null ? { reasoningSelection } : {}),
+        ...(payload?.max_tokens !== undefined ? { outputPreference: payload.max_tokens === 0
+          ? { version: 1, mode: "auto" } : { version: 1, mode: "manual", tokens: payload.max_tokens } } : {}),
         ...(routeRef
           ? { routeRef, catalogRevision }
           : { baseUrl, keys }),

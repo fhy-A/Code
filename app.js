@@ -2277,9 +2277,12 @@ function applyInstanceIdentity(instanceMode) {
   const isDev = instanceMode === "dev";
   _instanceProductName = isDev ? "Code Dev" : "Code";
   _baseDocumentTitle = _instanceProductName;
+  document.documentElement.dataset.instanceMode = isDev ? "dev" : "release";
   if (els.productName) els.productName.textContent = _instanceProductName;
   if (!_pendingPermNotify) document.title = _baseDocumentTitle;
 }
+
+applyInstanceIdentity(document.documentElement.dataset.instanceMode || "release");
 
 function setAgentProjectionShadowEnabled(enabled) {
   _agentProjectionShadowEnabled = enabled === true;
@@ -3779,6 +3782,15 @@ var _errorCodeMeta = {
   tool_error:         { retry: true },
   user_cancelled:     { retry: false },
   empty_response:     { retry: true },
+  output_truncated_reasoning: { retry: false },
+  output_truncated_text: { retry: false },
+  output_truncated_tools: { retry: false },
+  output_budget_exceeds_limit: { retry: false },
+  output_context_insufficient: { retry: false },
+  output_preference_invalid: { retry: false },
+  output_reasoning_incompatible: { retry: false },
+  output_budget_client_upgrade_required: { retry: false },
+  reasoning_budget_insufficient: { retry: false },
   content_filtered:   { retry: false },
   internal_error:     { retry: false },
   route_catalog_unavailable: { retry: true },
@@ -3828,7 +3840,16 @@ function _formatAgentError(err) {
   var info = _errorCodeInfo(code);
   var fallback = (err.message || "Agent run failed");
   if (info) {
-    var lines = ["> **" + info.label + "**", "> " + fallback];
+    var lines = ["> **" + info.label + "**"];
+    if (!code.startsWith("output_")) lines.push("> " + fallback);
+    if (err.outputDiagnostic) {
+      const d = err.outputDiagnostic;
+      lines.push("> " + t("outputBudgetFailureDetails", {
+        budget: d.requestedTokens ?? "—", used: d.completionTokens ?? "—", reasoning: d.reasoningTokens ?? "—",
+        source: t(d.kind === "compaction" ? "outputBudgetCompaction" : err.outputBudget?.source === "user_override" ? "outputBudgetManual"
+          : err.outputBudget?.source === "unknown_conservative" ? "outputBudgetUnknownSource" : "auto"),
+      }));
+    }
     if (info.suggestion) lines.push("> \u{1f4a1} " + info.suggestion);
     return lines.join("\n");
   }
@@ -13956,6 +13977,15 @@ function projectAgentModelCompleted(ctx, event) {
     assistant.meta.protocolContent = projectedContent.content;
     assistant.meta.protocolDisplayContent = assistant.content;
   }
+  if (data.outcome === "output_truncated") {
+    assistant.meta.skipApi = true;
+    assistant.meta.outputTruncated = true;
+    assistant.meta.outputDiagnostic = data.outputDiagnostic || null;
+    assistant.meta.toolCalls = [];
+    delete assistant.meta.protocolRef;
+    delete assistant.meta.protocolContent;
+    delete assistant.meta.protocolDisplayContent;
+  }
   if (!assistant.meta._usageRecorded) {
     const usage = data.usage || {};
     assistant.meta._usageRecorded = true;
@@ -14683,6 +14713,7 @@ async function runServerAgentLoop(ctx) {
   };
   if (!ctx.agentRunId) {
     const prepared = await buildModelRequestPayload(ctx, true, serverTools);
+    assertAutoOutputSupported(prepared.payload);
     if (!ctx.imageRoute && (ctx.activeSkillNames || []).includes("imagegen")) {
       const error = new Error(t("imageRouteNotConfigured"));
       error.code = "image_route_not_configured";
@@ -14787,6 +14818,10 @@ async function runServerAgentLoop(ctx) {
     if (snapshot.routeRef) {
       ctx.routeRef = String(snapshot.routeRef);
       ctx.catalogRevision = Math.max(0, Number(snapshot.catalogRevision || ctx.catalogRevision || 0));
+    }
+    if (snapshot.outputBudget) {
+      ctx.maxTokens = snapshot.outputBudget.requestedTokens;
+      ctx.outputBudget = snapshot.outputBudget;
     }
     if (snapshot.status === "waiting_credentials") {
       const dispatch = await resolveRunDispatch(snapshot.routeRef || ctx.routeRef);
@@ -14938,9 +14973,11 @@ async function runServerAgentLoop(ctx) {
       snapshot.error || "",
     );
     err.errorCode = failure.code || snapshot.errorCode || "";
+    err.outputDiagnostic = snapshot.outputDiagnostic || null;
+    err.outputBudget = snapshot.outputBudget || null;
     const preservePublicProcess = Boolean(
-      snapshot.goalOperationsEnabled
-      && ["agent_round_limit", "goal_run_hard_limit"].includes(err.errorCode)
+      err.errorCode.startsWith("output_truncated_") || (snapshot.goalOperationsEnabled
+      && ["agent_round_limit", "goal_run_hard_limit"].includes(err.errorCode))
     );
     if (preservePublicProcess) {
       attachCompletedAgentUsage(ctx, snapshot);
@@ -16342,7 +16379,7 @@ function getReasoningSelectionForModel(model, routeRef = "") {
   const route = routeRef
     ? state.modelRoutes.find((candidate) => candidate.routeRef === routeRef)
     : selectedModelRoute()?.modelId === model ? selectedModelRoute() : routeForModel(model, { unique: true });
-  try { return snapshotReasoningSelection(reasoningPreference, route, getEffectiveMaxTokens(model)); }
+  try { return snapshotReasoningSelection(reasoningPreference, route, getEffectiveMaxTokens(model) || undefined); }
   catch (error) {
     error.message = t(error.code === "reasoning_protocol_unsupported" ? "reasoningProtocolUnsupported" : "reasoningSelectRequired");
     throw error;
@@ -16359,7 +16396,7 @@ function updateReasoningPicker() {
   const model = getSelectedModel(), cap = selectedModelRoute()?.reasoning;
   const intent = reasoningPreference?.mode === "v2" ? reasoningPreference.intent : "";
   const selectable = model && cap?.schemaVersion === 2 ? (cap.intents || []).filter(
-    (value) => !cap.minimumOutputTokens?.[value] || getEffectiveMaxTokens(model) >= cap.minimumOutputTokens[value]
+    (value) => !getEffectiveMaxTokens(model) || !cap.minimumOutputTokens?.[value] || getEffectiveMaxTokens(model) >= cap.minimumOutputTokens[value]
   ) : [];
   const invalid = reasoningPreference?.mode === "invalid"
     || (intent && !selectable.includes(intent))
@@ -17101,21 +17138,30 @@ els.sendBtn.addEventListener("click", (event) => {
 els.refreshModelsBtn.addEventListener("click", refreshModels);
 
 function getEffectiveMaxTokens(model) {
+  const val = String(els.maxTokens.value || "auto").trim().toLowerCase();
+  if (val === "auto") return 0; // intent sentinel; the server resolves each new request
+  const tokens = Number(val);
+  if (!/^[0-9]+$/.test(val) || !Number.isSafeInteger(tokens) || tokens < 1 || tokens > 2000000) {
+    const error = new Error(t("outputBudgetInvalid"));
+    error.errorCode = "output_preference_invalid";
+    throw error;
+  }
+  return tokens;
+}
 
-  const val = els.maxTokens.value;
+function updateOutputBudgetSummary() {
+  const summary = document.getElementById("outputBudgetSummary");
+  if (!summary) return;
+  summary.dataset.i18n = getEffectiveMaxTokens() ? "outputBudgetManual" : "auto";
+  summary.textContent = t(summary.dataset.i18n);
+}
 
-  if (val !== "auto") return Number(val);
-
-  if (!model) return 4096;
-
-  if (/claude|opus|sonnet|haiku/i.test(model)) return 8192;
-
-  if (/deepseek.*r1|deepseek.*reason/i.test(model)) return 8192;
-
-  if (/o1|o3|gpt-5/i.test(model)) return 16384;
-
-  return 4096;
-
+function assertAutoOutputSupported(payload) {
+  if (payload.max_tokens === 0 && state.outputBudgetProtocol !== "coding-output-v1") {
+    const error = new Error(t("errSugOutputBudgetClientUpgradeRequired"));
+    error.errorCode = "output_budget_client_upgrade_required";
+    throw error;
+  }
 }
 
 
@@ -17184,6 +17230,10 @@ els.modelPillWrap.addEventListener("focusout", (event) => {
 els.temperature.addEventListener("change", () => saveLocalSettings());
 
 els.maxTokens.addEventListener("change", () => {
+  try { getEffectiveMaxTokens(); }
+  catch (error) { els.maxTokens.setCustomValidity(error.message); els.maxTokens.reportValidity(); return; }
+  els.maxTokens.setCustomValidity("");
+  updateOutputBudgetSummary();
   saveLocalSettings();
   updateReasoningPicker();
 });
@@ -18584,6 +18634,7 @@ async function init() {
           return;
         }
         browserServerInstanceId = data.serverInstanceId || browserServerInstanceId;
+        state.outputBudgetProtocol = data.outputBudgetProtocol === "coding-output-v1" ? data.outputBudgetProtocol : "";
         if (data.instanceMode && data.instanceMode !== browserInstanceMode) {
           browserInstanceMode = data.instanceMode;
           applyInstanceIdentity(browserInstanceMode);
@@ -18600,6 +18651,7 @@ async function init() {
         }
       } catch (_) {
         _skillActivationCanonicalEnabled = false;
+        state.outputBudgetProtocol = "";
         if (_skillModelLoadingEnabled) {
           _skillModelLoadingEnabled = false;
           state.skillModelLoadingEnabled = false;
@@ -18649,6 +18701,7 @@ async function init() {
   const savedMax = localStorage.getItem("code-max-tokens") || "auto";
 
   els.maxTokens.value = savedMax;
+  updateOutputBudgetSummary();
   const savedContextBudget = localStorage.getItem(CONTEXT_BUDGET_KEY) || "auto";
   els.contextBudget.value = savedContextBudget === "auto" ? "" : savedContextBudget;
   normalizeContextBudgetSetting();

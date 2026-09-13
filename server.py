@@ -64,6 +64,7 @@ from code_runtime.image_runtime import (
 )
 from code_runtime.model_route_registry import ModelRouteError, ModelRouteRegistry
 from code_runtime import reasoning_capabilities
+from code_runtime import output_budget, output_truncation
 from code_runtime import protocol_replay
 from code_runtime.ppt_master_runtime import (
     PptMasterRuntimeError,
@@ -1661,12 +1662,16 @@ def _model_runtime_worker(run):
                 if run["cancel_event"].is_set():
                     _finish_runtime_run(run, "cancelled")
                 elif saw_done:
+                    complete = _runtime_result_snapshot(run)
                     if run.get("protocol_response"):
-                        complete = _runtime_result_snapshot(run)
                         native_message = {"role": "assistant", "content": complete["content"]}
                         if complete["toolCalls"]:
                             native_message["tool_calls"] = [{k: v for k, v in call.items() if k != "index"} for call in complete["toolCalls"]]
                         run["protocol_native"] = run["protocol_response"].complete(native_message)
+                    truncated = output_truncation.classify(complete)
+                    if truncated:
+                        _finish_runtime_run(run, "failed", truncated, error_code=truncated, transient=False)
+                        return
                     _finish_runtime_run(run, "completed")
                 else:
                     _finish_runtime_run(
@@ -1689,6 +1694,11 @@ def _model_runtime_worker(run):
                 return
             except Exception as exc:
                 run["upstream_response"] = None
+                if isinstance(exc, output_truncation.OutputTruncated):
+                    code = output_truncation.classify(_runtime_result_snapshot(run)) or exc.code
+                    _finish_runtime_run(run, "cancelled" if run["cancel_event"].is_set() else "failed",
+                                        code, error_code=code, transient=False)
+                    return  # no key retry or reasoning-only retry after a reliable length stop
                 if isinstance(exc, reasoning_capabilities.ReasoningError):
                     last_error_code = exc.code
                     last_status, last_error, strict_context = 0, exc.code, {}
@@ -2800,6 +2810,44 @@ def _agent_request_options(payload):
     return options
 
 
+def _agent_resolve_output(request_options, preference, base_url, route_ref, catalog_revision, selection):
+    if preference is None:
+        return request_options, None  # legacy concrete requests stay concrete
+    preference = output_budget.intent(preference)
+    concrete = [request_options[k] for k in ('max_tokens', 'max_completion_tokens')
+                if request_options.get(k) not in (None, 0)]
+    if concrete and (preference['mode'] != 'manual' or any(
+            type(n) is not int or n != preference['tokens'] for n in concrete)):
+        raise reasoning_capabilities.ReasoningError('output_preference_invalid')
+    route = _model_route_registry.resolve(route_ref, catalog_revision, request_options['model']) if route_ref else None
+    if route and _normalize_runtime_base_url(base_url) != _normalize_runtime_base_url(route.base_url):
+        raise reasoning_capabilities.ReasoningError('reasoning_target_mismatch')
+    capability = context_window.output_capability(request_options['model'], base_url,
+                                                  output_scope=route.connection_id if route else '')
+    reasoning = reasoning_capabilities.projection(request_options['model'], route_ref, base_url,
+        contract=route.reasoning_contract if route else None, connection_source=route.source if route else '')
+    support = capability.get('reasoningSupported')
+    if support is None and reasoning['evidence'] == 'adapter-tested':
+        support = True
+    thinking_option = request_options.get('thinking')
+    thinking_type = thinking_option.get('type') if isinstance(thinking_option, dict) else None
+    disabled = thinking_type == 'disabled' or request_options.get('reasoning_effort') == 'none'
+    if support is False and ((selection or {}).get('intent', 'default') != 'default'
+            or thinking_type in {'enabled', 'adaptive'} or request_options.get('reasoning_effort') not in (None, 'none')):
+        raise reasoning_capabilities.ReasoningError('output_reasoning_incompatible')
+    summary = output_budget.resolve(preference, model_id=request_options['model'], route_ref=route_ref,
+                                    capability=capability, reasoning_supported=support, reasoning_disabled=disabled)
+    compiled = dict(request_options)
+    compiled.pop('max_completion_tokens', None)
+    compiled['max_tokens'] = summary['requestedTokens']
+    thinking = compiled.get('thinking')
+    if isinstance(thinking, dict) and thinking.get('budget_tokens') is not None:
+        reserve = reasoning_capabilities.MODELS.get(request_options['model'], {}).get('answerReserve', 1024)
+        if type(thinking['budget_tokens']) is not int or compiled['max_tokens'] < thinking['budget_tokens'] + reserve:
+            raise reasoning_capabilities.ReasoningError('reasoning_budget_insufficient')
+    return compiled, summary
+
+
 def _agent_model_context_limit(model):
     """Compatibility fallback for restored records from older clients."""
     return context_window.family_limit(model)
@@ -3905,6 +3953,11 @@ def _agent_run_record(run):
         "forceFinalReason": str(run.get("force_final_reason") or ""),
         **({"goalCloseout": goal_closeout.normalize(run.get("goal_closeout"), run["id"], len(run.get("rounds") or []))}
            if run.get("goal_closeout_enabled") else {}),
+        **({'outputBudget': output_budget.restore(run['output_budget'], model_id=run['request']['model'],
+                route_ref=str(run.get('route_ref') or ''), requested_tokens=_agent_requested_max_tokens(run['request']))}
+           if run.get('output_budget') is not None else {}),
+        **({'outputDiagnostic': output_truncation.restore(run['output_diagnostic'], _agent_requested_max_tokens(run['request']))}
+           if run.get('output_diagnostic') is not None else {}),
         **({"routeRef": run.get("route_ref", "")}
            if run.get("route_ref") else {}),
         **({"catalogRevision": int(run.get("catalog_revision") or 0)}
@@ -4192,6 +4245,8 @@ def _agent_snapshot(run, cursor=0):
             "permissionProfile": run.get("permission_profile", "read"),
             "error": run.get("error", ""),
             "errorCode": run.get("error_code", ""),
+            "outputBudget": _json_clone(run.get('output_budget')),
+            "outputDiagnostic": _json_clone(run.get('output_diagnostic')),
             "nonActionCount": int(run.get("non_action_count") or 0),
             "forceFinalRound": bool(run.get("force_final_round")),
             "model": str((run.get("request") or {}).get("model") or ""),
@@ -5496,6 +5551,9 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         "origin_message_id": origin_message_id,
         "goal_operations_enabled": goal_operations_enabled,
         "goal_closeout_enabled": "goalCloseout" in record,
+        'output_budget': output_budget.restore(record.get('outputBudget'), model_id=request_options.get('model'),
+            route_ref=str(record.get('routeRef') or ''), requested_tokens=_agent_requested_max_tokens(request_options)),
+        'output_diagnostic': output_truncation.restore(record.get('outputDiagnostic'), _agent_requested_max_tokens(request_options)),
         "goal_closeout": goal_closeout.normalize(record.get("goalCloseout"), run_id, len(record.get("rounds") or [])),
         "continuation": continuation,
         "parent_agent_run_id": parent_agent_run_id,
@@ -10525,11 +10583,18 @@ def _agent_compaction_payload(run, plan):
     payload.pop("tool_choice", None)
     payload.pop("parallel_tool_calls", None)
     payload.pop("response_format", None)
+    output_tokens = 1600
+    if run.get('output_budget') is not None:
+        fixed = (payload.get('thinking') or {}).get('budget_tokens', 0)
+        required = fixed + 1024 if type(fixed) is int and fixed > 0 else 0
+        output_tokens = min(_agent_requested_max_tokens(payload), max(output_tokens, required))
+        if output_tokens < required:
+            raise reasoning_capabilities.ReasoningError('reasoning_budget_insufficient')
     if "max_completion_tokens" in payload:
-        payload["max_completion_tokens"] = 1600
+        payload["max_completion_tokens"] = output_tokens
         payload.pop("max_tokens", None)
     else:
-        payload["max_tokens"] = 1600
+        payload["max_tokens"] = output_tokens
     compacted_text = json.dumps(
         plan.get("compactedMessages") or [],
         ensure_ascii=False,
@@ -10625,9 +10690,10 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0, *, keys_override=
         summary = ""
         error_message = ""
         error_code = ""
+        compaction_payload = _agent_compaction_payload(run, plan)
         compaction_run = _create_model_runtime_run(
             run["session_id"],
-            _agent_compaction_payload(run, plan),
+            compaction_payload,
             run["base_url"],
             list(keys_override) if keys_override is not None else list(run["keys"]),
             first_response_timeout=None,
@@ -10641,6 +10707,14 @@ def _run_agent_auto_compaction(run, reason, before_estimate=0, *, keys_override=
             run["active_runtime_id"] = ""
         if run["cancel_event"].is_set() or snapshot["status"] == "cancelled":
             return {"status": "cancelled", "compactionId": compaction_id}
+        if (snapshot.get('errorCode') in output_truncation.CODES
+                or output_truncation.classify(snapshot.get('result') or {})):
+            diagnostic = output_truncation.summary(snapshot.get('result') or {},
+                _agent_requested_max_tokens(compaction_payload), kind='compaction')
+            _append_agent_event(run, 'context_compaction_failed', {
+                'compactionId': compaction_id, 'reason': str(reason), 'error': diagnostic['code'],
+                'errorCode': diagnostic['code'], 'attempts': attempt, 'retryAfter': ''})
+            return {'status': 'failed', 'errorCode': diagnostic['code'], 'outputDiagnostic': diagnostic}
         if snapshot["status"] != "completed":
             error_message = snapshot.get("error") or "context compaction failed"
             error_code = snapshot.get("errorCode") or "context_compaction_failed"
@@ -11584,6 +11658,34 @@ def _agent_close_stale_skill_path_call(run, call, execution):
         raise
 
 
+def _agent_stop_output_truncation(run, result, runtime_id):
+    diagnostic = output_truncation.summary(result, _agent_requested_max_tokens(run['request']))
+    run['output_diagnostic'] = diagnostic
+    run['model_checkpoint'] = None
+    run['recovery_state'] = None
+    run['result'] = {'outputDiagnostic': diagnostic}
+    usage = {k: result.get('usage', {}).get(k) for k in ('prompt_tokens', 'completion_tokens', 'total_tokens')
+             if type(result.get('usage', {}).get(k)) is int}
+    _agent_usage_add(run['usage'], usage)
+    record = {'round': len(run['rounds']) + 1, 'runtimeRunId': runtime_id, 'content': '', 'reasoning': '',
+              'toolCalls': [], 'finishReason': diagnostic['finishReason'], 'usage': usage,
+              'completedAt': now_iso(), 'outcome': 'output_truncated', 'outputDiagnostic': diagnostic}
+    run['rounds'].append(record)
+    _append_agent_event(run, 'model_completed', record)
+    _finish_agent_run(run, 'failed', diagnostic['code'], error_code=diagnostic['code'])
+
+
+def _agent_stop_compaction_truncation(run, diagnostic):
+    run['output_diagnostic'] = diagnostic
+    run['model_checkpoint'] = None
+    run['recovery_state'] = None
+    run['result'] = {'outputDiagnostic': diagnostic}
+    _agent_usage_add(run['usage'], {k: value for k, value in {
+        'prompt_tokens': diagnostic['promptTokens'], 'completion_tokens': diagnostic['completionTokens']}.items()
+        if value is not None})
+    _finish_agent_run(run, 'failed', diagnostic['code'], error_code=diagnostic['code'])
+
+
 def _agent_run_worker(run):
     current_worker = threading.current_thread()
     try:
@@ -11655,6 +11757,9 @@ def _agent_run_worker(run):
                             return
                         if compacted.get("status") != "completed":
                             _agent_rollback_context_calibration(run, pending_calibration)
+                            if compacted.get('outputDiagnostic'):
+                                _agent_stop_compaction_truncation(run, compacted['outputDiagnostic'])
+                                return
                             _agent_enter_recovery(
                                 run,
                                 kind="context_compaction_failed",
@@ -11700,6 +11805,9 @@ def _agent_run_worker(run):
                 if compacted.get("status") == "cancelled":
                     _finish_agent_run(run, "cancelled")
                     return
+                if compacted.get('outputDiagnostic'):
+                    _agent_stop_compaction_truncation(run, compacted['outputDiagnostic'])
+                    return
                 if compacted.get("status") == "completed":
                     payload, force_final_round = _agent_model_payload(run)
                     estimated_tokens = _agent_estimate_request_tokens(payload)
@@ -11742,6 +11850,9 @@ def _agent_run_worker(run):
             if model_snapshot["status"] != "completed":
                 if retry_inflight:
                     _agent_rollback_context_calibration(run, retry_pending)
+                if model_snapshot.get('errorCode') in output_truncation.CODES:
+                    _agent_stop_output_truncation(run, model_snapshot.get('result') or {}, model_run['id'])
+                    return
                 error_code = model_snapshot.get("errorCode") or ""
                 if (
                     error_code == "context_window_exceeded"
@@ -11806,6 +11917,9 @@ def _agent_run_worker(run):
                     return
 
             model_result = model_snapshot["result"]
+            if output_truncation.classify(model_result):
+                _agent_stop_output_truncation(run, model_result, model_run['id'])
+                return
             with run["condition"]:
                 run["model_checkpoint"] = None
                 run["recovery_state"] = None
@@ -12138,6 +12252,7 @@ def _create_agent_run(
     _immutable_skill_reader=None,
     reasoning_selection=None,
     inherited_reasoning_snapshot=None,
+    output_preference=None,
 ):
     if not isinstance(payload, dict):
         raise ValueError("payload must be an object")
@@ -12200,7 +12315,10 @@ def _create_agent_run(
                 _immutable_skill_reader,
                 reasoning_selection=reasoning_selection,
                 inherited_reasoning_snapshot=inherited_reasoning_snapshot,
+                output_preference=output_preference,
             )
+    request_options, output_summary = _agent_resolve_output(
+        request_options, output_preference, base_url, str(route_ref or ''), catalog_revision, reasoning_selection)
     reasoning_snapshot = reasoning_capabilities.restore_snapshot(
         inherited_reasoning_snapshot, model_id=request_options.get("model"),
         route_ref=str(route_ref or ""),
@@ -12251,6 +12369,8 @@ def _create_agent_run(
         calibration=stored_calibration,
     )
     if context_resolution.get("inputBudgetInsufficient"):
+        if output_summary is not None:
+            raise reasoning_capabilities.ReasoningError('output_context_insufficient')
         raise ValueError(
             "context budget must leave at least 1024 input tokens after max_tokens "
             "and the safety margin"
@@ -12472,6 +12592,8 @@ def _create_agent_run(
         "origin_message_id": origin_message_id,
         "goal_operations_enabled": goal_operations_enabled,
         "goal_closeout_enabled": True,
+        "output_budget": output_summary,
+        "output_diagnostic": None,
         "goal_closeout": None,
         "continuation": continuation,
         "parent_agent_run_id": str(parent_run_id or ""),
@@ -27589,6 +27711,7 @@ def _fetch_models_for_route_connection(connection):
     models = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(models, list):
         raise ValueError("route catalog response invalid")
+    context_window.normalize_catalog(base_url, models, output_scope=str(connection.get('connectionId') or ''))
     return [
         str(item.get("id") or "").strip()
         for item in models
@@ -27872,6 +27995,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "serverInstanceId": _server_instance_id,
                     "instanceMode": INSTANCE_MODE,
+                    "outputBudgetProtocol": "coding-output-v1",
                     "agentProjectionShadow": bool(_AGENT_PROJECTION_SHADOW_ENABLED),
                 }
                 immutable_profile = _skill_management_service().has_store()
@@ -28000,9 +28124,12 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         content_type = mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
         data = file_path.read_bytes()
-        if file_path == APP_DIR / "index.html" and INSTANCE_MODE == "dev":
+        if file_path in {APP_DIR / "index.html", APP_DIR / "dist/frontend/index.html",
+                         APP_DIR / "dist/frontend/index.classic.html"} and INSTANCE_MODE == "dev":
             # Set the initial tab title before the frontend heartbeat arrives.
             data = data.replace(b"<title>Code</title>", b"<title>Code Dev</title>", 1)
+            data = data.replace(b'data-instance-mode="release"', b'data-instance-mode="dev"', 1)
+            data = data.replace(b'<span id="productName">Code</span>', b'<span id="productName">Code Dev</span>', 1)
         self.send_response(200)
         self.send_header("Content-Type", content_type + "; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -28164,6 +28291,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     image_route=resolved_image_route,
                     skill_activation_request=body.get("skillActivationRequest"),
                     reasoning_selection=body.get("reasoningSelection"),
+                    output_preference=body.get('outputPreference'),
                 )
                 response = {
                     "agentRunId": run["id"],
@@ -28381,6 +28509,14 @@ class CodeHandler(BaseHTTPRequestHandler):
                         payload.get("model"),
                     )
                     keys = [resolved_route.key]
+                payload, runtime_output = _agent_resolve_output(
+                    payload, body.get('outputPreference'),
+                    resolved_route.base_url if resolved_route else body.get('baseUrl'),
+                    route_ref, resolved_route.catalog_revision if resolved_route else 0, body.get('reasoningSelection'))
+                if runtime_output is not None and context_window.resolve(payload['model'],
+                        resolved_route.base_url if resolved_route else body.get('baseUrl'),
+                        max_tokens=runtime_output['requestedTokens']).get('inputBudgetInsufficient'):
+                    raise reasoning_capabilities.ReasoningError('output_context_insufficient')
                 if body.get("reasoningSelection") is not None:
                     if resolved_route is None:
                         raise reasoning_capabilities.ReasoningError("reasoning_client_upgrade_required")
