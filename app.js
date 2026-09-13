@@ -16813,7 +16813,7 @@ function saveLocalSettings(options = {}) {
 
   localStorage.setItem("code-temperature", els.temperature.value);
 
-  localStorage.setItem("code-max-tokens", els.maxTokens.value);
+  localStorage.setItem("code-max-tokens", String(els.maxTokens.value || "").trim().toLowerCase() || "auto");
   normalizeContextBudgetSetting({
     reportFormatAdjustment: options.contextBudgetReportAdjustment === true,
   });
@@ -17138,8 +17138,8 @@ els.sendBtn.addEventListener("click", (event) => {
 els.refreshModelsBtn.addEventListener("click", refreshModels);
 
 function getEffectiveMaxTokens(model) {
-  const val = String(els.maxTokens.value || "auto").trim().toLowerCase();
-  if (val === "auto") return 0; // intent sentinel; the server resolves each new request
+  const val = String(els.maxTokens.value || "").trim().toLowerCase();
+  if (!val || val === "auto") return 0; // intent sentinel; the server resolves each new request
   const tokens = Number(val);
   if (!/^[0-9]+$/.test(val) || !Number.isSafeInteger(tokens) || tokens < 1 || tokens > 2000000) {
     const error = new Error(t("outputBudgetInvalid"));
@@ -17232,6 +17232,7 @@ els.temperature.addEventListener("change", () => saveLocalSettings());
 els.maxTokens.addEventListener("change", () => {
   try { getEffectiveMaxTokens(); }
   catch (error) { els.maxTokens.setCustomValidity(error.message); els.maxTokens.reportValidity(); return; }
+  els.maxTokens.value = getEffectiveMaxTokens() ? String(els.maxTokens.value).trim() : "";
   els.maxTokens.setCustomValidity("");
   updateOutputBudgetSummary();
   saveLocalSettings();
@@ -18700,7 +18701,7 @@ async function init() {
 
   const savedMax = localStorage.getItem("code-max-tokens") || "auto";
 
-  els.maxTokens.value = savedMax;
+  els.maxTokens.value = String(savedMax).trim().toLowerCase() === "auto" ? "" : savedMax;
   updateOutputBudgetSummary();
   const savedContextBudget = localStorage.getItem(CONTEXT_BUDGET_KEY) || "auto";
   els.contextBudget.value = savedContextBudget === "auto" ? "" : savedContextBudget;

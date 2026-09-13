@@ -321,21 +321,24 @@
             <details class="output-budget-advanced">
               <summary class="output-budget-control" aria-labelledby="outputBudgetLabel outputBudgetSummary"><span id="outputBudgetSummary" data-i18n="auto">自动</span></summary>
           <label class="field">
-            <span data-i18n="outputBudgetCustom">自动或自定义正整数</span>
-            <input id="maxTokens" type="text" value="auto" list="outputBudgetPresets" autocomplete="off" />
+            <span data-i18n="outputBudgetCustom">自定义额度</span>
+            <input id="maxTokens" type="text" value="" list="outputBudgetPresets" autocomplete="off" data-i18n="outputBudgetPlaceholder" placeholder="留空自动" />
             <datalist id="outputBudgetPresets">
-              <option value="auto"></option><option value="16384"></option>
+              <option value="16384"></option>
               <option value="32768"></option><option value="65536"></option>
             </datalist>
           </label>
             </details>
           </div>
         </div>
-        <label class="field context-budget-field">
-          <span data-i18n="contextBudget">上下文预算</span>
-          <input id="contextBudget" type="text" inputmode="text" autocomplete="off" data-i18n="contextBudgetPlaceholder" />
-          <small id="contextBudgetStatus" class="field-hint" hidden></small>
-        </label>
+        <details class="context-settings-advanced">
+          <summary data-i18n="modelParametersAdvanced">高级设置</summary>
+          <label class="field context-budget-field">
+            <span data-i18n="contextLimitSetting">上下文上限</span>
+            <input id="contextBudget" type="text" inputmode="text" autocomplete="off" data-i18n="contextLimitSettingPlaceholder" />
+            <small id="contextBudgetStatus" class="field-hint" hidden></small>
+          </label>
+        </details>
         <label class="checkline">
           <input id="rememberKey" type="checkbox" />
           <span data-i18n="rememberCredentials">本机记住 API Key 和 Base URL</span>

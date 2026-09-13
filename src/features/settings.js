@@ -900,6 +900,8 @@
     }
 
     function renderModelsPanel(container) {
+      const outputValue = String(els.maxTokens.value || "").trim();
+      const outputAuto = !outputValue || outputValue.toLowerCase() === "auto";
       const styleApi = global.Code.agent.systemPrompt;
       const replyStyle = styleApi.readResponseStylePreference(storage);
       const styleOptions = (values, prefix, selected) => values.map(value =>
@@ -938,18 +940,20 @@
               <label class="field"><span data-i18n="responseTone">${t("responseTone")}</span><select id="settingsResponseTone">${styleOptions(styleApi.RESPONSE_TONES, "responseTone_", replyStyle.snapshot.tone)}</select></label>
               <div class="field output-budget-field"><span id="settingsOutputBudgetLabel" data-i18n="maxTokens">${t("maxTokens")}</span>
                 <details class="output-budget-advanced">
-                  <summary class="output-budget-control" aria-labelledby="settingsOutputBudgetLabel settingsOutputBudgetSummary"><span id="settingsOutputBudgetSummary" data-i18n="${els.maxTokens.value === "auto" ? "auto" : "outputBudgetManual"}">${t(els.maxTokens.value === "auto" ? "auto" : "outputBudgetManual")}</span></summary>
+                  <summary class="output-budget-control" aria-labelledby="settingsOutputBudgetLabel settingsOutputBudgetSummary"><span id="settingsOutputBudgetSummary" data-i18n="${outputAuto ? "auto" : "outputBudgetManual"}">${t(outputAuto ? "auto" : "outputBudgetManual")}</span></summary>
                   <label class="field output-budget-custom"><span data-i18n="outputBudgetCustom">${t("outputBudgetCustom")}</span>
-                    <input id="settingsMaxTokens" type="text" autocomplete="off" list="settingsOutputBudgetPresets" value="${escapeHtml(els.maxTokens.value)}" />
-                    <datalist id="settingsOutputBudgetPresets"><option value="auto"></option><option value="16384"></option><option value="32768"></option><option value="65536"></option></datalist>
+                    <input id="settingsMaxTokens" type="text" autocomplete="off" list="settingsOutputBudgetPresets" placeholder="${escapeHtml(t("outputBudgetPlaceholder"))}" value="${escapeHtml(outputAuto ? "" : outputValue)}" />
+                    <datalist id="settingsOutputBudgetPresets"><option value="16384"></option><option value="32768"></option><option value="65536"></option></datalist>
                   </label>
                 </details>
               </div>
-              <label class="field context-budget-field"><span data-i18n="contextBudget">${t("contextBudget")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextBudgetPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>
             </div>
             <p id="settingsResponseStyleStatus" class="field-hint" role="status">${replyStyle.error ? t(replyStyle.error) : ""}</p>
-            <details class="response-style-advanced"><summary data-i18n="advancedSampling">${t("advancedSampling")}</summary>
-              <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
+            <details class="response-style-advanced"><summary data-i18n="modelParametersAdvanced">${t("modelParametersAdvanced")}</summary>
+              <div class="model-parameter-grid">
+                <label class="field context-budget-field"><span data-i18n="contextLimitSetting">${t("contextLimitSetting")}</span><input id="settingsContextBudget" type="text" inputmode="text" autocomplete="off" placeholder="${escapeHtml(t("contextLimitSettingPlaceholder"))}" value="${escapeHtml(els.contextBudget.value)}" /><small id="settingsContextBudgetStatus" class="field-hint" hidden></small></label>
+                <label class="field"><span data-i18n="temperature">${t("temperature")}</span><input id="settingsTemperature" type="number" min="0" max="2" step="0.1" value="${els.temperature.value}" /></label>
+              </div>
             </details>
           </section>
         </div>
@@ -985,22 +989,23 @@
         saveLocalSettings();
       });
       const settingsMaxTokens = byId("settingsMaxTokens");
-      if (settingsMaxTokens) settingsMaxTokens.value = els.maxTokens.value;
+      if (settingsMaxTokens) settingsMaxTokens.value = outputAuto ? "" : outputValue;
       settingsMaxTokens?.addEventListener("change", (event) => {
         const value = String(event.currentTarget.value).trim().toLowerCase();
+        const auto = !value || value === "auto";
         const tokens = Number(value);
-        if (value !== "auto" && (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(tokens) || tokens < 1 || tokens > 2000000)) {
+        if (!auto && (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(tokens) || tokens < 1 || tokens > 2000000)) {
           event.currentTarget.setCustomValidity(t("outputBudgetInvalid"));
           event.currentTarget.reportValidity();
           return;
         }
         event.currentTarget.setCustomValidity("");
-        els.maxTokens.value = value;
+        els.maxTokens.value = auto ? "" : value;
         els.maxTokens.dispatchEvent(new global.Event("change"));
         event.currentTarget.value = els.maxTokens.value;
         const summary = byId("settingsOutputBudgetSummary");
         if (summary) {
-          summary.dataset.i18n = value === "auto" ? "auto" : "outputBudgetManual";
+          summary.dataset.i18n = auto ? "auto" : "outputBudgetManual";
           summary.textContent = t(summary.dataset.i18n);
         }
       });

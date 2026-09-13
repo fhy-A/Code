@@ -30,7 +30,7 @@ for(const model of ['deepseek-flash','unknown','claude-sonnet-4-5','gpt-5.4']) a
 const sent=[];
 global.fetch=async(url, options)=>{sent.push(JSON.parse(options.body)); return {ok:true,json:async()=>({agentRunId:'fixture'})};};
 (async()=>{
- for(const [value,want] of [['auto',0],['4096',4096],['12345',12345]]) {
+ for(const [value,want] of [['auto',0],['',0],['   ',0],['4096',4096],['12345',12345]]) {
   context.els.maxTokens.value=value;
   const tokens=context.getEffectiveMaxTokens('unknown'); assert.equal(tokens,want);
   await window.Code.agent.runtime.createAgentRun({sessionId:'fixture',payload:{model:'unknown',max_tokens:tokens},keys:[]});
@@ -98,7 +98,7 @@ def test_default_output_ui_hides_values_inside_closed_advanced_details():
             if tag=='details' and a.get('class')=='output-budget-advanced':
                 assert 'open' not in a; self.advanced=True
             if a.get('id')=='maxTokens':
-                assert self.advanced and tag=='input' and a.get('value')=='auto'; self.seen=True
+                assert self.advanced and tag=='input' and a.get('value')==''; self.seen=True
             if a.get('id')=='outputBudgetSummary':
                 assert self.advanced and a.get('data-i18n')=='auto'
         def handle_endtag(self,tag):
@@ -140,9 +140,9 @@ for(const language of ['zh','en']) for(const stored of ['auto','4096','12345']) 
  }
  const nodes=new Map(); const byId=id=>nodes.get(id)||null;
  nodes.set('outputBudgetSummary',new Element());
- const store=new Map([['code-max-tokens',stored],['code-response-style-v2','unchanged-style']]);
+ const store=new Map([['code-max-tokens',stored],['code-response-style-v2','unchanged-style'],['code-context-budget','400000']]);
  const storage={getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,String(v)),removeItem:k=>store.delete(k)};
- const els={apiKey:new Element(),baseUrl:new Element(),maxTokens:new Element(),contextBudget:new Element(),
+ const els={apiKey:new Element(),baseUrl:new Element(),maxTokens:new Element(),contextBudget:new Element('400000'),
   temperature:new Element('0.2'),toolPreset:new Element('default'),modelListBox:{innerHTML:''}};
  const context={window:{},els,document:{getElementById:byId},localStorage:storage,storage,byId,
   WORKBAR_URL:'https://fixture.invalid',state:{},getSelectedModel:()=>'',normalizeContextBudgetSetting:()=>{},
@@ -154,6 +154,10 @@ for(const language of ['zh','en']) for(const stored of ['auto','4096','12345']) 
  vm.createContext(context);
  vm.runInContext(fs.readFileSync('src/core/namespace.js','utf8'),context);
  vm.runInContext(fs.readFileSync('src/core/i18n.js','utf8'),context);
+ vm.runInContext(fs.readFileSync('src/agent/compaction.js','utf8'),context);
+ Object.assign(context,context.window.Code.agent.compaction);
+ vm.runInContext(between(app,'function parseContextBudgetInput(','function saveLocalSettings('),context);
+ context.updateContextBudgetStatus=()=>context.normalizeContextBudgetSetting();
  context.t=k=>context.window.Code.core.i18n.translate(k,{},language);
  context.window.Code.agent.systemPrompt={RESPONSE_DETAILS:['standard'],RESPONSE_TONES:['neutral'],
   readResponseStylePreference:()=>({snapshot:{detail:'standard',tone:'neutral'}})};
@@ -170,21 +174,36 @@ for(const language of ['zh','en']) for(const stored of ['auto','4096','12345']) 
  }};
  vm.runInContext(between(settings,'    function renderModelsPanel(container)','    function renderSystemPanel('),context);
  context.renderModelsPanel(container);
- let control=byId('settingsMaxTokens'); assert.equal(control.tagName,'INPUT');assert.equal(control.value,stored);
+ let control=byId('settingsMaxTokens'); assert.equal(control.tagName,'INPUT');assert.equal(control.value,stored==='auto'?'':stored);
  assert.ok(!container.html.includes('<select id="settingsMaxTokens">'));
  assert.ok(container.html.includes('<details class="output-budget-advanced">'));
  assert.ok(container.html.includes('aria-labelledby="settingsOutputBudgetLabel settingsOutputBudgetSummary"'));
  assert.ok(!container.html.includes('data-i18n="outputBudgetAdvanced"'));
+ assert.ok(container.html.indexOf('<details class="response-style-advanced">')<container.html.indexOf('id="settingsContextBudget"'));
+ assert.ok(container.html.includes('data-i18n="contextLimitSetting"'));
+ assert.equal(store.get('code-context-budget'),'400000');
+ assert.equal(context.getModelContextResolution('unknown',16384).contextBudgetTokens,400000);
  assert.ok(container.html.indexOf('class="output-budget-advanced"')<container.html.indexOf('id="settingsMaxTokens"'));
- for(const value of ['54321','auto','65536']) {
+ assert.ok(!container.html.includes('<option value="auto">'));
+ for(const value of ['54321','','   ','auto','65536']) {
   control.value=value;control.dispatchEvent({type:'change'});
-  assert.equal(els.maxTokens.value,value);assert.equal(store.get('code-max-tokens'),value);
-  assert.equal(byId('settingsOutputBudgetSummary').textContent,context.t(value==='auto'?'auto':'outputBudgetManual'));
-  context.renderModelsPanel(container);control=byId('settingsMaxTokens');assert.equal(control.value,value);
+  const auto=!value.trim()||value==='auto',display=auto?'':value;
+  assert.equal(els.maxTokens.value,display);assert.equal(store.get('code-max-tokens'),auto?'auto':value);
+  assert.equal(byId('settingsOutputBudgetSummary').textContent,context.t(auto?'auto':'outputBudgetManual'));
+  context.renderModelsPanel(container);control=byId('settingsMaxTokens');assert.equal(control.value,display);
  }
  control.value='1.5';control.dispatchEvent({type:'change'});
  assert.equal(store.get('code-max-tokens'),'65536');assert.equal(els.maxTokens.value,'65536');assert.ok(control.reported);
  assert.equal(store.get('code-response-style-v2'),'unchanged-style');
+ for(const [value,want] of [['128K',128000],['',null],['400000',400000]]) {
+  const contextControl=byId('settingsContextBudget');contextControl.value=value;contextControl.dispatchEvent({type:'change'});
+  assert.equal(store.get('code-context-budget'),want===null?'auto':String(want));
+  context.renderModelsPanel(container);
+  assert.equal(byId('settingsContextBudget').value,els.contextBudget.value);
+  assert.equal(context.getModelContextResolution('unknown',65536).contextBudgetTokens,want);
+ }
+ byId('settingsContextBudget').value='12g';byId('settingsContextBudget').dispatchEvent({type:'change'});
+ assert.equal(store.get('code-context-budget'),'400000');assert.equal(context.getContextBudgetTokens(),400000);
 }
 ''')
 
