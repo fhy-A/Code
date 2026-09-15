@@ -13068,6 +13068,7 @@ def _create_agent_run(
             return existing
         session_index_added = False
         if str(session_id or ""):
+            _project_archive_store().bump(str(session_id))
             try:
                 session_index_added = _agent_run_session_index_register(
                     run_id, session_id, wait=False,
@@ -15990,11 +15991,21 @@ def read_json(path, default):
         return default
 
 
+def _project_archive_service():
+    from code_runtime.project_archive import ArchiveService
+    return ArchiveService(sys.modules[__name__])
+
+
+def _project_archive_store():
+    return _project_archive_service().store
+
+
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
     temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     with _json_write_lock:
+        _project_archive_service().note_meta_write(path, data)
         try:
             temp_path.write_text(payload, encoding="utf-8")
             for attempt in range(5):
@@ -22560,9 +22571,12 @@ def _read_session_archive_journal(session_id):
     if journal is None:
         return None
     expected_keys = {"schema", "sessionId", "action", "state", "transactionId"}
+    if journal.get("schema") == "code-session-archive-transaction/v2":
+        expected_keys |= {"batchOperationId", "archiveToken"}
+        _validate_project_archive_journal_binding(journal)
     if not isinstance(journal, dict) or set(journal) != expected_keys:
         raise ValueError("Session archive transaction journal is invalid")
-    if journal.get("schema") != "code-session-archive-transaction/v1":
+    if journal.get("schema") not in {"code-session-archive-transaction/v1", "code-session-archive-transaction/v2"}:
         raise ValueError("Session archive transaction schema is invalid")
     if str(journal.get("sessionId") or "") != session_id:
         raise ValueError("Session archive transaction Session identity is invalid")
@@ -22579,6 +22593,28 @@ def _read_session_archive_journal(session_id):
         journal.get("transactionId")
     )
     return journal
+
+
+def _validate_project_archive_journal_binding(journal):
+    from code_runtime.project_archive import identifier
+    if journal.get("action") != "archive":
+        raise ValueError("Batch journals only support archive")
+    identifier(journal.get("batchOperationId"))
+    identifier(journal.get("archiveToken"))
+    value = _project_archive_store().load(journal["batchOperationId"], allow_preview=False)
+    if value["confirmedAt"] is None or not any(
+        item["target"]["id"] == journal.get("sessionId")
+        and item["archiveToken"] == journal["archiveToken"] for item in value["items"]
+    ):
+        raise ValueError("Batch journal does not match a confirmed target")
+
+
+def _record_project_archive_effect(journal, manifest):
+    if journal.get("schema") == "code-session-archive-transaction/v2":
+        if manifest["archiveToken"] != journal["archiveToken"]:
+            raise ValueError("Batch archive incarnation changed")
+        _project_archive_store().record_effect(journal["batchOperationId"],
+            journal["sessionId"], manifest["archiveToken"], manifest["archivedAt"])
 
 
 def _write_session_archive_journal(session_id, payload):
@@ -22599,7 +22635,12 @@ def _write_session_archive_journal(session_id, payload):
         "restore": {"prepared", "active_committed"},
         "delete": {"prepared", "core_restored", "facts_deleted"},
     }
-    if set(journal) != {"schema", "sessionId", "action", "state", "transactionId"}:
+    expected = {"schema", "sessionId", "action", "state", "transactionId"}
+    if "batchOperationId" in journal:
+        journal["schema"] = "code-session-archive-transaction/v2"
+        expected |= {"batchOperationId", "archiveToken"}
+        _validate_project_archive_journal_binding(journal)
+    if set(journal) != expected:
         raise ValueError("Session archive transaction journal is invalid")
     if action not in allowed_states or state not in allowed_states[action]:
         raise ValueError("Session archive transaction state is invalid")
@@ -22607,6 +22648,8 @@ def _write_session_archive_journal(session_id, payload):
     managed_root = _session_archive_managed_root().resolve(strict=False)
     if managed_root in journal_path.resolve(strict=False).parents:
         _ensure_session_archive_managed_root()
+    if state == "prepared":
+        _project_archive_store().bump(session_id)
     write_json(journal_path, journal)
     return journal
 
@@ -22673,10 +22716,13 @@ def _recover_session_archive_transaction(session_id):
         manifest = _read_session_archive_manifest(session_id)
         if manifest is None:
             raise SessionArchiveMutationError(recovery_failed=True)
+        if journal.get("schema") == "code-session-archive-transaction/v2" and manifest["archiveToken"] != journal["archiveToken"]:
+            raise SessionArchiveMutationError(recovery_failed=True)
         session_path(session_id).unlink(missing_ok=True)
         messages_path(session_id).unlink(missing_ok=True)
         _remove_session_index_entry(session_id)
         _remove_session_archive_staging(session_id, transaction_id)
+        _record_project_archive_effect(journal, manifest)
         journal_path.unlink(missing_ok=True)
         return
     if action == "restore":
@@ -22962,6 +23008,8 @@ def _session_has_nonterminal_agent_run(session_id):
 
 def _project_session_location_change_allowed(session_id, meta):
     """Reject implicit project mutations for every nonterminal Session state."""
+    if _session_archive_stop_fence_active(session_id):
+        return False
     if _session_run_state_has_nonterminal_work(meta):
         return False
     try:
@@ -23189,6 +23237,8 @@ def _mutate_session_archive_state(
     *,
     archived,
     stop_fence_owned=False,
+    batch_operation_id=None,
+    batch_archive_token=None,
 ):
     """Move Session core files across the durable active/archive boundary."""
     session_id = safe_session_id(session_id)
@@ -23281,7 +23331,9 @@ def _mutate_session_archive_state(
                         raise SessionArchiveMutationError()
                     _ensure_session_archive_managed_root()
                     archived_at = _normalized_session_timestamp(_session_now_iso())
-                    archive_token = uuid.uuid4().hex
+                    archive_token = batch_archive_token or uuid.uuid4().hex
+                    batch_binding = ({"batchOperationId": batch_operation_id, "archiveToken": archive_token}
+                                     if batch_operation_id else {})
                     transaction_id = uuid.uuid4().hex
                     staging = _session_archive_staging_path(session_id, transaction_id)
                     session_bytes = path.read_bytes()
@@ -23316,6 +23368,7 @@ def _mutate_session_archive_state(
                             "action": "archive",
                             "state": "prepared",
                             "transactionId": transaction_id,
+                            **batch_binding,
                         })
                         bundle.parent.mkdir(parents=True, exist_ok=True)
                         os.replace(staging, bundle)
@@ -23323,10 +23376,12 @@ def _mutate_session_archive_state(
                             "action": "archive",
                             "state": "bundle_committed",
                             "transactionId": transaction_id,
+                            **batch_binding,
                         })
                         path.unlink()
                         message_path.unlink()
                         _remove_session_index_entry(session_id)
+                        _record_project_archive_effect(_read_session_archive_journal(session_id), archive_manifest)
                         _session_archive_journal_path(session_id).unlink(missing_ok=True)
                     except Exception as exc:
                         try:
@@ -23419,6 +23474,7 @@ def _mark_session_created(session_id):
         os.path.normcase(str(DATA_DIR.resolve(strict=False))),
         str(session_id or ""),
     )
+    _project_archive_store().bump(str(session_id))
     _deleted_session_ids.discard(key)
 
 
@@ -28528,6 +28584,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 else:
                     self.send_json({"error": "project not found"}, 404)
                 return
+            if route == "/api/project-session-archive":
+                self.project_session_archive("list")
+                return
             if route == "/api/session-archive":
                 self.get_archived_sessions()
                 return
@@ -28612,6 +28671,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "connections must be an array"}, 400)
                     return
                 self.send_json(_image_route_registry.refresh(connections))
+                return
+            if route.startswith("/api/project-session-archive/"):
+                self.project_session_archive(route.rsplit("/", 1)[-1])
                 return
             if route.startswith("/api/session-archive/"):
                 parts = route.strip("/").split("/")
@@ -30317,6 +30379,35 @@ class CodeHandler(BaseHTTPRequestHandler):
         _sort_sessions_by_last_message(sessions)
         self.send_json({"data": sessions})
 
+    def project_session_archive(self, action):
+        from code_runtime.project_archive import BatchError
+        service = _project_archive_service()
+        try:
+            if action == "list":
+                query = parse.parse_qs(parse.urlparse(self.path).query)
+                project_id = (query.get("projectId") or [""])[0]
+                self.send_json({"data": [service.public(v) for v in service.store.list(project_id)]})
+                return
+            body = CodeHandler.read_session_archive_action_json(self)
+            if action == "preview":
+                result = service.preview(str(body.get("projectId") or ""), body.get("retryOf"))
+            elif action == "confirm":
+                result = service.execute(body.get("operationId"), token=body.get("confirmationToken"), action=body.get("action"))
+            elif action == "resume":
+                result = service.execute(body.get("operationId"), resume=True)
+            elif action == "cancel":
+                service.store.cancel_preview(body.get("operationId"), body.get("confirmationToken"))
+                result = {"ok": True}
+            else:
+                raise BatchError("project_archive_unknown_action", "Unknown batch action.", 404)
+            self.send_json(result)
+        except BatchError as exc:
+            self.send_json({"error":str(exc), "errorCode":exc.code}, exc.status)
+        except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+        except Exception:
+            self.send_json({"error":"Project archive state is unavailable.", "errorCode":"project_archive_invalid_state"}, 503)
+
     def get_archived_sessions(self):
         try:
             _recover_all_session_archive_transactions()
@@ -30820,6 +30911,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 terminal_agent_run_ids = set()
                 prepared = False
                 try:
+                    _project_archive_store().bump(session_id)
                     path = (
                         Path(session_core_path)
                         if session_core_path is not None

@@ -6728,6 +6728,165 @@ function resolveProjectContextMenuPosition(anchor = {}, menuSize = {}, viewport 
   };
 }
 
+const projectArchivePending = new Set();
+
+async function reconcileProjectArchiveNavigation(batch, projectId) {
+  const sessionId = state.sessionId;
+  const navigation = state._foregroundNavigationSeq;
+  if (!sessionId || !batch?.items?.some((item) => item.sessionId === sessionId && item.state === "archived")) return false;
+  try {
+    await getSessionRecord(sessionId);
+  } catch (error) {
+    if (error?.data?.errorCode === "session_archived" && state.sessionId === sessionId
+        && state._foregroundNavigationSeq === navigation) {
+      beginNewConversation(projectId);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function openProjectArchive(projectId) {
+  if (projectArchivePending.has(projectId)) return;
+  projectArchivePending.add(projectId);
+  const previousFocus = document.activeElement;
+  const modal = document.createElement("div");
+  modal.className = "settings-modal project-archive-modal";
+  modal.innerHTML = `<div class="modal-card confirm-card project-archive-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(t("projectArchiveTitle"))}">
+    <header><h2>${escapeHtml(t("projectArchiveTitle"))}</h2><button type="button" class="icon-btn batch-close" aria-label="${escapeHtml(t("close"))}">&times;</button></header>
+    <div class="confirm-body batch-body" aria-live="polite"></div>
+    <footer class="confirm-actions"><button type="button" class="ghost-btn batch-cancel">${escapeHtml(t("cancel"))}</button><button type="button" class="ghost-btn batch-read" hidden>${escapeHtml(t("projectArchiveRead"))}</button><button type="button" class="danger-btn batch-submit" disabled>${escapeHtml(t("projectArchiveConfirm"))}</button></footer>
+  </div>`;
+  document.body.appendChild(modal);
+  const body = modal.querySelector(".batch-body");
+  const submit = modal.querySelector(".batch-submit");
+  const readButton = modal.querySelector(".batch-read");
+  let current = null;
+  let busy = false;
+  let closed = false;
+  let history = [];
+  const request = (action, payload) => apiJson(`/api/project-session-archive/${action}`, {
+    method: "POST", body: JSON.stringify(Object.fromEntries(Object.entries(payload).filter(([key]) =>
+      ["projectId", "retryOf", "operationId", "confirmationToken", "action"].includes(key)))),
+  });
+  const setBusy = (value) => {
+    busy = value;
+    modal.setAttribute("aria-busy", String(value));
+    modal.querySelectorAll("button").forEach((button) => { button.disabled = value; });
+    if (!value) submit.disabled = !current || (!current.confirmed && !current.total)
+      || (current.confirmed && !current.retryable && !current.items.some((item) => ["pending", "stopping", "stopped", "archiving"].includes(item.state)));
+  };
+  const close = () => {
+    if (busy || closed) return;
+    closed = true;
+    if (current && !current.confirmed) void request("cancel", current).catch(() => {});
+    modal.remove();
+    projectArchivePending.delete(projectId);
+    previousFocus?.focus?.();
+  };
+  const render = () => {
+    if (closed) return;
+    const record = current;
+    const project = state.projects.find((entry) => entry.id === projectId);
+    body.innerHTML = `<p class="batch-project-identity"><strong>${escapeHtml(project?.label || project?.name || projectId)}</strong><br>${escapeHtml(projectId)}</p>${record ? `<p>${escapeHtml(t("projectArchivePreview", record))}</p>
+      ${!record.total ? `<p>${escapeHtml(t("projectArchiveEmpty"))}</p>` : ""}
+      ${!record.confirmed && record.active ? `<p>${escapeHtml(t("projectArchiveStopNotice"))}</p>` : ""}
+      <ul class="batch-items">${record.items.map((item) => {
+        const session = state.sessions.find((entry) => entry.id === item.sessionId);
+        const reasonKey = ({
+          project_archive_project_conflict: "projectArchiveProjectChanged",
+          project_archive_target_conflict: "projectArchiveWorkChanged",
+          session_archive_busy: "sessionArchiveRetryableFailure",
+          session_archive_index_unavailable: "sessionArchiveIndexUnavailable",
+          session_archive_recovery_failed: "sessionArchiveRecoveryUnavailable",
+          session_archive_stop_failed: "sessionArchiveStopFailed",
+          project_archive_stop_uncertain: "projectArchiveState_uncertain",
+        })[item.result?.errorCode] || (item.state === "stopped_archive_failed" ? "sessionArchiveAfterStopFailed" : "sessionArchiveRetryableFailure");
+        return `<li><span>${escapeHtml(session?.title || item.sessionId)}</span><small>${escapeHtml(t(`projectArchiveState_${item.state}`))}${!record.confirmed && item.active ? ` · ${escapeHtml(t("sessionStopArchiveAction"))}` : ""}</small>${item.result?.errorCode ? `<small>${escapeHtml(t(reasonKey))}</small>` : ""}</li>`;
+      }).join("")}</ul>` : ""}
+      ${history.length ? `<details class="batch-history"><summary>${escapeHtml(t("projectArchiveHistory"))}</summary>${history.map((entry, index) => `<button type="button" class="ghost-btn batch-history-item" data-index="${index}">${escapeHtml(entry.operationId)} · ${entry.items.filter((item) => item.state === "archived").length}/${entry.total}</button>`).join("")}</details>` : ""}`;
+    submit.textContent = t(!record?.confirmed ? (record?.active ? "sessionStopArchiveAction" : "projectArchiveConfirm")
+      : record.items.some((item) => ["pending", "stopping", "stopped", "archiving"].includes(item.state)) ? "projectArchiveResume" : "projectArchiveRetry");
+    body.querySelectorAll(".batch-history-item").forEach((button) => button.addEventListener("click", async () => {
+      if (busy) return;
+      setBusy(true);
+      if (current && !current.confirmed) await request("cancel", current).catch(() => {});
+      current = history[Number(button.dataset.index)];
+      setBusy(false);
+      render();
+    }));
+    readButton.hidden = !record?.confirmed;
+    setBusy(busy);
+  };
+  const failure = () => {
+    const error = document.createElement("p");
+    error.setAttribute("role", "alert");
+    error.textContent = t("projectArchiveFailure");
+    body.appendChild(error);
+    readButton.hidden = !current?.operationId;
+  };
+  const refresh = async () => {
+    await refreshSessions();
+    await reconcileProjectArchiveNavigation(current, projectId);
+    if (state.branchPanelOpen) renderBranchTree();
+    await settingsFeature?.refreshArchivedSessions?.({ rerender: true });
+  };
+  readButton.addEventListener("click", async () => {
+    if (busy || !current) return;
+    setBusy(true);
+    try {
+      history = (await apiJson(`/api/project-session-archive?projectId=${encodeURIComponent(projectId)}`)).data || [];
+      const result = history.find((entry) => entry.operationId === current.operationId);
+      if (!result) throw new Error("Batch not confirmed or unavailable");
+      current = result;
+      await refresh().catch(() => showToast(t("sessionArchiveRefreshFailed"), "warning"));
+      render();
+    } catch { failure(); }
+    finally { setBusy(false); }
+  });
+  submit.addEventListener("click", async () => {
+    if (busy || !current) return;
+    setBusy(true);
+    try {
+      if (current.confirmed && !current.items.some((item) => ["pending", "stopping", "stopped", "archiving"].includes(item.state))) {
+        current = await request("preview", { projectId, retryOf: current.operationId });
+      } else {
+        current = await request(current.confirmed ? "resume" : "confirm", current);
+        history = (await apiJson(`/api/project-session-archive?projectId=${encodeURIComponent(projectId)}`)).data || [];
+        await refresh().catch(() => showToast(t("sessionArchiveRefreshFailed"), "warning"));
+      }
+      render();
+    } catch {
+      failure();
+    } finally {
+      setBusy(false);
+    }
+  });
+  modal.querySelector(".batch-close").addEventListener("click", close);
+  modal.querySelector(".batch-cancel").addEventListener("click", close);
+  modal.addEventListener("click", (event) => { if (event.target === modal) close(); });
+  modal.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+    if (event.key !== "Tab") return;
+    const controls = [...modal.querySelectorAll("button:not(:disabled):not([hidden]), summary")].filter((element) => element.getClientRects().length);
+    const first = controls[0], last = controls.at(-1);
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+    if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+  });
+  setBusy(true);
+  try {
+    history = (await apiJson(`/api/project-session-archive?projectId=${encodeURIComponent(projectId)}`)).data || [];
+    current = await request("preview", { projectId });
+    render();
+  } catch {
+    render();
+    failure();
+  } finally {
+    setBusy(false);
+    modal.querySelector(".batch-cancel").focus();
+  }
+}
+
 function openProjectContextMenu(projectId, anchor = {}) {
   closeProjectMenus();
   const isPinned = getPinnedProjects().includes(projectId);
@@ -6739,13 +6898,15 @@ function openProjectContextMenu(projectId, anchor = {}) {
   menu.style.visibility = "hidden";
   menu.innerHTML = '<button class="project-context-item" type="button" role="menuitem" data-action="edit">' + t("editProject") + '</button>' +
     '<button class="project-context-item" type="button" role="menuitem" data-action="pin">' +
-    (isPinned ? t("unpin") : t("pin")) + '</button>';
+    (isPinned ? t("unpin") : t("pin")) + '</button>' +
+    '<button class="project-context-item" type="button" role="menuitem" data-action="archive-all">' + escapeHtml(t("projectArchiveAll")) + '</button>';
   projectMenuReturnFocus = anchor.returnFocus || null;
   menu.querySelectorAll(".project-context-item").forEach((item) => {
     item.addEventListener("click", () => {
       closeProjectMenus();
       if (item.dataset.action === "edit") openProjectEditModal(projectId);
       if (item.dataset.action === "pin") togglePinProject(projectId);
+      if (item.dataset.action === "archive-all") void openProjectArchive(projectId);
     });
   });
   document.body.appendChild(menu);

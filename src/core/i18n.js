@@ -7,6 +7,34 @@
   const LANG = {
 
     zh: {
+      projectArchiveRead: "读取本批次结果",
+      projectArchiveProjectChanged: "项目设置已变化；请重新预览后确认。",
+      projectArchiveWorkChanged: "会话位置、归档状态或工作身份已变化；未执行本次操作。",
+
+      projectArchiveAll: "全部归档",
+      projectArchiveTitle: "归档项目会话",
+      projectArchivePreview: "已锁定 {total} 个会话，其中 {active} 个有活动工作。确认后仅处理本次列出的会话；之后新增的会话不包含在内。",
+      projectArchiveStopNotice: "继续将停止这些会话中已列入预览的工作，然后逐项归档。新的工作或项目变化会导致该项冲突。",
+      projectArchiveConfirm: "确认归档",
+      projectArchiveRetry: "重新预览失败项",
+      projectArchiveResume: "读取结果并继续已确认批次",
+      projectArchiveHistory: "已确认的批次",
+      projectArchiveEmpty: "这个项目没有可列入归档预览的会话。",
+      projectArchiveFailure: "批次结果暂不可用。请读取已有批次结果；不要根据响应失败推断归档失败。",
+      projectArchiveState_pending: "待处理",
+      projectArchiveState_stopping: "正在停止",
+      projectArchiveState_stopped: "已停止，待归档",
+      projectArchiveState_archiving: "正在归档",
+      projectArchiveState_archived: "归档已完成",
+      projectArchiveState_conflict: "状态已变化，请重新预览",
+      projectArchiveState_stop_failed: "停止未完成",
+      projectArchiveState_stopped_archive_failed: "已停止，但归档失败",
+      projectArchiveState_archive_failed: "归档未完成",
+      projectArchiveState_uncertain: "停止结果不确定，请先核对该会话",
+      archivedProjectFilter: "筛选项目",
+      archivedProjectAll: "全部项目",
+      archivedProjectDeleted: "已删除项目（{id}）",
+
 
       update: "更新", account: "账户",
 
@@ -23,6 +51,34 @@
     },
 
     en: {
+      projectArchiveRead: "Read this batch result",
+      projectArchiveProjectChanged: "Project settings changed; preview and confirm again.",
+      projectArchiveWorkChanged: "The session location, archive state or work identity changed; this item was not executed.",
+
+      projectArchiveAll: "Archive all",
+      projectArchiveTitle: "Archive project sessions",
+      projectArchivePreview: "This preview fixes {total} sessions, including {active} with active work. Only the listed sessions are included; later additions are excluded.",
+      projectArchiveStopNotice: "Continuing stops the work frozen in this preview, then archives each session. New work or project changes cause an item conflict.",
+      projectArchiveConfirm: "Confirm archive",
+      projectArchiveRetry: "Preview failed items again",
+      projectArchiveResume: "Read results and resume confirmed batch",
+      projectArchiveHistory: "Confirmed batches",
+      projectArchiveEmpty: "This project has no sessions for an archive preview.",
+      projectArchiveFailure: "The batch result is unavailable. Read the existing batch result; a lost response does not mean archiving failed.",
+      projectArchiveState_pending: "Pending",
+      projectArchiveState_stopping: "Stopping",
+      projectArchiveState_stopped: "Stopped; archive pending",
+      projectArchiveState_archiving: "Archiving",
+      projectArchiveState_archived: "Archive completed",
+      projectArchiveState_conflict: "State changed; preview again",
+      projectArchiveState_stop_failed: "Stop did not complete",
+      projectArchiveState_stopped_archive_failed: "Stopped, but archive failed",
+      projectArchiveState_archive_failed: "Archive did not complete",
+      projectArchiveState_uncertain: "Stop outcome uncertain; inspect this session first",
+      archivedProjectFilter: "Filter by project",
+      archivedProjectAll: "All projects",
+      archivedProjectDeleted: "Deleted project ({id})",
+
 
       update: "Update", account: "Account",
 

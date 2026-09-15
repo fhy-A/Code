@@ -7270,6 +7270,16 @@ body.theme-dark .syn-fn { color: #61afef; }
 .settings-detail .api-key-textarea { min-height: 100px; }
 .settings-detail .system-prompt-text { min-height: 320px; }
 .settings-detail .memory-form textarea { min-height: 140px; }
+.archived-project-filter-field { display: grid; gap: 6px; min-width: 0; }
+.archived-project-filter-field select { width: 100%; min-width: 0; max-width: 100%; }
+.project-archive-card { width: min(560px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; }
+.project-archive-card .confirm-body { overflow-wrap: anywhere; }
+.project-archive-card .confirm-actions { flex-wrap: wrap; }
+.project-archive-card .confirm-actions button { max-width: 100%; white-space: normal; }
+.batch-items { list-style: none; padding: 0; max-height: 40dvh; overflow: auto; }
+.batch-items li { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.batch-items small { opacity: .75; }
+.batch-history-item { display: block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .archived-sessions-panel { display: grid; gap: 16px; }
 .archived-sessions-panel .settings-section-header h3 { margin: 0 0 6px; }
 .archived-sessions-panel .settings-section-header p {

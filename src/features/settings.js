@@ -230,6 +230,7 @@
     let archivedSessionsError = "";
     let archivedSessionsLoadPromise = null;
     let archivedSessionQuery = "";
+    let archivedProjectFilter = "";
     const archivedSessionPending = new Map();
     const archivedSessionConfirming = new Set();
     let updatePanelGeneration = 0;
@@ -1981,7 +1982,8 @@
       if (!projectId) return t("archivedSessionUnknownProject");
       const project = (Array.isArray(state.projects) ? state.projects : [])
         .find((item) => String(item?.id || "") === projectId);
-      return String(project?.name || project?.title || projectId);
+      return project ? String(project.label || project.name || project.title || projectId)
+        : t("archivedProjectDeleted", { id: projectId });
     }
 
     function archivedSessionTime(record) {
@@ -2000,7 +2002,9 @@
     }
 
     function filteredArchivedSessions() {
-      return filterArchivedSessionRecords(archivedSessions, archivedSessionQuery);
+      const records = archivedSessions.filter((record) => !archivedProjectFilter
+        || JSON.stringify(String(record?.projectId || "")) === archivedProjectFilter);
+      return filterArchivedSessionRecords(records, archivedSessionQuery);
     }
 
     function archivedSessionGroups(records = archivedSessions) {
@@ -2092,9 +2096,24 @@
       });
     }
 
+    function syncArchivedProjectFilter(container) {
+      const select = container?.querySelector("#archivedProjectFilter");
+      if (!select) return;
+      const records = [...new Map(archivedSessions.map((record) => [String(record.projectId || ""), record])).values()];
+      select.innerHTML = `<option value="">${escapeHtml(t("archivedProjectAll"))}</option>`
+        + records.map((record) => {
+          const id = String(record.projectId || "");
+          const label = archivedSessionProjectName(record) + (id ? ` · ${id}` : "");
+          return `<option value="${escapeHtml(JSON.stringify(id))}">${escapeHtml(label)}</option>`;
+        }).join("");
+      if (![...select.options].some((option) => option.value === archivedProjectFilter)) archivedProjectFilter = "";
+      select.value = archivedProjectFilter;
+    }
+
     function renderArchivedSessionsContent(container = byId("settingsDetail")) {
       const content = container?.querySelector(".archived-sessions-content");
       if (!content) return;
+      syncArchivedProjectFilter(container);
       content.innerHTML = archivedSessionsBodyHtml();
       bindArchivedSessionContent(content);
     }
@@ -2105,6 +2124,12 @@
         <div class="settings-section-header">
           <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
         </div>
+        <label class="archived-project-filter-field" for="archivedProjectFilter">
+          <span>${escapeHtml(t("archivedProjectFilter"))}</span>
+          <select id="archivedProjectFilter">
+            <option value="">${escapeHtml(t("archivedProjectAll"))}</option>
+          </select>
+        </label>
         <label class="archived-session-search-field" for="archivedSessionSearchInput">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
@@ -2116,6 +2141,14 @@
         </label>
         <div class="archived-sessions-content">${archivedSessionsBodyHtml()}</div>
       </div>`;
+      const projectFilter = container.querySelector("#archivedProjectFilter");
+      if (projectFilter) {
+        syncArchivedProjectFilter(container);
+        projectFilter.addEventListener("change", () => {
+          archivedProjectFilter = projectFilter.value;
+          renderArchivedSessionsContent(container);
+        });
+      }
       const input = container.querySelector("#archivedSessionSearchInput");
       if (input) {
         input.value = archivedSessionQuery;
@@ -2124,7 +2157,7 @@
           renderArchivedSessionsContent(container);
         });
       }
-      bindArchivedSessionContent(container);
+      renderArchivedSessionsContent(container);
     }
 
     function refreshArchivedSessions(options = {}) {
