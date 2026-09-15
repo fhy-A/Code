@@ -273,6 +273,7 @@
     skillActivationRequest = null,
     payload,
     reasoningSelection = null,
+    memoryContextVersion = null,
     baseUrl,
     keys,
     routeRef = "",
@@ -301,6 +302,7 @@
           activeSkillNames: Array.isArray(activeSkillNames) ? [...activeSkillNames] : [],
         }),
         payload,
+        ...(memoryContextVersion === 1 ? { memoryContextVersion } : {}),
         ...(reasoningSelection !== null ? { reasoningSelection } : {}),
         ...(payload?.max_tokens !== undefined ? { outputPreference: payload.max_tokens === 0
           ? { version: 1, mode: "auto" } : { version: 1, mode: "manual", tokens: payload.max_tokens } } : {}),

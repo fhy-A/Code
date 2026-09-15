@@ -5033,6 +5033,18 @@ def main() -> int:
                 payload,
                 _arguments_validated=_arguments_validated,
             )
+        if action == 'save_memory':
+            expected = {
+                'name': str((payload or {}).get('name') or ''),
+                'description': 'event fixture',
+                'body': 'event-driven current fact',
+            }
+            if (expected['name'] not in {'event-bundle', 'event-classic'}
+                    or payload != expected
+                    or code_server.MEMORY_DIR.resolve() != (data_dir / 'memory').resolve()):
+                METRICS.increment('unsafeToolRequests')
+                raise ValueError('H4 memory event request changed the fixed isolated contract')
+            return original_execute_registered_tool(action, payload, _arguments_validated=_arguments_validated)
         if action != "read_file":
             METRICS.increment("unsafeToolRequests")
             raise ValueError("H4 tool action is outside the read-only fixture contract")

@@ -639,6 +639,23 @@
     let settingsSkillsOverview = true;
     let managedInFlight = null;
     let settingsMemoryRequestId = 0;
+    let memoryContextRequestId = 0;
+    let legacyEditingMemory = null;
+    const memoryProject = () => String(els.projectRoot?.value || "");
+    const memoryOperationId = () => global.crypto.randomUUID();
+    const memoryDeleteUrl = (memory) => `/api/memory?${new URLSearchParams({
+      file: memory.name, revision: memory.revision, scope: memory.scope,
+      operationId: memoryOperationId(),
+    })}`;
+    function memoryErrorText(error) {
+      const code = String(error?.data?.errorCode || "");
+      if (!code.startsWith("memory_")) return error.message;
+      const key = code === "memory_name_invalid" ? "memoryInvalidName"
+        : /recovery|receipt|index_conflict/.test(code) ? "memoryRecoveryFailed"
+        : /link|path/.test(code) ? "memoryPathDenied"
+        : "memoryRefreshRequired";
+      return `${t(key)} (${code})`;
+    }
     let skillDependencySnapshot = null;
     let skillDependencyByName = new Map();
     let skillDependencyLoading = false;
@@ -1178,13 +1195,38 @@
     }
 
     async function loadMemoryContext() {
+      const requestId = ++memoryContextRequestId;
+      const project = memoryProject();
+      const navigation = state._foregroundNavigationSeq;
+      if (state.memoryContext?.project !== project) state.memoryContext = { found: false, content: null, project };
+      updateMemoryContextIndicator();
       try {
-        state.memoryContext = await apiJson("/api/memory-context");
+        const result = await apiJson(`/api/memory-context?${new URLSearchParams({ project })}`);
+        if (requestId !== memoryContextRequestId || project !== memoryProject() || navigation !== state._foregroundNavigationSeq) return state.memoryContext;
+        state.memoryContext = { ...result, project };
       } catch {
-        state.memoryContext = { found: false, content: null };
+        if (requestId !== memoryContextRequestId || project !== memoryProject() || navigation !== state._foregroundNavigationSeq) return state.memoryContext;
+        state.memoryContext = { found: false, content: null, project };
       }
       updateMemoryContextIndicator();
       return state.memoryContext;
+    }
+
+    async function refreshMemoryAfterToolCompleted(ctx, event, currentRun) {
+      const result = event?.data?.result;
+      const scope = result?.memoryScope;
+      const project = memoryProject();
+      if (!currentRun || ctx?.isSubAgent || ctx?.isDetachedBackground
+          || !ctx?.sessionId || ctx.sessionId !== state.sessionId
+          || String(ctx.cwd || "") !== project || event?.type !== "tool_completed"
+          || result?.ok !== true || typeof scope !== "string"
+          || !["legacy", "global", `project:${project}`].includes(scope)) return false;
+      // Clear cached bodies and counts synchronously. The following read keeps
+      // its own project/navigation/request fences and never uses event content.
+      state.memoryContext = { found: false, content: null, count: 0, project };
+      updateMemoryContextIndicator();
+      await loadMemoryContext();
+      return true;
     }
 
     function updateMemoryContextIndicator() {
@@ -1232,15 +1274,16 @@
           button.addEventListener("click", () => {
             documentRef.querySelector(".key-delete-confirm")?.remove();
             const name = button.dataset.memoryDelete;
+            const target = memories.find((memory) => memory.name === name);
             const confirm = documentRef.createElement("div");
             confirm.className = "key-delete-confirm";
-            confirm.innerHTML = `<span>${t("deleteMemoryMsg").replace("{name}", escapeHtml(name))}</span>
+            confirm.innerHTML = `<span>${t("deleteMemoryMsg").replace("{name}", escapeHtml(name))} ${t("memoryDeleteScope", { scope: escapeHtml(target.scope) })}</span>
               <button class="key-confirm-yes" type="button">${t("confirmDelete")}</button>
               <button class="key-confirm-no" type="button">${t("cancel")}</button>`;
             button.closest(".memory-item")?.after(confirm);
             confirm.querySelector(".key-confirm-yes").addEventListener("click", () => {
               confirm.remove();
-              deleteMemory(name);
+              deleteMemory(target);
             });
             confirm.querySelector(".key-confirm-no").addEventListener("click", () => confirm.remove());
           });
@@ -1253,22 +1296,23 @@
     async function editMemory(name) {
       try {
         const memory = await apiJson(`/api/memory?file=${encodeURIComponent(name)}`);
+        legacyEditingMemory = memory;
         els.memoryName.value = memory.name || "";
         els.memoryDesc.value = (memory.meta || {}).description || "";
         els.memoryBody.value = memory.body || "";
       } catch (error) {
-        showToast(`${t("readMemoryFailed")}：${error.message}`, "error");
+        showToast(`${t("readMemoryFailed")}：${memoryErrorText(error)}`, "error");
       }
     }
 
-    async function deleteMemory(name) {
+    async function deleteMemory(memory) {
       try {
-        await apiJson(`/api/memory?file=${encodeURIComponent(name)}`, { method: "DELETE" });
+        await apiJson(memoryDeleteUrl(memory), { method: "DELETE" });
         await renderMemoryList();
         await loadMemoryContext();
         onMemoryChanged();
       } catch (error) {
-        showToast(`${t("deleteFailed")}：${error.message}`, "error");
+        showToast(`${t("deleteFailed")}：${memoryErrorText(error)}`, "error");
       }
     }
 
@@ -1287,8 +1331,11 @@
       try {
         await apiJson("/api/memory", {
           method: "POST",
-          body: JSON.stringify({ name, meta: { description }, body }),
+          body: JSON.stringify({ name, meta: { ...legacyEditingMemory?.meta, description }, body,
+            originalName: legacyEditingMemory?.name, revision: legacyEditingMemory?.revision,
+            scope: legacyEditingMemory?.scope, operationId: memoryOperationId() }),
         });
+        legacyEditingMemory = null;
         els.memoryName.value = "";
         els.memoryDesc.value = "";
         els.memoryBody.value = "";
@@ -1296,7 +1343,7 @@
         await loadMemoryContext();
         onMemoryChanged();
       } catch (error) {
-        showToast(`${t("saveFailed")}：${error.message}`, "error");
+        showToast(`${t("saveFailed")}：${memoryErrorText(error)}`, "error");
       }
     }
 
@@ -1338,24 +1385,25 @@
           showToast(t("fillRequired"), "error");
           return;
         }
-        if (state._editingMemory && state._editingMemory !== name) {
-          try {
-            await apiJson(`/api/memory?file=${encodeURIComponent(state._editingMemory)}`, { method: "DELETE" });
-          } catch (_) { /* continue by creating the requested name */ }
-        }
-        await apiJson("/api/memory", {
+        try {
+          const target = state._editingMemoryTarget;
+          await apiJson("/api/memory", {
           method: "POST",
-          body: JSON.stringify({ name, meta: { description }, body }),
-        });
-        showSettingsMemoryListMode();
-        refreshSettingsMemoryList();
-        loadMemoryContext();
+          body: JSON.stringify({ name, meta: { ...target?.meta, description }, body,
+            originalName: target?.name, revision: target?.revision, scope: target?.scope,
+            operationId: memoryOperationId() }),
+          });
+          showSettingsMemoryListMode();
+          await refreshSettingsMemoryList();
+          await loadMemoryContext();
+        } catch (error) { showToast(`${t("saveFailed")}：${memoryErrorText(error)}`, "error"); }
       });
       byId("memCancelBtn").addEventListener("click", showSettingsMemoryListMode);
     }
 
     function clearMemoryForm() {
       state._editingMemory = null;
+      state._editingMemoryTarget = null;
       const name = byId("settingsMemName");
       const description = byId("settingsMemDesc");
       const body = byId("settingsMemBody");
@@ -1398,8 +1446,9 @@
       const label = byId("memFormLabel");
       if (!workspace || !listView || !form || !name || !description || !body || !label) return;
       state._editingMemory = memory?.name || null;
+      state._editingMemoryTarget = memory;
       name.value = memory?.name || "";
-      name.disabled = Boolean(memory);
+      name.disabled = false;
       description.value = (memory?.meta || {}).description || "";
       body.value = memory?.body || "";
       if (memory) {
@@ -1441,25 +1490,28 @@
         list.querySelectorAll("[data-del]").forEach((button) => button.addEventListener("click", () => {
           const item = button.closest(".memory-item");
           const name = button.dataset.del;
+          const target = memories.find((memory) => memory.name === name);
           documentRef.querySelector(".key-delete-confirm")?.remove();
           const confirm = documentRef.createElement("div");
           confirm.className = "key-delete-confirm";
-          confirm.innerHTML = `<span data-settings-delete-name="${escapeHtml(name)}">${t("deleteConfirmMsg", { name: escapeHtml(name) })}</span>
+          confirm.innerHTML = `<span data-settings-delete-name="${escapeHtml(name)}">${t("deleteMemoryMsg", { name: escapeHtml(name) })} ${t("memoryDeleteScope", { scope: escapeHtml(target.scope) })}</span>
             <button class="key-confirm-yes" type="button" data-i18n="confirmDelete">${t("confirmDelete")}</button>
             <button class="key-confirm-no" type="button" data-i18n="cancel">${t("cancel")}</button>`;
           item.after(confirm);
           confirm.querySelector(".key-confirm-yes").addEventListener("click", async () => {
             confirm.remove();
-            await apiJson(`/api/memory?file=${encodeURIComponent(name)}`, { method: "DELETE" });
-            if (state._editingMemory === name) showSettingsMemoryListMode();
-            refreshSettingsMemoryList();
-            loadMemoryContext();
+            try {
+              await apiJson(memoryDeleteUrl(target), { method: "DELETE" });
+              if (state._editingMemory === name) showSettingsMemoryListMode();
+              await refreshSettingsMemoryList();
+              await loadMemoryContext();
+            } catch (error) { showToast(`${t("deleteFailed")}：${memoryErrorText(error)}`, "error"); }
           });
           confirm.querySelector(".key-confirm-no").addEventListener("click", () => confirm.remove());
         }));
       } catch (error) {
         if (requestId !== settingsMemoryRequestId || byId("settingsMemoryList") !== list) return;
-        list.innerHTML = `<div class="settings-memory-state is-error" role="alert"><span><span data-i18n="memoryLoadFailed">${t("memoryLoadFailed")}</span>：${escapeHtml(error.message || "")}</span><button id="settingsMemoryRetry" class="mini-btn" type="button" data-i18n="retry">${t("retry")}</button></div>`;
+        list.innerHTML = `<div class="settings-memory-state is-error" role="alert"><span><span data-i18n="memoryLoadFailed">${t("memoryLoadFailed")}</span>：${escapeHtml(memoryErrorText(error) || "")}</span><button id="settingsMemoryRetry" class="mini-btn" type="button" data-i18n="retry">${t("retry")}</button></div>`;
         byId("settingsMemoryRetry")?.addEventListener("click", refreshSettingsMemoryList);
       }
     }
@@ -2679,6 +2731,7 @@
       getMatchedSkillPrompts,
       getSkillPromptSnapshot,
       loadMemoryContext,
+      refreshMemoryAfterToolCompleted,
       loadSkills,
       navigateSlash,
       commitSlashSelection,

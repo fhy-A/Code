@@ -6183,7 +6183,7 @@ process.stdout.write(JSON.stringify({{
             "const profileAllowedToolNames = getAllowedToolNamesForProfile(",
             "allowedTools: serverToolNames",
             "toolBudgets: skillToolBudgets",
-            '["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"]',
+            '["propose_edit", "apply_edit", "write_file", "delete_file", "delete_memory", "manage_generated_image"]',
             'const authorizationAction = String(pendingAuthorization.action || "propose_edit")',
             'command: String(pendingAuthorization.command || "")',
             "projectServerEditToolCompleted(ctx, event, callMessage, result)",
@@ -6596,7 +6596,7 @@ process.stdout.write(JSON.stringify({
             "formatSystemPromptEnvironment({",
             "resolveLocalTimeZoneName()",
             "options.appVersion ?? state.appVersion",
-            "options.memoryContext ?? state.memoryContext",
+            'const memoryInstruction = "";',
             "options.projectContext ?? state.projectContext",
             "getSkillPromptSnapshot(",
             "activeSkillNames,",
@@ -7850,6 +7850,9 @@ const byName = Object.fromEntries(definitions.map((tool) => [tool.function.name,
 process.stdout.write(JSON.stringify({
   names: definitions.map((tool) => tool.function.name),
   hash: crypto.createHash("sha256").update(before).digest("hex"),
+  legacyHash: crypto.createHash("sha256").update(JSON.stringify(definitions.filter(tool => tool.function.name !== "delete_memory"))).digest("hex"),
+  deleteMemoryRequired: byName.delete_memory.function.parameters.required,
+  deleteMemoryProperties: Object.keys(byName.delete_memory.function.parameters.properties),
   actionStatusSchemas: definitions.map((tool) => ({
     name: tool.function.name,
     schema: tool.function.parameters.properties._actionStatus || null,
@@ -7912,11 +7915,18 @@ process.stdout.write(JSON.stringify({
                 "write_file",
                 "delete_file",
                 "web_fetch",
+                "delete_memory",
                 "save_memory",
             ],
         )
         self.assertEqual(
             data["hash"],
+            "20efcb398b313e1e0a0e2746ddc828d2810fe881a419580973f27ccd518bdd71",
+        )
+        self.assertEqual(data["deleteMemoryRequired"], ["name", "scope"])
+        self.assertNotIn("confirmed", data["deleteMemoryProperties"])
+        self.assertEqual(
+            data["legacyHash"],
             "23df31e4f0a91f44094c742eb42de7e1ab307d2f2662fe024762dd12f484dab4",
         )
         for tool in data["actionStatusSchemas"]:
@@ -8067,6 +8077,7 @@ process.stdout.write(JSON.stringify({
                 "write_file",
                 "delete_file",
                 "save_memory",
+                "delete_memory",
                 "read_skill_resource",
                 "generate_image",
                 "manage_generated_image",
@@ -13550,7 +13561,7 @@ const feature = createSkillsMemoryFeature({
     if (url === "/api/skill-management/v1") return {protocol: "skill-management/v1", mode: "legacy", serverInstanceId: "fixture"};
     if (url === "/api/skills?brief=1") return {data: [{name: "demo", body: null, keywords: ["demo"], tools: ["read_file"]}]};
     if (url === "/api/skills/demo") return {body: "Demo instructions", path: "skills/demo", resources: {}};
-    if (url === "/api/memory-context") return {found: true, count: 2, content: "memory"};
+    if (url === "/api/memory-context?project=") return {found: true, count: 2, content: "memory"};
     throw new Error(`unexpected request: ${url}`);
   },
   document: {getElementById: () => null},
@@ -13598,10 +13609,10 @@ const feature = createSkillsMemoryFeature({
         self.assertIn("does not expand the current mode's permissions", data["matchedPrompt"])
         self.assertIn("Do not call task unless it is listed", data["matchedPrompt"])
         self.assertIn("正文已加载，不要再次调用 use_skill", SKILLS_MEMORY_SOURCE)
-        self.assertEqual(data["memory"], {"found": True, "count": 2, "content": "memory"})
+        self.assertEqual(data["memory"], {"found": True, "count": 2, "content": "memory", "project": ""})
         self.assertEqual(
             data["calls"],
-            ["/api/skill-management/v1", "/api/skills?brief=1", "/api/skills/demo", "/api/memory-context"],
+            ["/api/skill-management/v1", "/api/skills?brief=1", "/api/skills/demo", "/api/memory-context?project="],
         )
 
     def test_imagegen_and_local_image_generation_skills_route_without_overlap(self):

@@ -2646,10 +2646,8 @@ async function buildSystemPromptSnapshot(options = {}) {
   const projectContextInstruction = projectContext?.found
     ? `=== 项目上下文（仅本项目，来自 ${projectContext.name}） ===\n${projectContext.content}`
     : "";
-  const memoryContext = options.memoryContext ?? state.memoryContext;
-  const memoryInstruction = memoryContext?.found
-    ? `=== 长期记忆（跨会话保留） ===\n以下信息已融入当前上下文，直接使用，不要提及"长期记忆"或"根据记忆"。\n${memoryContext.content}`
-    : "";
+  // Memory is owned by the server and rebuilt for each outbound request.
+  const memoryInstruction = "";
   const imageAttachmentRefs = allowedToolNames.has("generate_image")
     ? (Array.isArray(lastUserMsg?._images) ? lastUserMsg._images : [])
       .map((image) => ({
@@ -2895,7 +2893,7 @@ function updateModePromptPreview() {
 
   if (state.memoryContext?.found && state.memoryContext.count > 0) {
 
-    lines.unshift(`[持久记忆: ${state.memoryContext.count} 条 · 已注入全文]`);
+    lines.unshift(`[持久记忆: ${state.memoryContext.count} 条 · 请求时刷新]`);
 
   }
 
@@ -3767,7 +3765,7 @@ function _toolActionLabel(action) {
   const map = { list_files:"toolListFiles", read_file:"toolReadFile", search_files:"toolSearchFiles",
     glob_files:"toolGlobFiles", propose_edit:"toolProposeEdit", apply_edit:"toolApplyEdit",
     run_command:"toolRunCommand", write_file:"toolWriteFile", delete_file:"toolDeleteFile",
-    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory", generate_image:"toolGenerateImage", manage_generated_image:"toolManageGeneratedImage" };
+    web_fetch:"toolWebFetch", task:"toolTask", request_user_input:"toolRequestUserInput", use_skill:"toolUseSkill", check_skill_dependencies:"toolCheckSkillDependencies", read_skill_resource:"toolReadSkill", save_memory:"toolSaveMemory", delete_memory:"toolDeleteMemory", generate_image:"toolGenerateImage", manage_generated_image:"toolManageGeneratedImage" };
   return Object.hasOwn(map, action) ? t(map[action]) : action || t("toolProcessTitle");
 }
 
@@ -7497,6 +7495,7 @@ async function saveProjectRoot(newPath, options = {}) {
   await loadFiles("");
 
   await loadProjectContext();
+  await loadMemoryContext();
 
   if (!state.sessionId) {
     state.pendingProjectId = projectForCurrentRoot()?.id || null;
@@ -9550,6 +9549,7 @@ function authorizationActionLabel(action) {
     apply_edit: t("actionEdit"),
     write_file: t("actionWrite"),
     delete_file: t("actionDelete"),
+    delete_memory: t("toolDeleteMemory"),
     run_command: t("actionRun"),
     generate_image: t("imageAuthorizationAction"),
   };
@@ -9576,6 +9576,7 @@ function imageAuthorizationSummary(tool) {
 }
 
 function authorizationTarget(tool) {
+  if (tool.memoryTarget) return `${tool.path} · ${t("memoryDeleteScope", { scope: tool.memoryTarget.scope })}`;
   if (tool.action === "generate_image") {
     const summary = imageAuthorizationSummary(tool) || {};
     return t("imageAuthorizationTarget", {
@@ -9659,7 +9660,7 @@ function renderAuthorizationPanel() {
   const isSingle = items.length === 1;
   const selectedCount = selectedAuthorizations(items).length;
   const singleIdAttribute = isSingle ? `data-auth-single-id="${escapeHtml(items[0].id)}"` : "";
-  const editCount = items.filter((item) => ["propose_edit", "write_file", "delete_file", "manage_generated_image"].includes(item.tool.action)).length;
+  const editCount = items.filter((item) => ["propose_edit", "write_file", "delete_file", "delete_memory", "manage_generated_image"].includes(item.tool.action)).length;
   const commandCount = items.filter((item) => item.tool.action === "run_command").length;
   const summary = [editCount ? t("fileOpsCount", { count: editCount }) : "", commandCount ? t("commandsCount", { count: commandCount }) : ""].filter(Boolean).join(" · ");
   const grouping = authorizationGroupingProjection(items);
@@ -9881,6 +9882,7 @@ function toolProgressSummary(toolCalls) {
       case "run_command":  return t("progressRun", { target: (args.command || "").slice(0, 40) });
       case "glob_files":   return t("progressGlob", { target: args.pattern || "" });
       case "propose_edit": return t("progressEdit", { target: args.path || t("fileLabel") });
+      case "delete_memory": return t("progressDelete", { target: args.name || t("longTermMemory") });
       case "delete_file":  return t("progressDelete", { target: args.path || t("fileLabel") });
       case "web_fetch":    return t("progressFetch", { target: args.url || "Web" });
       case "task":         return t("progressTask", { target: (args.description || args.prompt || "").slice(0, 30) });
@@ -12655,10 +12657,10 @@ function agentRecoveryRetryDelayMs(snapshot, referenceTime = Date.now()) {
 
 function agentRecoveryPauseError(snapshot) {
   const code = String(snapshot?.errorCode || snapshot?.recoveryState?.errorCode || "agent_recovery_required");
-  const error = new Error(snapshot?.error || t(_errorCodeInfo(code)?.suggestionKey || "errSugAgentRecoveryRequired"));
+  const error = new Error(code === "memory_context_new_turn_required" ? t("memoryNewTurnRequired") : (snapshot?.error || t(_errorCodeInfo(code)?.suggestionKey || "errSugAgentRecoveryRequired")));
   error.status = "waiting_recovery";
   error.errorCode = code;
-  error.recoverable = true;
+  error.recoverable = code !== "memory_context_new_turn_required";
   error.preservePublicProcess = true;
   error.agentRunId = String(snapshot?.agentRunId || "");
   return error;
@@ -12901,6 +12903,7 @@ async function runBackgroundSubAgentJob(job) {
         clientRequestId: job.clientRequestId || job.id,
         activeSkillNames: subCtx.activeSkillNames || [],
         payload: prepared.payload,
+        memoryContextVersion: 1,
         reasoningSelection: subCtx.reasoningSelection ?? null,
         baseUrl: dispatch.baseUrl,
         keys: dispatch.keys,
@@ -12943,7 +12946,7 @@ async function runBackgroundSubAgentJob(job) {
         updateBackgroundJob(job, "waiting-recovery");
         await persistBackgroundJob(job);
         const retryDelay = agentRecoveryRetryDelayMs(snapshot);
-        if (recoveryResumeAttempts >= 1 || retryDelay > 0) {
+        if (snapshot?.recoveryState?.resumable === false || recoveryResumeAttempts >= 1 || retryDelay > 0) {
           return {
             ok: false,
             recoverable: true,
@@ -14117,7 +14120,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
   const toolCallId = String(data.toolCallId || "");
   const toolAction = String(data.name || callMessage?.meta?.action || result?.action || "");
   const resultAction = String(result?.action || toolAction);
-  const editActions = ["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"];
+  const editActions = ["propose_edit", "apply_edit", "write_file", "delete_file", "delete_memory", "manage_generated_image"];
   let projection = ctx.messages.find((message) => (
     message?.role === "tool-result"
     && message.meta?.serverManaged
@@ -14139,7 +14142,7 @@ function projectServerEditToolCompleted(ctx, event, callMessage, result) {
   const applied = Boolean(projection?.meta?.applied)
     || result?.applied === true
     || (delegatedEditCompletion && result?.ok !== false && !projection?.meta?.rejected)
-    || (["write_file", "delete_file", "manage_generated_image"].includes(resultAction) && result?.ok !== false && !result?.rejected);
+    || (["write_file", "delete_file", "delete_memory", "manage_generated_image"].includes(resultAction) && result?.ok !== false && !result?.rejected);
   const rejected = Boolean(projection?.meta?.rejected)
     || result?.rejected === true;
   const diff = String(result?.diff || "");
@@ -14214,6 +14217,9 @@ function projectAgentToolCompleted(ctx, event) {
     callMessage.meta.agentEventType = "tool_completed_call";
   }
   const result = data.result || {};
+  if (typeof result.memoryScope === "string") {
+    void skillsMemoryFeature.refreshMemoryAfterToolCompleted(ctx, event, ownsActiveRunContext(ctx));
+  }
   if (projectServerEditToolCompleted(ctx, event, callMessage, result)) return;
   if (String(data.name || "") === "request_user_input") {
     appendUserInputSummaryMessage(ctx.messages, result);
@@ -14387,7 +14393,7 @@ async function requestEmptyResponseContinue(ctx, pendingInput) {
 function ensureServerAuthorizationProjection(ctx, pendingAuthorization) {
   const authorizationId = String(pendingAuthorization.authorizationId || "");
   const authorizationAction = String(pendingAuthorization.action || "propose_edit");
-  if (!["propose_edit", "apply_edit", "write_file", "delete_file", "manage_generated_image"].includes(authorizationAction)) {
+  if (!["propose_edit", "apply_edit", "write_file", "delete_file", "delete_memory", "manage_generated_image"].includes(authorizationAction)) {
     return "";
   }
   const proposalId = String(pendingAuthorization.proposalId || authorizationId);
@@ -14463,9 +14469,10 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
       sourceLabel: source.label,
       tool: {
         action: authorizationAction,
+        memoryTarget: pendingAuthorization.memoryTarget,
         path: String(pendingAuthorization.path || ""),
         command: String(pendingAuthorization.command || ""),
-        description: String(pendingAuthorization.description || ""),
+        description: pendingAuthorization.memoryTarget ? t("memoryDeleteScope", { scope: pendingAuthorization.memoryTarget.scope }) : String(pendingAuthorization.description || ""),
         summary: imageAuthorizationSummary(pendingAuthorization),
       },
       editId,
@@ -14488,9 +14495,10 @@ async function requestServerAgentAuthorization(ctx, pendingAuthorization) {
   request.editId = editId;
   request.tool = {
     action: authorizationAction,
+    memoryTarget: pendingAuthorization.memoryTarget,
     path: String(pendingAuthorization.path || ""),
     command: String(pendingAuthorization.command || ""),
-    description: String(pendingAuthorization.description || ""),
+    description: pendingAuthorization.memoryTarget ? t("memoryDeleteScope", { scope: pendingAuthorization.memoryTarget.scope }) : String(pendingAuthorization.description || ""),
     summary: imageAuthorizationSummary(pendingAuthorization),
   };
   request.stats = diff ? getDiffStats(normalizeDiffText(diff)) : null;
@@ -14754,6 +14762,7 @@ async function runServerAgentLoop(ctx) {
         activeSkillNames: ctx.activeSkillNames || [],
       }),
       payload: prepared.payload,
+      memoryContextVersion: 1,
       reasoningSelection: ctx.reasoningSelection ?? null,
       baseUrl: dispatch.baseUrl,
       keys: dispatch.keys,
@@ -14843,7 +14852,7 @@ async function runServerAgentLoop(ctx) {
       });
     } else if (snapshot.status === "waiting_recovery") {
       const retryDelay = agentRecoveryRetryDelayMs(snapshot);
-      if (recoveryResumeAttempts >= 1 || retryDelay > 0) {
+      if (snapshot?.recoveryState?.resumable === false || recoveryResumeAttempts >= 1 || retryDelay > 0) {
         throw agentRecoveryPauseError(snapshot);
       }
       recoveryResumeAttempts += 1;

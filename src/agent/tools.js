@@ -756,6 +756,23 @@ const nativeTools = [
   {
     type: "function",
     function: {
+      name: "delete_memory",
+      description: "Request deletion of one named persistent memory. A real user must confirm its exact scope and version, including in automatic mode. Already sent history is retained.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Exact memory slug; MEMORY index is reserved." },
+          scope: { type: "string", description: "legacy, global, or project:<exact project path>" },
+        },
+        required: ["name", "scope"],
+        additionalProperties: false,
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
       name: "save_memory",
       description: "Save important info as a persistent memory for future sessions. Use when user shares preferences, project decisions, or key facts worth remembering.",
       parameters: {
@@ -846,6 +863,7 @@ const nativeTools = [
       // authoritative start; other gated actions are shown only in bypass.
       if (candidate.name === "run_command" && type !== "command_started") return;
       const execution = (snapshot.toolExecutions || []).find(item => item.toolCallId === data.toolCallId);
+      if (candidate.name === "delete_memory" && execution?.authorizationDecision !== "approved") return;
       if (["write_file", "delete_file", "propose_edit", "generate_image", "manage_generated_image", "create_ppt_master_deck"].includes(candidate.name)
         && snapshot.permissionProfile !== "bypass"
         && !(candidate.name === "propose_edit" && snapshot.permissionProfile === "plan")

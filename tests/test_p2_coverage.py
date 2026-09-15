@@ -935,25 +935,22 @@ class TestSkillsCRUD(unittest.TestCase):
 
 class TestMemoryCRUD(unittest.TestCase):
 
-    @classmethod
-    def setUpClass(cls):
-        cls.tmp_data = Path(tempfile.mkdtemp(prefix="code_mem_"))
-        cls.tmp_memory = cls.tmp_data / "memory"
-        cls.tmp_memory.mkdir(parents=True)
-        cls._patcher = mock.patch.object(server_mod, "MEMORY_DIR", cls.tmp_memory)
-        cls._index_patcher = mock.patch.object(server_mod, "MEMORY_INDEX_PATH", cls.tmp_memory / "MEMORY.md")
-        cls._patcher.start()
-        cls._index_patcher.start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls._index_patcher.stop()
-        cls._patcher.stop()
-
     def setUp(self):
-        # Clean between tests
-        for f in self.tmp_memory.iterdir():
-            f.unlink()
+        self.temporary = tempfile.TemporaryDirectory(prefix="code_mem_")
+        self.tmp_data = Path(self.temporary.name)
+        self.tmp_memory = self.tmp_data / "memory"
+        self.tmp_memory.mkdir()
+        self._patcher = mock.patch.object(server_mod, "MEMORY_DIR", self.tmp_memory)
+        self._index_patcher = mock.patch.object(server_mod, "MEMORY_INDEX_PATH", self.tmp_memory / "MEMORY.md")
+        self._patcher.start()
+        self._index_patcher.start()
+
+    def tearDown(self):
+        # Keep isolation in place until the owned auxiliary journal/receipts are removed.
+        assert self.tmp_data.resolve().parent == Path(tempfile.gettempdir()).resolve()
+        self.temporary.cleanup()
+        self._index_patcher.stop()
+        self._patcher.stop()
 
     def test_write_and_read_memory(self):
         server_mod.write_memory(
@@ -977,15 +974,16 @@ class TestMemoryCRUD(unittest.TestCase):
 
     def test_delete_memory(self):
         server_mod.write_memory("del-me", {"description": "x"}, "y")
-        result = server_mod.delete_memory("del-me")
+        target = server_mod.read_memory("del-me")
+        result = server_mod.delete_memory("del-me", expected=target["revision"], expected_scope=target["scope"])
         self.assertTrue(result.get("ok"))
         with self.assertRaises(ValueError):
             server_mod.read_memory("del-me")
 
     def test_delete_nonexistent_memory(self):
-        # delete_memory is idempotent — doesn't error on missing
-        result = server_mod.delete_memory("never-there")
-        self.assertTrue(result.get("ok"))
+        # A missing target is not authorization or a receipt for a prior deletion.
+        with self.assertRaises(ValueError):
+            server_mod.delete_memory("never-there", expected="0" * 64, expected_scope="legacy")
 
     def test_safe_memory_name_validation(self):
         self.assertEqual(server_mod.safe_memory_name("valid-name"), "valid-name")

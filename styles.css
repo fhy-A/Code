@@ -12961,6 +12961,21 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   min-width: 0;
 }
 
+.settings-memory-list-view .key-delete-confirm {
+  flex-wrap: wrap;
+}
+
+.settings-memory-list-view .key-delete-confirm > span {
+  flex: 1 1 260px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.settings-memory-list-view .key-delete-confirm > button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .settings-memory-list-view[hidden],
 .memory-settings-panel .memory-form[hidden] {
   display: none;
