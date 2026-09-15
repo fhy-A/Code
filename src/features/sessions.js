@@ -672,6 +672,7 @@
       state.pendingProjectId = projectId || null;
       state.sessionId = null;
       state.messages = [];
+      state.lastUsage = null;
       state._lastRenderedHtml = null;
       state.stats = { input: 0, output: 0, cache: 0 };
       state.pendingEdits = {};

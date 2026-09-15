@@ -16859,6 +16859,7 @@ function clearCurrentSession() {
   if (state._revealMessageFrame)   { cancelAnimationFrame(state._revealMessageFrame);   state._revealMessageFrame = null; }
   state.sessionId = null;
   state.messages = [];
+  state.lastUsage = null;
   state.stats = { input: 0, output: 0, cache: 0 };
   state.pendingEdits = {};
   els.sessionTitle.value = "";

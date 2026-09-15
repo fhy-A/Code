@@ -253,7 +253,7 @@
     }
 
     function getSessionLastUsage(sessionId = state.sessionId) {
-      if (!sessionId) return state.lastUsage;
+      if (!sessionId) return null;
       return state._sessionLastUsage[sessionId] || null;
     }
 
