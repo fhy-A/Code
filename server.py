@@ -16000,6 +16000,11 @@ def _project_archive_store():
     return _project_archive_service().store
 
 
+def _project_archive_delete_service():
+    from code_runtime.project_archive_delete import DeleteService
+    return DeleteService(sys.modules[__name__])
+
+
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, ensure_ascii=False, indent=2)
@@ -22571,12 +22576,17 @@ def _read_session_archive_journal(session_id):
     if journal is None:
         return None
     expected_keys = {"schema", "sessionId", "action", "state", "transactionId"}
-    if journal.get("schema") == "code-session-archive-transaction/v2":
+    if journal.get("schema") in {"code-session-archive-transaction/v2", "code-session-archive-transaction/v3"}:
         expected_keys |= {"batchOperationId", "archiveToken"}
-        _validate_project_archive_journal_binding(journal)
+        if journal["schema"] == "code-session-archive-transaction/v3":
+            if journal.get("state") in {"core_restored", "facts_deleted"}:
+                expected_keys.add("activeFiles")
+            _validate_project_archive_delete_journal_binding(journal)
+        else:
+            _validate_project_archive_journal_binding(journal)
     if not isinstance(journal, dict) or set(journal) != expected_keys:
         raise ValueError("Session archive transaction journal is invalid")
-    if journal.get("schema") not in {"code-session-archive-transaction/v1", "code-session-archive-transaction/v2"}:
+    if journal.get("schema") not in {"code-session-archive-transaction/v1", "code-session-archive-transaction/v2", "code-session-archive-transaction/v3"}:
         raise ValueError("Session archive transaction schema is invalid")
     if str(journal.get("sessionId") or "") != session_id:
         raise ValueError("Session archive transaction Session identity is invalid")
@@ -22617,6 +22627,107 @@ def _record_project_archive_effect(journal, manifest):
             journal["sessionId"], manifest["archiveToken"], manifest["archivedAt"])
 
 
+def _validate_project_archive_delete_journal_binding(journal):
+    if journal.get("action") != "delete":
+        raise ValueError("Delete batch journal action is invalid")
+    if journal.get("state") in {"core_restored", "facts_deleted"}:
+        facts = journal.get("activeFiles")
+        if not isinstance(facts, dict) or set(facts) != {"session", "messages"}:
+            raise ValueError("Delete transaction core identities are missing")
+        for fact in facts.values():
+            if (not isinstance(fact, dict) or set(fact) != {"sha256", "byteLength", "mtimeNs", "ctimeNs", "device", "inode"}
+                    or not isinstance(fact["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", fact["sha256"])
+                    or any(type(fact[key]) is not int or fact[key] < 0 for key in ("byteLength", "mtimeNs", "ctimeNs", "device", "inode"))
+                    or fact["inode"] == 0):
+                raise ValueError("Delete transaction core identity is invalid")
+    return _project_archive_delete_service().store.binding(
+        journal.get("batchOperationId"), journal.get("sessionId"), journal.get("archiveToken"))
+
+
+def _validate_project_archive_delete_bundle(journal, manifest):
+    if journal.get("schema") != "code-session-archive-transaction/v3":
+        return
+    from code_runtime.project_archive import digest
+    service = _project_archive_delete_service()
+    value, item = _validate_project_archive_delete_journal_binding(journal)
+    if manifest["archiveToken"] != journal["archiveToken"] or digest(manifest) != item["target"]["version"]:
+        raise SessionArchiveMutationError(recovery_failed=True)
+    if journal["state"] != "facts_deleted" and service.scope_version(value["scope"]) != value["scopeVersion"]:
+        raise SessionArchiveMutationError(recovery_failed=True)
+
+
+def _project_archive_delete_core_fact(path):
+    service = _project_archive_delete_service()
+    for part in (path, *path.parents):
+        service.store.plain(part)
+    before = path.stat()
+    payload = path.read_bytes()
+    after = path.stat()
+    keys = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if not before.st_ino or any(getattr(before, key) != getattr(after, key) for key in keys):
+        raise SessionLifecycleConflictError("archive_delete_recovery_conflict", "Delete transaction core identity is unavailable.")
+    return {**_session_archive_file_fact(payload, mtime_ns=after.st_mtime_ns),
+            "ctimeNs": after.st_ctime_ns, "device": after.st_dev, "inode": after.st_ino}
+
+
+def _project_archive_delete_prepare_core(journal, manifest):
+    paths = dict(zip(("session", "messages"), _session_archive_original_paths(journal["sessionId"], manifest["original"])))
+    def conflict():
+        raise SessionLifecycleConflictError("archive_delete_recovery_conflict",
+            "Active files no longer have the identity recorded by this delete transaction; keep them and inspect recovery.")
+    if journal["state"] == "prepared":
+        # No ownership evidence exists yet. Never overwrite any present object,
+        # even if it has the same bytes/mtime as the old archive.
+        if any(path.exists() or path.is_symlink() for path in paths.values()):
+            conflict()
+        bundle = _session_archive_bundle_path(journal["sessionId"])
+        for name, target in paths.items():
+            source_name = "session.json" if name == "session" else "messages.jsonl"
+            payload = (bundle / source_name).read_bytes()
+            fact = manifest["files"][source_name]
+            if len(payload) != fact["byteLength"] or hashlib.sha256(payload).hexdigest() != fact["sha256"]:
+                conflict()
+            for part in (target, *target.parents):
+                _project_archive_delete_service().store.plain(part)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("xb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            mtime = fact["mtimeNs"]
+            if mtime > 0:
+                os.utime(target, ns=(mtime, mtime))
+        return {name: _project_archive_delete_core_fact(path) for name, path in paths.items()}
+    if journal["state"] != "core_restored":
+        conflict()
+    try:
+        actual = {name: _project_archive_delete_core_fact(path) for name, path in paths.items()}
+    except (OSError, ValueError):
+        conflict()
+    if actual != journal["activeFiles"]:
+        conflict()
+    return actual
+
+
+def _record_project_archive_delete_effect(journal):
+    if journal.get("schema") == "code-session-archive-transaction/v3":
+        if journal.get("state") != "facts_deleted":
+            raise ValueError("Delete completion requires committed fact cleanup")
+        _project_archive_delete_service().store.record_effect(journal["batchOperationId"],
+            journal["sessionId"], journal["archiveToken"], _normalized_session_timestamp(_session_now_iso()))
+
+
+def _record_project_archive_delete_cleanup(journal):
+    if journal.get("schema") != "code-session-archive-transaction/v3":
+        return
+    if journal.get("state") != "facts_deleted" or _session_archive_bundle_path(journal["sessionId"]).exists():
+        raise SessionLifecycleConflictError("archive_delete_cleanup_pending", "The original archive copy is not cleared.")
+    # Persist proof of copy removal before unlinking the journal. A failed
+    # journal unlink remains visibly pending; no absent-file success inference.
+    _project_archive_delete_service().store.record_cleanup(journal["batchOperationId"],
+        journal["sessionId"], journal["archiveToken"], journal["transactionId"])
+
+
 def _write_session_archive_journal(session_id, payload):
     transaction_id = _normalize_session_archive_transaction_id(
         (payload or {}).get("transactionId")
@@ -22637,9 +22748,15 @@ def _write_session_archive_journal(session_id, payload):
     }
     expected = {"schema", "sessionId", "action", "state", "transactionId"}
     if "batchOperationId" in journal:
-        journal["schema"] = "code-session-archive-transaction/v2"
         expected |= {"batchOperationId", "archiveToken"}
-        _validate_project_archive_journal_binding(journal)
+        if action == "delete":
+            journal["schema"] = "code-session-archive-transaction/v3"
+            if state in {"core_restored", "facts_deleted"}:
+                expected.add("activeFiles")
+            _validate_project_archive_delete_journal_binding(journal)
+        else:
+            journal["schema"] = "code-session-archive-transaction/v2"
+            _validate_project_archive_journal_binding(journal)
     if set(journal) != expected:
         raise ValueError("Session archive transaction journal is invalid")
     if action not in allowed_states or state not in allowed_states[action]:
@@ -22771,9 +22888,13 @@ def _recover_session_archive_transaction(session_id):
         journal_path.unlink(missing_ok=True)
         return
     if action == "delete":
+        batch_binding = ({"batchOperationId": journal["batchOperationId"], "archiveToken": journal["archiveToken"]}
+                         if journal.get("schema") == "code-session-archive-transaction/v3" else {})
         if state == "facts_deleted" and not bundle.exists():
             if session_path(session_id).exists() or messages_path(session_id).exists():
                 raise SessionArchiveMutationError(recovery_failed=True)
+            _record_project_archive_delete_effect(journal)
+            _record_project_archive_delete_cleanup(journal)
             journal_path.unlink(missing_ok=True)
             return
         # Permanent delete is always forward-recovered after token admission.
@@ -22782,27 +22903,34 @@ def _recover_session_archive_transaction(session_id):
         manifest = _read_session_archive_manifest(session_id)
         if manifest is None:
             raise SessionArchiveMutationError(recovery_failed=True)
+        _validate_project_archive_delete_bundle(journal, manifest)
+        if batch_binding and state == "facts_deleted" and (session_path(session_id).exists() or messages_path(session_id).exists()):
+            raise SessionArchiveMutationError(recovery_failed=True)
         active_session, active_messages = _session_archive_original_paths(
             session_id,
             manifest["original"],
         )
         if state in {"prepared", "core_restored"}:
-            _restore_session_archive_file(
-                active_session,
-                bundle / "session.json",
-                manifest["files"]["session.json"],
-            )
-            _restore_session_archive_file(
-                active_messages,
-                bundle / "messages.jsonl",
-                manifest["files"]["messages.jsonl"],
-            )
+            if batch_binding:
+                batch_binding["activeFiles"] = _project_archive_delete_prepare_core(journal, manifest)
+            else:
+                _restore_session_archive_file(
+                    active_session,
+                    bundle / "session.json",
+                    manifest["files"]["session.json"],
+                )
+                _restore_session_archive_file(
+                    active_messages,
+                    bundle / "messages.jsonl",
+                    manifest["files"]["messages.jsonl"],
+                )
             restored_meta = _read_session_meta_strict(active_session) or {}
             _write_session_index_from_meta(restored_meta)
             _write_session_archive_journal(session_id, {
                 "action": "delete",
                 "state": "core_restored",
                 "transactionId": transaction_id,
+                **batch_binding,
             })
             handler = object.__new__(CodeHandler)
             handler.send_json = lambda *_args, **_kwargs: None
@@ -22820,8 +22948,11 @@ def _recover_session_archive_transaction(session_id):
                 "action": "delete",
                 "state": "facts_deleted",
                 "transactionId": transaction_id,
+                **batch_binding,
             })
+        _record_project_archive_delete_effect(_read_session_archive_journal(session_id))
         _remove_owned_archive_tree(bundle)
+        _record_project_archive_delete_cleanup(_read_session_archive_journal(session_id))
         journal_path.unlink(missing_ok=True)
         return
     raise SessionArchiveMutationError(recovery_failed=True)
@@ -28584,6 +28715,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                 else:
                     self.send_json({"error": "project not found"}, 404)
                 return
+            if route == "/api/project-archive-delete":
+                self.project_archive_delete("list")
+                return
             if route == "/api/project-session-archive":
                 self.project_session_archive("list")
                 return
@@ -28671,6 +28805,9 @@ class CodeHandler(BaseHTTPRequestHandler):
                     self.send_json({"error": "connections must be an array"}, 400)
                     return
                 self.send_json(_image_route_registry.refresh(connections))
+                return
+            if route.startswith("/api/project-archive-delete/"):
+                self.project_archive_delete(route.rsplit("/", 1)[-1])
                 return
             if route.startswith("/api/project-session-archive/"):
                 self.project_session_archive(route.rsplit("/", 1)[-1])
@@ -30379,6 +30516,34 @@ class CodeHandler(BaseHTTPRequestHandler):
         _sort_sessions_by_last_message(sessions)
         self.send_json({"data": sessions})
 
+    def project_archive_delete(self, action):
+        from code_runtime.project_archive import BatchError
+        service = _project_archive_delete_service()
+        try:
+            if action == "list":
+                query = parse.parse_qs(parse.urlparse(self.path).query)
+                group = json.loads(query["scope"][0]) if "scope" in query else None
+                self.send_json({"data": [service.public(v) for v in service.store.list(group)]})
+                return
+            body = CodeHandler.read_session_archive_action_json(self)
+            if action == "preview":
+                result = service.preview(body.get("scope"), body.get("retryOf"))
+            elif action in {"confirm", "resume"}:
+                result = service.execute(body.get("operationId"), body.get("scope"), body.get("action"),
+                    token=body.get("confirmationToken"), resume=action == "resume")
+            elif action == "cancel":
+                service.store.cancel_preview(body.get("operationId"), body.get("confirmationToken"))
+                result = {"ok": True}
+            else:
+                raise BatchError("archive_delete_invalid_action", "Unknown delete batch action.", 404)
+            self.send_json(result)
+        except BatchError as exc:
+            self.send_json({"error": str(exc), "errorCode": exc.code}, exc.status)
+        except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:
+            self.send_json(exc.public_payload(), exc.http_status)
+        except Exception:
+            self.send_json({"error": "Archive delete state is unavailable.", "errorCode": "archive_delete_invalid_state"}, 503)
+
     def project_session_archive(self, action):
         from code_runtime.project_archive import BatchError
         service = _project_archive_service()
@@ -30485,7 +30650,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             return
         self.send_json(result)
 
-    def delete_archived_session(self, session_id, archive_token):
+    def delete_archived_session(self, session_id, archive_token, *, batch_operation_id=None):
         session_id = safe_session_id(session_id)
         supplied_token = _normalize_session_archive_token(archive_token)
         with _session_lifecycle_lock(session_id):
@@ -30517,6 +30682,8 @@ class CodeHandler(BaseHTTPRequestHandler):
                 session_id,
                 manifest["original"],
             )
+            batch_binding = ({"batchOperationId": batch_operation_id, "archiveToken": supplied_token}
+                             if batch_operation_id else {})
             transaction_id = uuid.uuid4().hex
             try:
                 # Wait outside _agent_run_lock. The rebuild's final merge takes
@@ -30528,23 +30695,29 @@ class CodeHandler(BaseHTTPRequestHandler):
                         "action": "delete",
                         "state": "prepared",
                         "transactionId": transaction_id,
+                        **batch_binding,
                     })
-                    _restore_session_archive_file(
-                        active_session,
-                        bundle / "session.json",
-                        manifest["files"]["session.json"],
-                    )
-                    _restore_session_archive_file(
-                        active_messages,
-                        bundle / "messages.jsonl",
-                        manifest["files"]["messages.jsonl"],
-                    )
+                    if batch_binding:
+                        batch_binding["activeFiles"] = _project_archive_delete_prepare_core(
+                            _read_session_archive_journal(session_id), manifest)
+                    else:
+                        _restore_session_archive_file(
+                            active_session,
+                            bundle / "session.json",
+                            manifest["files"]["session.json"],
+                        )
+                        _restore_session_archive_file(
+                            active_messages,
+                            bundle / "messages.jsonl",
+                            manifest["files"]["messages.jsonl"],
+                        )
                     restored_meta = _read_session_meta_strict(active_session) or {}
                     _write_session_index_from_meta(restored_meta)
                     _write_session_archive_journal(session_id, {
                         "action": "delete",
                         "state": "core_restored",
                         "transactionId": transaction_id,
+                        **batch_binding,
                     })
                     CodeHandler.delete_session(
                         self,
@@ -30558,8 +30731,11 @@ class CodeHandler(BaseHTTPRequestHandler):
                         "action": "delete",
                         "state": "facts_deleted",
                         "transactionId": transaction_id,
+                        **batch_binding,
                     })
+                    _record_project_archive_delete_effect(_read_session_archive_journal(session_id))
                     _remove_owned_archive_tree(bundle)
+                    _record_project_archive_delete_cleanup(_read_session_archive_journal(session_id))
                     _session_archive_journal_path(session_id).unlink(missing_ok=True)
                     self.send_json({"ok": True})
             except SessionDeleteError as exc:

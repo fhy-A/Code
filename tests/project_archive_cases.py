@@ -5,6 +5,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from unittest import mock
 
 import pytest
@@ -60,6 +61,7 @@ def test_original_run_progress_survives_human_confirmation_delay(setup, change):
     run = f.create_active_agent_run(sid)
     preview = s.preview('fixture-project')
     stop = threading.Event()
+    enough_progress = threading.Event()
     writes, failures = [], []
     def output():
         try:
@@ -77,9 +79,12 @@ def test_original_run_progress_survives_human_confirmation_delay(setup, change):
                     with srv.messages_path(sid).open('a', encoding='utf-8') as stream:
                         stream.write(json.dumps({'role':'assistant','content':'isolated streaming output'})+'\n')
                     writes.append(meta['revision'])
+                    if len(writes) >= 30:
+                        enough_progress.set()
         except BaseException as exc:
             failures.append(exc)
     worker = threading.Thread(target=output)
+    confirmation_start = time.monotonic()
     worker.start()
     try:
         time.sleep(1.5)
@@ -90,6 +95,10 @@ def test_original_run_progress_survives_human_confirmation_delay(setup, change):
                 f.attach_session_to_project(sid, 'other-project', f.root)
                 f.attach_session_to_project(sid, 'fixture-project', f.root)
         time.sleep(1.5)  # Real elapsed human confirmation interval, not a mocked clock.
+        # Keep both guarantees without assuming a fixed disk throughput while
+        # other verification work is running. The total wait remains bounded.
+        assert enough_progress.wait(max(0, confirmation_start + 12 - time.monotonic())), failures
+        assert time.monotonic() - confirmation_start >= 3.0
         result = confirm(s, preview)
     finally:
         stop.set(); worker.join(timeout=3)
@@ -233,22 +242,40 @@ def test_real_streaming_agent_round_delayed_confirmation(setup):
 
 def test_http_duplicate_confirm_and_refresh(setup):
     f,s = setup
-    session(f)
+    sid = session(f)
     class Handler(srv.CodeHandler):
         def log_message(self,*args): pass
     host=ThreadingHTTPServer(('127.0.0.1',0), Handler)
     worker=threading.Thread(target=host.serve_forever);worker.start()
     def call(action, body):
-        with urlopen(Request('http://127.0.0.1:'+str(host.server_port)+'/api/project-session-archive/'+action,
-            data=json.dumps(body).encode(), headers={'Content-Type':'application/json'}), timeout=15) as response:
-            return json.load(response)
+        try:
+            with urlopen(Request('http://127.0.0.1:'+str(host.server_port)+'/api/project-session-archive/'+action,
+                data=json.dumps(body).encode(), headers={'Content-Type':'application/json'}), timeout=15) as response:
+                return json.load(response)
+        except HTTPError as exc:
+            payload = json.load(exc)
+            assert exc.code == 503 and payload.get('errorCode') in {'project_archive_busy','session_archive_busy'}, payload
+            return {'busy':True,'errorCode':payload['errorCode']}
     try:
         preview=call('preview',{'projectId':'fixture-project'})
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            results=list(pool.map(lambda _:call('confirm',preview),range(2)))
-        assert all(value['items'][0]['state']=='archived' for value in results)
-        assert call('resume',{'operationId':preview['operationId']})['items'][0]['state']=='archived'
+        with mock.patch.object(srv, '_mutate_session_archive_state', wraps=srv._mutate_session_archive_state) as mutate:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results=list(pool.map(lambda _:call('confirm',preview),range(2)))
+            assert any(not value.get('busy') and value['items'][0]['state']=='archived' for value in results)
+            for value in results:
+                if value.get('busy'):
+                    with urlopen('http://127.0.0.1:'+str(host.server_port)+'/api/project-session-archive?projectId=fixture-project') as response:
+                        history = json.load(response)['data']
+                    original = next(item for item in history if item['operationId'] == preview['operationId'])
+                    assert original['confirmed'] and original['items'][0]['state'] == 'archived'
+                    assert call('confirm',preview)['items'][0]['state'] == 'archived'
+                else:
+                    assert value['items'][0]['state'] == 'archived'
+            assert call('resume',{'operationId':preview['operationId']})['items'][0]['state']=='archived'
+            assert mutate.call_count == 1
+            assert mutate.call_args.args[0] == sid
+            assert len(list((s.store.root/'effects'/preview['operationId']).glob('*.json'))) == 1
     finally:
         host.shutdown();host.server_close();worker.join(timeout=3)
 

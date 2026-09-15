@@ -4203,6 +4203,63 @@ def main() -> int:
     sys.path.insert(0, str(repo_root))
     import server as code_server
 
+    if os.environ.get("CODE_H4_ARCHIVE_DELETE_CLEANUP_FAULTS") == "1":
+        # Opt-in, owned-root-only deterministic filesystem failures for CODE-072.
+        # No product flag or endpoint is added; other H4 generations are unchanged.
+        cleanup_control = root / "code072-cleanup-control.json"
+        cleanup_events = root / "code072-cleanup-events.jsonl"
+        cleanup_event_lock = threading.Lock()
+        original_cleanup_tree = code_server._remove_owned_archive_tree
+        original_cleanup_unlink = Path.unlink
+        original_delete_session = code_server.CodeHandler.delete_session
+
+        def cleanup_fault():
+            if not cleanup_control.exists():
+                return {}
+            value = json.loads(cleanup_control.read_text(encoding="utf-8"))
+            if set(value) != {"sessionId", "kind"} or value["kind"] not in {"bundle", "journal", "off"}:
+                raise AssertionError("Invalid owned H4 cleanup fault")
+            code_server.safe_session_id(value["sessionId"])
+            return value
+
+        def cleanup_event(kind, sid):
+            with cleanup_event_lock, cleanup_events.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"kind": kind, "sessionId": sid}) + "\n")
+
+        def delete_session_with_cleanup_trace(handler, sid, **kwargs):
+            if cleanup_fault().get("sessionId") == sid:
+                cleanup_event("facts_delete", sid)
+            return original_delete_session(handler, sid, **kwargs)
+
+        def remove_archive_with_cleanup_fault(path):
+            fault = cleanup_fault()
+            sid = fault.get("sessionId")
+            if sid and path == code_server._session_archive_bundle_path(sid):
+                if fault["kind"] == "bundle":
+                    cleanup_event("bundle_blocked", sid)
+                    raise PermissionError("H4 owned archive copy cleanup is blocked")
+                result = original_cleanup_tree(path)
+                cleanup_event("bundle_removed", sid)
+                return result
+            return original_cleanup_tree(path)
+
+        def unlink_with_cleanup_fault(path, *args, **kwargs):
+            if path.suffix == ".json" and path.parent.name == ".transactions":
+                fault = cleanup_fault()
+                sid = fault.get("sessionId")
+                if sid and path == code_server._session_archive_journal_path(sid):
+                    if fault["kind"] == "journal":
+                        cleanup_event("journal_blocked", sid)
+                        raise PermissionError("H4 owned archive journal cleanup is blocked")
+                    result = original_cleanup_unlink(path, *args, **kwargs)
+                    cleanup_event("journal_removed", sid)
+                    return result
+            return original_cleanup_unlink(path, *args, **kwargs)
+
+        code_server.CodeHandler.delete_session = delete_session_with_cleanup_trace
+        code_server._remove_owned_archive_tree = remove_archive_with_cleanup_fault
+        Path.unlink = unlink_with_cleanup_fault
+
     class H4FaviconHttpClient:
         """No-network transport under the production candidate/cache/endpoint layers."""
 

@@ -233,6 +233,7 @@
     let archivedProjectFilter = "";
     const archivedSessionPending = new Map();
     const archivedSessionConfirming = new Set();
+    let archiveDeleteDialogOpen = false;
     let updatePanelGeneration = 0;
     let updatePollId = null;
     let updateVersionPollId = null;
@@ -2011,12 +2012,14 @@
       const groups = new Map();
       records.forEach((record) => {
         const key = String(record?.projectId || "").trim() || "__unassigned__";
-        if (!groups.has(key)) groups.set(key, {
+        const scopeKey = JSON.stringify(String(record?.projectId || "").trim());
+        if (!groups.has(scopeKey)) groups.set(scopeKey, {
           key,
+          scope: archiveDeleteScope(record),
           name: archivedSessionProjectName(record),
           records: [],
         });
-        groups.get(key).records.push(record);
+        groups.get(scopeKey).records.push(record);
       });
       return [...groups.values()];
     }
@@ -2068,7 +2071,8 @@
         const filtered = filteredArchivedSessions();
         body = filtered.length
           ? archivedSessionGroups(filtered).map((group) => `<section class="archived-session-group" data-project-id="${escapeHtml(group.key)}">
-            <h4>${escapeHtml(group.name)}</h4>
+            <div class="archived-group-heading"><h4>${escapeHtml(group.name)}</h4>
+              <button class="mini-btn danger archive-group-delete" type="button" data-scope="${escapeHtml(JSON.stringify(group.scope))}">${escapeHtml(t("archiveGroupDelete"))}</button></div>
             <div class="archived-session-list">${group.records.map(archiveRowHtml).join("")}</div>
           </section>`).join("")
           : `<div class="archived-session-state">${escapeHtml(t("archivedSessionSearchNoResults"))}</div>`;
@@ -2080,6 +2084,11 @@
     }
 
     function bindArchivedSessionContent(container) {
+      container.querySelectorAll(".archive-group-delete").forEach((button) => {
+        button.addEventListener("click", () => {
+          void openArchiveGroupDelete(JSON.parse(button.dataset.scope), button);
+        });
+      });
       container.querySelector(".archived-session-retry")?.addEventListener("click", () => {
         void refreshArchivedSessions({ rerender: true, notify: true });
       });
@@ -2123,6 +2132,7 @@
       container.innerHTML = `<div class="settings-section archived-sessions-panel">
         <div class="settings-section-header">
           <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
+          <button class="mini-btn archive-delete-history" type="button">${escapeHtml(t("archiveDeleteHistory"))}</button>
         </div>
         <label class="archived-project-filter-field" for="archivedProjectFilter">
           <span>${escapeHtml(t("archivedProjectFilter"))}</span>
@@ -2142,6 +2152,9 @@
         <div class="archived-sessions-content">${archivedSessionsBodyHtml()}</div>
       </div>`;
       const projectFilter = container.querySelector("#archivedProjectFilter");
+      container.querySelector(".archive-delete-history")?.addEventListener("click", (event) => {
+        void openArchiveGroupDelete(null, event.currentTarget);
+      });
       if (projectFilter) {
         syncArchivedProjectFilter(container);
         projectFilter.addEventListener("change", () => {
@@ -2211,6 +2224,143 @@
         archivedSessionPending.delete(sessionId);
         renderArchivedSessionsPanel();
       }
+    }
+
+    function archiveDeleteScope(record) {
+      const projectId = String(record?.projectId || "").trim();
+      if (!projectId) return { kind: "unassigned" };
+      return { kind: (state.projects || []).some((project) => project.id === projectId) ? "project" : "deleted-project", projectId };
+    }
+
+    function archiveDeleteScopeName(scope) {
+      if (scope.kind === "unassigned") return t("archivedSessionUnknownProject");
+      if (scope.kind === "deleted-project") return t("archivedProjectDeleted", { id: scope.projectId });
+      const project = (state.projects || []).find((item) => item.id === scope.projectId);
+      return `${project?.label || project?.name || scope.projectId} · ${scope.projectId}`;
+    }
+
+    async function openArchiveGroupDelete(group = null, trigger = null) {
+      if (archiveDeleteDialogOpen) return;
+      archiveDeleteDialogOpen = true;
+      const modal = documentRef.createElement("div");
+      modal.className = "settings-modal archive-group-delete-modal";
+      modal.innerHTML = `<div class="modal-card confirm-card project-archive-card" role="alertdialog" aria-modal="true" aria-label="${escapeHtml(t("archiveGroupDeleteTitle"))}">
+        <header><h2>${escapeHtml(t("archiveGroupDeleteTitle"))}</h2><button class="icon-btn delete-batch-close" type="button" aria-label="${escapeHtml(t("close"))}">&times;</button></header>
+        <div class="confirm-body delete-batch-body" aria-live="polite"></div>
+        <footer class="confirm-actions"><button class="ghost-btn delete-batch-cancel" type="button">${escapeHtml(t("cancel"))}</button><button class="ghost-btn delete-batch-read" type="button" hidden>${escapeHtml(t("projectArchiveRead"))}</button><button class="danger-btn delete-batch-submit" type="button" disabled>${escapeHtml(t("archiveGroupDeleteConfirm"))}</button></footer>
+      </div>`;
+      documentRef.body.appendChild(modal);
+      const body = modal.querySelector(".delete-batch-body");
+      const submit = modal.querySelector(".delete-batch-submit");
+      const readButton = modal.querySelector(".delete-batch-read");
+      let current = null, history = [], busy = false, closed = false;
+      const unfinished = (value) => value?.items?.some((item) => ["pending", "deleting", "cleanup_pending"].includes(item.state));
+      const request = (action, value) => apiJson(`/api/project-archive-delete/${action}`, {
+        method: "POST", body: JSON.stringify(Object.fromEntries(Object.entries(value).filter(([key]) =>
+          ["scope", "operationId", "confirmationToken", "action", "retryOf"].includes(key)))),
+      });
+      const setBusy = (value) => {
+        busy = value;
+        modal.setAttribute("aria-busy", String(value));
+        modal.querySelectorAll("button").forEach((button) => { button.disabled = value; });
+        if (!value) submit.disabled = !current || (!current.confirmed && !current.total)
+          || (current.confirmed && !current.retryable && !unfinished(current));
+      };
+      const readHistory = async () => {
+        const response = await apiJson("/api/project-archive-delete");
+        history = (response.data || []).filter((entry) => !group || JSON.stringify(entry.scope) === JSON.stringify(group));
+      };
+      const render = () => {
+        if (closed) return;
+        body.innerHTML = `${current ? `<p class="archive-delete-scope"><strong>${escapeHtml(archiveDeleteScopeName(current.scope))}</strong></p>
+          <p>${escapeHtml(t(current.confirmed ? "archiveGroupDeleteResult" : "archiveGroupDeleteWarning", { count: current.total }))}</p>
+          ${!current.confirmed ? `<p>${escapeHtml(t("archiveGroupDeleteSearchScope"))}</p>` : ""}
+          <ul class="batch-items archive-delete-items">${current.items.map((item) => {
+            const record = archivedSessions.find((entry) => entry.id === item.sessionId);
+            const reason = ({ archive_delete_scope_changed: "archiveDeleteScopeChanged", archive_delete_target_changed: "archiveDeleteTargetChanged",
+              session_archive_token_mismatch: "archiveDeleteTargetChanged", archive_delete_unsettled: "archiveDeleteUncertain",
+              archive_delete_recovery_conflict: "archiveDeleteRecoveryConflict", archive_delete_cleanup_conflict: "archiveDeleteCleanupConflict"
+            })[item.result?.errorCode] || (item.state === "cleanup_pending" ? "archiveDeleteCleanupPending" : "archiveDeleteFailedReason");
+            return `<li data-session-id="${escapeHtml(item.sessionId)}" data-state="${escapeHtml(item.state)}"><span>${escapeHtml(record?.title || item.sessionId)}</span><small>${escapeHtml(t(`archiveDeleteState_${item.state}`))}</small>${item.result?.errorCode ? `<small>${escapeHtml(t(reason))}</small>` : ""}</li>`;
+          }).join("")}</ul>` : `<p>${escapeHtml(t("archiveDeleteHistoryOnly"))}</p>`}
+          <details class="archive-delete-history-list"${current ? "" : " open"}><summary>${escapeHtml(t("archiveDeleteHistory"))}</summary>
+          ${history.length ? history.map((entry, index) => `<button class="ghost-btn archive-delete-history-item" type="button" data-index="${index}">${escapeHtml(archiveDeleteScopeName(entry.scope))}<br>${escapeHtml(entry.operationId)} · ${entry.items.filter((item) => item.state === "deleted").length}/${entry.total}</button>`).join("") : `<p>${escapeHtml(t("archiveDeleteHistoryEmpty"))}</p>`}</details>`;
+        const cleanupOnly = current?.items?.some((item) => item.state === "cleanup_pending")
+          && !current.items.some((item) => ["pending", "deleting"].includes(item.state));
+        submit.textContent = t(!current?.confirmed ? "archiveGroupDeleteConfirm" : unfinished(current)
+          ? (cleanupOnly ? "archiveDeleteResumeCleanup" : "archiveDeleteResume") : "projectArchiveRetry");
+        readButton.hidden = !current?.confirmed;
+        body.querySelectorAll(".archive-delete-history-item").forEach((button) => button.addEventListener("click", async () => {
+          if (busy) return;
+          setBusy(true);
+          if (current && !current.confirmed) await request("cancel", current).catch(() => {});
+          current = history[Number(button.dataset.index)];
+          setBusy(false); render();
+        }));
+        setBusy(busy);
+      };
+      const failure = () => {
+        body.querySelector('[role="alert"]')?.remove();
+        const error = documentRef.createElement("p"); error.setAttribute("role", "alert");
+        error.textContent = t("archiveDeleteRequestFailure"); body.appendChild(error);
+        readButton.hidden = !current?.operationId;
+      };
+      const refresh = async () => {
+        await refreshArchivedSessions({ rerender: true });
+        await onArchivedSessionsChanged({ type: "batch-delete" });
+      };
+      submit.addEventListener("click", async () => {
+        if (busy || !current) return;
+        setBusy(true);
+        try {
+          if (current.confirmed && !unfinished(current)) {
+            current = await request("preview", { scope: current.scope, retryOf: current.operationId });
+          } else {
+            current = await request(current.confirmed ? "resume" : "confirm", current);
+            await readHistory();
+            await refresh().catch(() => showToast(t("archiveDeleteListRefreshFailed"), "warning"));
+          }
+          render();
+        } catch { failure(); }
+        finally { setBusy(false); }
+      });
+      readButton.addEventListener("click", async () => {
+        if (busy || !current) return;
+        setBusy(true);
+        try {
+          await readHistory();
+          const result = history.find((entry) => entry.operationId === current.operationId);
+          if (!result) throw new Error("Delete batch not confirmed or unavailable");
+          current = result;
+          await refresh().catch(() => showToast(t("archiveDeleteListRefreshFailed"), "warning"));
+          render();
+        } catch { failure(); }
+        finally { setBusy(false); }
+      });
+      const close = () => {
+        if (busy || closed) return;
+        closed = true;
+        if (current && !current.confirmed) void request("cancel", current).catch(() => {});
+        modal.remove(); archiveDeleteDialogOpen = false; trigger?.focus?.();
+      };
+      modal.querySelector(".delete-batch-close").addEventListener("click", close);
+      modal.querySelector(".delete-batch-cancel").addEventListener("click", close);
+      modal.addEventListener("click", (event) => { if (event.target === modal) close(); });
+      modal.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+        if (event.key !== "Tab") return;
+        const controls = [...modal.querySelectorAll("button:not(:disabled):not([hidden]), summary")].filter((element) => element.getClientRects().length);
+        const first = controls[0], last = controls.at(-1);
+        if (event.shiftKey && documentRef.activeElement === first) { event.preventDefault(); last?.focus(); }
+        if (!event.shiftKey && documentRef.activeElement === last) { event.preventDefault(); first?.focus(); }
+      });
+      setBusy(true);
+      try {
+        await readHistory();
+        if (group) current = await request("preview", { scope: group });
+        render();
+      } catch { render(); failure(); }
+      finally { setBusy(false); modal.querySelector(".delete-batch-cancel").focus(); }
     }
 
     function confirmArchivedSessionDelete(record, trigger) {

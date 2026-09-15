@@ -238,6 +238,7 @@ async function startIsolatedGeneration(
     disableRoutingV2 = false,
     enableSkillActivation = false,
     enableSkillCompletion = false,
+    enableArchiveDeleteCleanupFaults = false,
   } = {},
 ) {
   const {
@@ -266,7 +267,8 @@ async function startIsolatedGeneration(
           : {}),
         ...(disableRoutingV2 ? { CODE_ROUTING_V2: "0" } : {}),
         ...(enableSkillActivation ? { CODE_SKILL_ACTIVATION_V1: "1" } : {}),
-        ...(enableSkillCompletion ? { CODE_SKILL_COMPLETION_ENFORCEMENT_V1: "1" } : {}),
+          ...(enableSkillCompletion ? { CODE_SKILL_COMPLETION_ENFORCEMENT_V1: "1" } : {}),
+          ...(enableArchiveDeleteCleanupFaults ? { CODE_H4_ARCHIVE_DELETE_CLEANUP_FAULTS: "1" } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

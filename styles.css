@@ -7280,6 +7280,12 @@ body.theme-dark .syn-fn { color: #61afef; }
 .batch-items li { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--border); }
 .batch-items small { opacity: .75; }
 .batch-history-item { display: block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.archived-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.archived-group-heading h4 { min-width: 0; overflow-wrap: anywhere; }
+.archive-delete-history-item { display: block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: start; }
+.archive-group-delete-modal .confirm-actions { gap: 8px; }
+.archive-group-delete-modal .archive-delete-scope { overflow-wrap: anywhere; }
+.archived-sessions-panel .settings-section-header { flex-wrap: wrap; gap: 12px; }
 .archived-sessions-panel { display: grid; gap: 16px; }
 .archived-sessions-panel .settings-section-header h3 { margin: 0 0 6px; }
 .archived-sessions-panel .settings-section-header p {
