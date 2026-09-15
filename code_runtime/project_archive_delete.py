@@ -246,7 +246,7 @@ class DeleteService:
             items.append({'sessionId':item['target']['id'],'state':projected,'result':result,
                           'factsDeleted':bool(fact),'cleanupComplete':complete})
         return {'operationId':value['operationId'],'scope':value['scope'],'action':value['action'],
-                'confirmed':value['confirmedAt'] is not None,'total':len(items),'items':items,
+                'confirmed':value['confirmedAt'] is not None,'total':len(items),'items':items,'retryOf':value['retryOf'],
                 'retryable':any(i['state'] in RETRYABLE for i in items)}
 
     def execute(self, op, group, action, *, token=None, resume=False):

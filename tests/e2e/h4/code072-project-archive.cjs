@@ -43,7 +43,7 @@ async function scenario(browser, host, runtime, width, language, dir) {
     const needle='function openProjectContextMenu(projectId, anchor = {}) {';
     assert(source.includes(needle));
     await route.fulfill({response,body:source.replace(needle,
-      'window.__batchProbe={menu:openProjectContextMenu,settings:settingsFeature,state,setLang,reconcile:reconcileProjectArchiveNavigation};'+needle)});
+      'window.__batchProbe={menu:openProjectContextMenu,settings:settingsFeature,state,setLang,reconcile:reconcileProjectArchiveNavigation,feedback:archiveFeedbackEntries,covered:archiveFeedbackCovered,store:archiveFeedbackStore};'+needle)});
   });
   const page=await context.newPage();page.on('pageerror',e=>errors.push(String(e)));
   const open=async()=>{
@@ -66,28 +66,36 @@ async function scenario(browser, host, runtime, width, language, dir) {
     const before=(await api(host,'/api/sessions')).data.map(v=>v.id).sort();
     await page.locator('.batch-cancel').click();
     assert.deepEqual((await api(host,'/api/sessions')).data.map(v=>v.id).sort(),before);
+    await page.evaluate(()=>{__batchProbe.state.sessions=[];});
     await open();
+    await expect(page.locator('.batch-body')).toContainText(first.title);
+    await expect(page.locator('.batch-body')).toContainText(second.title);
+    const previewText=await page.locator('.batch-body').innerText();
+    for(const id of [project.id,first.id,second.id])assert(!previewText.includes(id));
+    await expect(page.locator('.batch-submit')).toHaveText(language==='zh'?'停止并归档':'Stop and archive');
     await page.screenshot({path:path.join(dir,runtime+'-confirm.png')});
     const bounds=await page.locator('.project-archive-card').evaluate(el=>{const b=el.getBoundingClientRect();return {left:b.left,right:b.right,width:innerWidth,overflow:el.scrollWidth>el.clientWidth+1};});
-    assert(bounds.left>=0&&bounds.right<=bounds.width+1&&!bounds.overflow,JSON.stringify(bounds));
-    // Lose the response after the authority-changing POST actually completes.
-    const lose=async route=>{await route.fetch();await route.abort('failed');};
-    await page.route('**/api/project-session-archive/confirm',lose,{times:1});
-    await page.locator('.batch-submit').click();
-    await expect(page.locator('.batch-body [role="alert"]')).toBeVisible();
-    await expect(page.locator('.batch-submit')).toBeEnabled();
-    await page.evaluate(sid=>{__batchProbe.state.sessionId=sid;},unrelated.id);
-    await page.route('**/api/sessions',async route=>{
-      const response=await route.fetch();await route.fulfill({response,json:{data:[]}});
-    },{times:1});
-    await page.locator('.batch-read').click();
-    await expect(page.locator('.batch-submit')).toBeDisabled();
-    await expect(page.locator('.batch-body [role="alert"]')).toHaveCount(0);
-    assert.equal(await page.evaluate(()=>__batchProbe.state.sessionId),unrelated.id,'An unrelated current Session missing from the list must stay selected');
+    assert(bounds.left>=0&&bounds.right<=bounds.width+1&&!bounds.overflow);
+    let releaseResponse;const held=new Promise(resolve=>{releaseResponse=resolve;});let confirms=0;
+    await page.route('**/api/project-session-archive/confirm',async route=>{confirms++;const response=await route.fetch();await held;await route.fulfill({response});},{times:1});
+    await page.evaluate(sid=>{__batchProbe.state.sessionId=sid;const button=document.querySelector('.batch-submit');button.click();button.click();},unrelated.id);
+    await expect(page.locator('.project-archive-modal')).toHaveCount(0);
+    await expect(page.locator('.archive-feedback-card[data-kind="archive"]')).toBeVisible();
+    await page.evaluate(pid=>__batchProbe.menu(pid,{x:20,y:20}),project.id);
+    await page.locator('[data-action="archive-all"]').click();
+    await expect(page.locator('.project-archive-modal')).toHaveCount(0);
+    await page.evaluate(()=>__batchProbe.settings.openSettingsPage("theme"));
+    releaseResponse();
+    await expect(page.locator('.toast.success')).toContainText(language==='zh'?'已归档 2 个会话':'Archived 2 sessions');
+    await expect(page.locator('.toast.success')).toContainText(language==='zh'?'设置 → 已归档会话':'Settings → Archived sessions');
+    await expect(page.locator('.archive-feedback-card[data-kind="archive"]')).toHaveCount(0);
+    await expect(page.locator(".settings-nav-item.active")).toHaveAttribute("data-panel","theme");
+    await expect(page.locator("#settingsDetail .tp-row").first()).toBeVisible();
+    assert.equal(confirms,1);assert.equal(await page.evaluate(()=>__batchProbe.state.sessionId),unrelated.id);
     const records=(await api(host,'/api/project-session-archive?projectId='+encodeURIComponent(project.id))).data;
     assert.equal(records.length,1);assert(records[0].items.every(i=>i.state==='archived'));
     assert((await api(host,'/api/sessions')).data.some(v=>v.id===unrelated.id));
-    await page.locator('.batch-cancel').click();
+    await page.screenshot({path:path.join(dir,runtime+'-success.png')});
     await page.evaluate(()=>__batchProbe.settings.openSettingsPage('archives'));
     await expect(page.locator('#archivedProjectFilter')).toBeVisible();
     await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(project.id));
@@ -110,17 +118,62 @@ async function scenario(browser, host, runtime, width, language, dir) {
     assert(preserved,'A restored current Session must remain selected');
     // Removing the last row for a selected project resets both select and list.
     await page.locator('#archivedSessionSearchInput').fill('');
+    await expect(page.locator('.archived-group-count')).toHaveText(language==='zh'?'（1）':'(1)');
     await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(other.id));
     await page.locator(`.archived-session-row[data-session-id="${old.id}"] .archived-session-restore`).click();
     await expect(page.locator('#archivedProjectFilter')).toHaveValue('');
     await expect(page.locator(`.archived-session-row[data-session-id="${second.id}"]`)).toBeVisible();
-    await page.reload();await waitForRuntime(page,runtime);
-    await open();await page.locator('.batch-history summary').click();
-    await page.locator('.batch-history-item').first().click();
-    await expect(page.locator('.batch-submit')).toBeDisabled();
-    await page.locator('.batch-cancel').click();
+    await page.reload();await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');
+    await expect(page.locator('.batch-history, .batch-history-item, .archive-delete-history')).toHaveCount(0);
+    // A lost response stays associated with its original operation.
+    await page.route('**/api/project-session-archive/confirm',async route=>{await route.fetch();await route.abort('failed');},{times:1});
+    await open();await page.locator('.batch-submit').click();
+    await expect(page.locator('.project-archive-modal')).toHaveCount(0);
+    const notice=page.locator('.archive-feedback-card[data-kind="archive"]');
+    await expect(notice.locator('.feedback-check')).toBeVisible();
+    await expect(notice).toContainText(language==='zh'?'暂时无法确认':'not confirmed');
+    const unknownText=await notice.innerText();
+    const lost=(await api(host,'/api/project-session-archive?projectId='+project.id)).data[0];
+    assert(!unknownText.includes(lost.operationId));
+    await notice.locator('.feedback-check').click();await expect(notice).toHaveCount(0);
+    // Real partial failure persists after reload; retry needs a new preview.
+    const failed=await make(runtime+' retry this session',project.id), healthy=await make(runtime+' succeeds',project.id);
+    await open();await api(host,`/api/session-archive/${failed.id}/archive`,'POST',{});
+    await page.locator('.batch-submit').click();await expect(notice.locator('.feedback-retry')).toBeVisible();
+    await notice.locator('summary').click();await expect(notice).toContainText(failed.title);
+    await expect(notice).toContainText(language==='zh'?'已完成 1 个':'Completed: 1');
+    await page.reload();await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');
+    await expect(notice.locator('.feedback-retry')).toBeVisible();
+    await notice.locator('summary').click();await expect(notice).toContainText(failed.title);
+    await page.screenshot({path:path.join(dir,runtime+'-partial-reloaded.png')});
+    await api(host,`/api/session-archive/${failed.id}/restore`,'POST',{});
+    const later=await make(runtime+' later excluded from retry',project.id);
+    await notice.locator('.feedback-retry').click();await expect(page.locator('.batch-items li')).toHaveCount(1);
+    await expect(page.locator('.batch-body')).toContainText(failed.title);
+    await page.locator('.batch-cancel').click();await expect(notice.locator('.feedback-retry')).toBeVisible();
+    await notice.locator('.feedback-retry').click();await page.locator('.batch-submit').click();
+    await expect(notice).toHaveCount(0);assert((await api(host,'/api/sessions')).data.some(v=>v.id===later.id));
+    await page.reload();await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');await expect(notice).toHaveCount(0);
+    // If confirmation never reached the server, Continue reuses the same preview/token.
+    let lostBeforeSend;
+    await page.route('**/api/project-session-archive/confirm',async route=>{lostBeforeSend=route.request().postDataJSON();await route.abort('failed');},{times:1});
+    await open();await page.locator('.batch-submit').click();await expect(notice.locator('.feedback-continue')).toBeVisible();
+    let continued;
+    await page.route('**/api/project-session-archive/confirm',async route=>{continued=route.request().postDataJSON();await route.continue();},{times:1});
+    await notice.locator('.feedback-continue').click();await expect(notice).toHaveCount(0);
+    assert.equal(continued.operationId,lostBeforeSend.operationId);assert.equal(continued.confirmationToken,lostBeforeSend.confirmationToken);
+    // Association alone is never success: previews, failed or unknown child results do not hide a parent item.
+    const association=await page.evaluate(()=>{
+      const old=__batchProbe.store('archive',{operationId:'ui-parent',projectId:'ui-fixture',confirmed:true,total:2,items:[{sessionId:'a',state:'archive_failed'},{sessionId:'b',state:'uncertain'}]});
+      const child=__batchProbe.store('archive',{operationId:'ui-child',projectId:'ui-fixture',retryOf:'ui-parent',confirmed:false,total:1,items:[{sessionId:'a',state:'pending'}]});
+      const preview=[...__batchProbe.covered(old)];child.value.confirmed=true;child.value.items[0].state='archive_failed';
+      const failure=[...__batchProbe.covered(old)];child.unknown=true;child.value.items[0].state='archived';const unknown=[...__batchProbe.covered(old)];
+      child.unknown=false;child.value.items[0].state='archived';const success=[...__batchProbe.covered(old)];
+      __batchProbe.feedback.delete('archive:ui-parent');__batchProbe.feedback.delete('archive:ui-child');return {preview,failure,unknown,success};
+    });
+    assert.deepEqual(association,{preview:[],failure:[],unknown:[],success:['a']});
     assert.deepEqual(errors,[]);
-    return {runtime,width,language,cancel:true,lostResponseRead:true,fixedProject:true,searchAndIdFilter:true,singleRestore:true,reloadHistory:true,coldFilter:true,deletedAndUnassigned:true,missingOptionReset:true,unrelatedAndRestoredNavigation:true,bounds};
+    return {runtime,width,language,cancel:true,lostResponseRead:true,fixedProject:true,searchAndIdFilter:true,singleRestore:true,unfinishedReload:true,noCompletedHistory:true,successCloses:true,fullPreviewTitles:true,partialFailureRetry:true,retryAssociation:true,duplicateClickProtected:true,backgroundCompletionPreservesPanel:true,coldFilter:true,deletedAndUnassigned:true,missingOptionReset:true,unrelatedAndRestoredNavigation:true,bounds};
   } catch(error) {
     await page.screenshot({path:path.join(dir,runtime+'-failed.png')}).catch(()=>{});
     await fs.writeFile(path.join(dir,runtime+'-failure.json'),JSON.stringify({error:String(error.stack),errors,audit},null,2));

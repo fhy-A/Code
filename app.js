@@ -589,6 +589,7 @@ const { t, setLang, applyI18n } = createI18nRuntime({
       state.modelCatalogStatusKey, state.modelCatalogSource,
     );
     onboardingTasksFeature?.refreshLanguage();
+    renderArchiveFeedback();
     if (typeof renderImportList === "function" && document.getElementById("importModal")?.style.display !== "none") {
       renderImportList();
       if (typeof renderImportBatchState === "function") renderImportBatchState();
@@ -1801,6 +1802,7 @@ const settingsFeature = createSettingsFeature({
   t,
   escapeHtml,
   apiJson,
+  archiveFeedback: { ensureReady: ensureArchiveFeedbackReady, find: archiveFeedbackFind, focus: focusArchiveFeedback, submit: submitArchiveFeedback },
   onUpdatePause: (paused) => { state._updateStopping = paused; },
   prepareUpdate: prepareCurrentPageForUpdate,
   showToast,
@@ -6729,161 +6731,277 @@ function resolveProjectContextMenuPosition(anchor = {}, menuSize = {}, viewport 
 }
 
 const projectArchivePending = new Set();
+const archiveFeedbackEntries = new Map();
+const archiveFeedbackLoaded = new Set();
+const archiveFeedbackLoading = new Map();
+const archiveFeedbackErrors = new Set();
+
+function archiveFeedbackEndpoint(kind) {
+  return kind === "archive" ? "/api/project-session-archive" : "/api/project-archive-delete";
+}
+
+function archiveFeedbackRequest(kind, action, payload) {
+  return apiJson(`${archiveFeedbackEndpoint(kind)}/${action}`, {
+    method: "POST", body: JSON.stringify(Object.fromEntries(Object.entries(payload).filter(([key]) =>
+      ["projectId", "scope", "retryOf", "operationId", "confirmationToken", "action"].includes(key)))),
+  });
+}
+
+function archiveFeedbackComplete(kind, item) {
+  return item.state === (kind === "archive" ? "archived" : "deleted");
+}
+
+function archiveFeedbackUnfinished(kind, item) {
+  return (kind === "archive" ? ["pending", "stopping", "stopped", "archiving"] : ["pending", "deleting", "cleanup_pending"]).includes(item.state);
+}
+
+function archiveFeedbackProjectName(kind, value) {
+  const projectId = kind === "archive" ? value.projectId : value.scope?.projectId;
+  if (kind === "delete" && value.scope?.kind === "unassigned") return t("archivedSessionUnknownProject");
+  const project = state.projects.find((entry) => entry.id === projectId);
+  return value.projectName || project?.label || project?.name || t("archiveFeedbackFormerProject");
+}
+
+function archiveFeedbackStore(kind, value, options = {}) {
+  const key = `${kind}:${value.operationId}`;
+  const entry = archiveFeedbackEntries.get(key) || { kind, titles: new Map(), busy: false, unknown: false, expanded: false };
+  for (const item of value.items) {
+    if (item.titleAvailable !== false && item.title) entry.titles.set(item.sessionId, item.title);
+  }
+  entry.value = { ...value, retryOf: value.retryOf ?? entry.value?.retryOf ?? null };
+  Object.assign(entry, options);
+  archiveFeedbackEntries.set(key, entry);
+  return entry;
+}
+
+function archiveFeedbackCovered(entry) {
+  const covered = new Set();
+  for (const child of archiveFeedbackEntries.values()) {
+    if (child.kind !== entry.kind || !child.value.confirmed || child.unknown) continue;
+    let ancestor = child.value.retryOf;
+    const visited = new Set();
+    while (ancestor && !visited.has(ancestor)) {
+      if (ancestor === entry.value.operationId) {
+        child.value.items.filter((item) => archiveFeedbackComplete(child.kind, item)).forEach((item) => covered.add(item.sessionId));
+        break;
+      }
+      visited.add(ancestor);
+      ancestor = archiveFeedbackEntries.get(`${entry.kind}:${ancestor}`)?.value.retryOf;
+    }
+  }
+  return covered;
+}
+
+function archiveFeedbackIssues(entry) {
+  const covered = archiveFeedbackCovered(entry);
+  return entry.value.items.filter((item) => !archiveFeedbackComplete(entry.kind, item) && !covered.has(item.sessionId));
+}
+
+function archiveFeedbackFind(kind, scope) {
+  return [...archiveFeedbackEntries.values()].find((entry) => entry.kind === kind
+    && (kind === "archive" ? entry.value.projectId === scope : JSON.stringify(entry.value.scope) === JSON.stringify(scope))
+    && (entry.busy || entry.unknown || archiveFeedbackIssues(entry).length));
+}
+
+function archiveFeedbackReason(entry, item) {
+  if (entry.kind === "delete") {
+    if (item.state === "cleanup_pending") return t(item.result?.errorCode === "archive_delete_cleanup_conflict" ? "archiveDeleteCleanupConflict" : "archiveDeleteCleanupPending");
+    return t(({ archive_delete_scope_changed: "archiveDeleteScopeChanged", archive_delete_target_changed: "archiveDeleteTargetChanged",
+      session_archive_token_mismatch: "archiveDeleteTargetChanged", archive_delete_unsettled: "archiveDeleteUncertain",
+      archive_delete_recovery_conflict: "archiveDeleteRecoveryConflict" })[item.result?.errorCode] || "archiveDeleteFailedReason");
+  }
+  return t(({ project_archive_project_conflict: "projectArchiveProjectChanged", project_archive_target_conflict: "projectArchiveWorkChanged",
+    session_archive_busy: "sessionArchiveRetryableFailure", session_archive_index_unavailable: "sessionArchiveIndexUnavailable",
+    session_archive_recovery_failed: "sessionArchiveRecoveryUnavailable", session_archive_stop_failed: "sessionArchiveStopFailed",
+    project_archive_stop_uncertain: "projectArchiveState_uncertain" })[item.result?.errorCode]
+    || (item.state === "stopped_archive_failed" ? "sessionArchiveAfterStopFailed" : "sessionArchiveRetryableFailure"));
+}
+
+function renderArchiveFeedback() {
+  let rail = document.querySelector(".archive-feedback");
+  if (!rail) {
+    rail = document.createElement("aside"); rail.className = "archive-feedback";
+    rail.setAttribute("aria-label", t("archiveFeedbackLabel")); document.body.appendChild(rail);
+  }
+  rail.setAttribute("aria-label", t("archiveFeedbackLabel"));
+  rail.innerHTML = "";
+  for (const kind of archiveFeedbackErrors) {
+    const card = document.createElement("section"); card.className = "archive-feedback-card is-warning";
+    card.innerHTML = `<p role="alert">${escapeHtml(t("archiveFeedbackLoadFailed"))}</p><button type="button" class="mini-btn">${escapeHtml(t("archiveFeedbackCheck"))}</button>`;
+    card.querySelector("button").addEventListener("click", () => void recoverArchiveFeedback(kind));
+    rail.appendChild(card);
+  }
+  for (const entry of archiveFeedbackEntries.values()) {
+    const { kind, value } = entry;
+    const issues = archiveFeedbackIssues(entry);
+    if (!entry.busy && !entry.unknown && !issues.length) continue;
+    const card = document.createElement("section");
+    card.className = `archive-feedback-card${entry.busy ? "" : " is-warning"}`;
+    card.dataset.kind = kind; card.dataset.operationId = value.operationId; card.tabIndex = -1;
+    const done = value.items.filter((item) => archiveFeedbackComplete(kind, item)).length;
+    const allPending = issues.every((item) => archiveFeedbackUnfinished(kind, item));
+    const summaryKey = entry.busy ? (kind === "archive" ? "archiveFeedbackArchiving" : "archiveFeedbackDeleting")
+      : entry.unknown ? "archiveFeedbackUnknown" : allPending && !done ? "archiveFeedbackPending" : "archiveFeedbackPartial";
+    card.innerHTML = `<strong>${escapeHtml(archiveFeedbackProjectName(kind, value))} · ${escapeHtml(t(kind === "archive" ? "archiveFeedbackArchive" : "archiveFeedbackDelete"))}</strong>
+      <p role="${entry.busy ? "status" : "alert"}">${escapeHtml(t(summaryKey, { total: value.total, done, remaining: issues.length }))}</p>
+      ${!entry.busy && !entry.unknown && issues.length ? `<details${entry.expanded ? " open" : ""}><summary>${escapeHtml(t("archiveFeedbackViewIssues", { count: issues.length }))}</summary>
+        <ul>${issues.map((item) => `<li data-session-id="${escapeHtml(item.sessionId)}" data-state="${escapeHtml(item.state)}"><span>${escapeHtml(entry.titles.get(item.sessionId) || (item.titleAvailable ? t("untitledSession") : t("archiveFeedbackSessionUnavailable")))}</span><small>${escapeHtml(t(`${kind === "archive" ? "projectArchiveState" : "archiveDeleteState"}_${item.state}`))}</small>${item.result?.errorCode ? `<small>${escapeHtml(archiveFeedbackReason(entry, item))}</small>` : ""}</li>`).join("")}</ul></details>` : ""}
+      ${!entry.busy ? `<div class="archive-feedback-actions"><button type="button" class="mini-btn feedback-check">${escapeHtml(t("archiveFeedbackCheck"))}</button>
+        ${entry.unknown || issues.some((item) => archiveFeedbackUnfinished(kind, item)) ? `<button type="button" class="mini-btn feedback-continue">${escapeHtml(t(kind === "delete" && issues.some((item) => item.state === "cleanup_pending") ? "archiveDeleteResumeCleanup" : "archiveFeedbackContinue"))}</button>` : ""}
+        ${!entry.unknown && !issues.some((item) => archiveFeedbackUnfinished(kind, item)) && value.retryable ? `<button type="button" class="mini-btn feedback-retry">${escapeHtml(t("archiveFeedbackRetry"))}</button>` : ""}</div>` : ""}`;
+    card.querySelector("details")?.addEventListener("toggle", (event) => { entry.expanded = event.currentTarget.open; });
+    card.querySelector(".feedback-check")?.addEventListener("click", () => void checkArchiveFeedback(entry));
+    card.querySelector(".feedback-continue")?.addEventListener("click", () => void checkArchiveFeedback(entry, true));
+    card.querySelector(".feedback-retry")?.addEventListener("click", () => {
+      if (entry.busy) return;
+      if (kind === "archive") void openProjectArchive(value.projectId, value.operationId);
+      else void settingsFeature.openArchiveGroupDelete(value.scope, null, value.operationId);
+    });
+    rail.appendChild(card);
+  }
+  rail.hidden = !rail.children.length;
+}
+
+function focusArchiveFeedback(entry) {
+  entry.expanded = true; renderArchiveFeedback();
+  [...document.querySelectorAll(".archive-feedback-card")].find((card) => card.dataset.operationId === entry.value.operationId)?.focus();
+}
+
+async function recoverArchiveFeedback(kind) {
+  if (archiveFeedbackLoading.has(kind)) return archiveFeedbackLoading.get(kind);
+  const promise = (async () => {
+    try {
+      const records = (await apiJson(archiveFeedbackEndpoint(kind) + (kind === "archive" ? "?allProjects=1" : ""))).data;
+      if (!Array.isArray(records)) throw new Error("Archive result list unavailable");
+      for (const value of records) {
+        if (!archiveFeedbackEntries.get(`${kind}:${value.operationId}`)?.busy) archiveFeedbackStore(kind, value, { unknown: false });
+      }
+      archiveFeedbackLoaded.add(kind); archiveFeedbackErrors.delete(kind);
+      return records;
+    } catch {
+      archiveFeedbackErrors.add(kind); return null;
+    } finally { archiveFeedbackLoading.delete(kind); renderArchiveFeedback(); }
+  })();
+  archiveFeedbackLoading.set(kind, promise);
+  return promise;
+}
+
+async function ensureArchiveFeedbackReady(kind) {
+  if (!archiveFeedbackLoaded.has(kind) || archiveFeedbackErrors.has(kind)) await recoverArchiveFeedback(kind);
+  return archiveFeedbackLoaded.has(kind) && !archiveFeedbackErrors.has(kind);
+}
 
 async function reconcileProjectArchiveNavigation(batch, projectId) {
   const sessionId = state.sessionId;
   const navigation = state._foregroundNavigationSeq;
   if (!sessionId || !batch?.items?.some((item) => item.sessionId === sessionId && item.state === "archived")) return false;
-  try {
-    await getSessionRecord(sessionId);
-  } catch (error) {
-    if (error?.data?.errorCode === "session_archived" && state.sessionId === sessionId
-        && state._foregroundNavigationSeq === navigation) {
-      beginNewConversation(projectId);
-      return true;
+  try { await getSessionRecord(sessionId); }
+  catch (error) {
+    if (error?.data?.errorCode === "session_archived" && state.sessionId === sessionId && state._foregroundNavigationSeq === navigation) {
+      beginNewConversation(projectId); return true;
     }
   }
   return false;
 }
 
-async function openProjectArchive(projectId) {
+async function applyArchiveFeedbackResult(entry, result) {
+  archiveFeedbackStore(entry.kind, result, { unknown: false });
+  const complete = result.items.every((item) => archiveFeedbackComplete(entry.kind, item));
+  // Reconcile navigation from this exact result even when list refresh fails.
+  if (entry.kind === "archive") await reconcileProjectArchiveNavigation(result, result.projectId);
+  if (complete) showToast(t(entry.kind === "archive" ? "archiveFeedbackArchiveSuccess" : "archiveFeedbackDeleteSuccess", { count: result.total }), "success", { duration: 6000 });
+  try {
+    await refreshSessions();
+    if (state.branchPanelOpen) renderBranchTree();
+    const archivePanelVisible = document.querySelector('.settings-nav-item.active')?.dataset.panel === "archives";
+    await settingsFeature?.refreshArchivedSessions?.({ rerender: archivePanelVisible });
+  } catch { showToast(t("archiveFeedbackRefreshFailed"), "warning"); }
+}
+
+async function submitArchiveFeedback(kind, value) {
+  const existing = archiveFeedbackEntries.get(`${kind}:${value.operationId}`);
+  if (existing?.busy) return;
+  const entry = archiveFeedbackStore(kind, value, { busy: true, unknown: false });
+  renderArchiveFeedback();
+  try { await applyArchiveFeedbackResult(entry, await archiveFeedbackRequest(kind, "confirm", value)); }
+  catch { entry.unknown = true; }
+  finally { entry.busy = false; renderArchiveFeedback(); }
+}
+
+async function checkArchiveFeedback(entry, continueWork = false) {
+  if (entry.busy) return;
+  entry.busy = true; renderArchiveFeedback();
+  try {
+    const records = (await apiJson(archiveFeedbackEndpoint(entry.kind) + (entry.kind === "archive" ? "?allProjects=1" : ""))).data || [];
+    for (const value of records) {
+      if (value.operationId !== entry.value.operationId && !archiveFeedbackEntries.get(`${entry.kind}:${value.operationId}`)?.busy) {
+        archiveFeedbackStore(entry.kind, value, { unknown: false });
+      }
+    }
+    const current = records.find((value) => value.operationId === entry.value.operationId);
+    if (!current) {
+      if (!continueWork || !entry.value.confirmationToken) throw new Error("Original confirmation is unavailable");
+      await applyArchiveFeedbackResult(entry, await archiveFeedbackRequest(entry.kind, "confirm", entry.value));
+    } else {
+      let result = current;
+      if (continueWork && current.items.some((item) => archiveFeedbackUnfinished(entry.kind, item))) {
+        result = await archiveFeedbackRequest(entry.kind, "resume", current);
+      }
+      await applyArchiveFeedbackResult(entry, result);
+    }
+  } catch { entry.unknown = true; }
+  finally { entry.busy = false; renderArchiveFeedback(); }
+}
+
+async function openProjectArchive(projectId, retryOf = null) {
   if (projectArchivePending.has(projectId)) return;
   projectArchivePending.add(projectId);
+  if (!await ensureArchiveFeedbackReady("archive")) { projectArchivePending.delete(projectId); return; }
+  const pending = archiveFeedbackFind("archive", projectId);
+  if (pending && !retryOf) { projectArchivePending.delete(projectId); focusArchiveFeedback(pending); return; }
   const previousFocus = document.activeElement;
-  const modal = document.createElement("div");
-  modal.className = "settings-modal project-archive-modal";
+  const modal = document.createElement("div"); modal.className = "settings-modal project-archive-modal";
   modal.innerHTML = `<div class="modal-card confirm-card project-archive-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(t("projectArchiveTitle"))}">
     <header><h2>${escapeHtml(t("projectArchiveTitle"))}</h2><button type="button" class="icon-btn batch-close" aria-label="${escapeHtml(t("close"))}">&times;</button></header>
-    <div class="confirm-body batch-body" aria-live="polite"></div>
-    <footer class="confirm-actions"><button type="button" class="ghost-btn batch-cancel">${escapeHtml(t("cancel"))}</button><button type="button" class="ghost-btn batch-read" hidden>${escapeHtml(t("projectArchiveRead"))}</button><button type="button" class="danger-btn batch-submit" disabled>${escapeHtml(t("projectArchiveConfirm"))}</button></footer>
-  </div>`;
+    <div class="confirm-body batch-body" aria-live="polite"><p>${escapeHtml(t("archiveFeedbackLoadingPreview"))}</p></div>
+    <footer class="confirm-actions"><button type="button" class="ghost-btn batch-cancel">${escapeHtml(t("cancel"))}</button><button type="button" class="danger-btn batch-submit" disabled>${escapeHtml(t("projectArchiveConfirm"))}</button></footer></div>`;
   document.body.appendChild(modal);
-  const body = modal.querySelector(".batch-body");
-  const submit = modal.querySelector(".batch-submit");
-  const readButton = modal.querySelector(".batch-read");
-  let current = null;
-  let busy = false;
-  let closed = false;
-  let history = [];
-  const request = (action, payload) => apiJson(`/api/project-session-archive/${action}`, {
-    method: "POST", body: JSON.stringify(Object.fromEntries(Object.entries(payload).filter(([key]) =>
-      ["projectId", "retryOf", "operationId", "confirmationToken", "action"].includes(key)))),
-  });
-  const setBusy = (value) => {
-    busy = value;
-    modal.setAttribute("aria-busy", String(value));
-    modal.querySelectorAll("button").forEach((button) => { button.disabled = value; });
-    if (!value) submit.disabled = !current || (!current.confirmed && !current.total)
-      || (current.confirmed && !current.retryable && !current.items.some((item) => ["pending", "stopping", "stopped", "archiving"].includes(item.state)));
-  };
-  const close = () => {
-    if (busy || closed) return;
-    closed = true;
-    if (current && !current.confirmed) void request("cancel", current).catch(() => {});
-    modal.remove();
-    projectArchivePending.delete(projectId);
-    previousFocus?.focus?.();
-  };
-  const render = () => {
+  let current = null, closed = false;
+  const close = (submitted = false) => {
     if (closed) return;
-    const record = current;
-    const project = state.projects.find((entry) => entry.id === projectId);
-    body.innerHTML = `<p class="batch-project-identity"><strong>${escapeHtml(project?.label || project?.name || projectId)}</strong><br>${escapeHtml(projectId)}</p>${record ? `<p>${escapeHtml(t("projectArchivePreview", record))}</p>
-      ${!record.total ? `<p>${escapeHtml(t("projectArchiveEmpty"))}</p>` : ""}
-      ${!record.confirmed && record.active ? `<p>${escapeHtml(t("projectArchiveStopNotice"))}</p>` : ""}
-      <ul class="batch-items">${record.items.map((item) => {
-        const session = state.sessions.find((entry) => entry.id === item.sessionId);
-        const reasonKey = ({
-          project_archive_project_conflict: "projectArchiveProjectChanged",
-          project_archive_target_conflict: "projectArchiveWorkChanged",
-          session_archive_busy: "sessionArchiveRetryableFailure",
-          session_archive_index_unavailable: "sessionArchiveIndexUnavailable",
-          session_archive_recovery_failed: "sessionArchiveRecoveryUnavailable",
-          session_archive_stop_failed: "sessionArchiveStopFailed",
-          project_archive_stop_uncertain: "projectArchiveState_uncertain",
-        })[item.result?.errorCode] || (item.state === "stopped_archive_failed" ? "sessionArchiveAfterStopFailed" : "sessionArchiveRetryableFailure");
-        return `<li><span>${escapeHtml(session?.title || item.sessionId)}</span><small>${escapeHtml(t(`projectArchiveState_${item.state}`))}${!record.confirmed && item.active ? ` · ${escapeHtml(t("sessionStopArchiveAction"))}` : ""}</small>${item.result?.errorCode ? `<small>${escapeHtml(t(reasonKey))}</small>` : ""}</li>`;
-      }).join("")}</ul>` : ""}
-      ${history.length ? `<details class="batch-history"><summary>${escapeHtml(t("projectArchiveHistory"))}</summary>${history.map((entry, index) => `<button type="button" class="ghost-btn batch-history-item" data-index="${index}">${escapeHtml(entry.operationId)} · ${entry.items.filter((item) => item.state === "archived").length}/${entry.total}</button>`).join("")}</details>` : ""}`;
-    submit.textContent = t(!record?.confirmed ? (record?.active ? "sessionStopArchiveAction" : "projectArchiveConfirm")
-      : record.items.some((item) => ["pending", "stopping", "stopped", "archiving"].includes(item.state)) ? "projectArchiveResume" : "projectArchiveRetry");
-    body.querySelectorAll(".batch-history-item").forEach((button) => button.addEventListener("click", async () => {
-      if (busy) return;
-      setBusy(true);
-      if (current && !current.confirmed) await request("cancel", current).catch(() => {});
-      current = history[Number(button.dataset.index)];
-      setBusy(false);
-      render();
-    }));
-    readButton.hidden = !record?.confirmed;
-    setBusy(busy);
+    closed = true;
+    if (current && !submitted) void archiveFeedbackRequest("archive", "cancel", current).catch(() => {});
+    modal.remove(); projectArchivePending.delete(projectId); previousFocus?.focus?.();
   };
-  const failure = () => {
-    const error = document.createElement("p");
-    error.setAttribute("role", "alert");
-    error.textContent = t("projectArchiveFailure");
-    body.appendChild(error);
-    readButton.hidden = !current?.operationId;
-  };
-  const refresh = async () => {
-    await refreshSessions();
-    await reconcileProjectArchiveNavigation(current, projectId);
-    if (state.branchPanelOpen) renderBranchTree();
-    await settingsFeature?.refreshArchivedSessions?.({ rerender: true });
-  };
-  readButton.addEventListener("click", async () => {
-    if (busy || !current) return;
-    setBusy(true);
-    try {
-      history = (await apiJson(`/api/project-session-archive?projectId=${encodeURIComponent(projectId)}`)).data || [];
-      const result = history.find((entry) => entry.operationId === current.operationId);
-      if (!result) throw new Error("Batch not confirmed or unavailable");
-      current = result;
-      await refresh().catch(() => showToast(t("sessionArchiveRefreshFailed"), "warning"));
-      render();
-    } catch { failure(); }
-    finally { setBusy(false); }
-  });
-  submit.addEventListener("click", async () => {
-    if (busy || !current) return;
-    setBusy(true);
-    try {
-      if (current.confirmed && !current.items.some((item) => ["pending", "stopping", "stopped", "archiving"].includes(item.state))) {
-        current = await request("preview", { projectId, retryOf: current.operationId });
-      } else {
-        current = await request(current.confirmed ? "resume" : "confirm", current);
-        history = (await apiJson(`/api/project-session-archive?projectId=${encodeURIComponent(projectId)}`)).data || [];
-        await refresh().catch(() => showToast(t("sessionArchiveRefreshFailed"), "warning"));
-      }
-      render();
-    } catch {
-      failure();
-    } finally {
-      setBusy(false);
-    }
-  });
-  modal.querySelector(".batch-close").addEventListener("click", close);
-  modal.querySelector(".batch-cancel").addEventListener("click", close);
+  modal.querySelector(".batch-close").addEventListener("click", () => close());
+  modal.querySelector(".batch-cancel").addEventListener("click", () => close());
   modal.addEventListener("click", (event) => { if (event.target === modal) close(); });
   modal.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
     if (event.key !== "Tab") return;
-    const controls = [...modal.querySelectorAll("button:not(:disabled):not([hidden]), summary")].filter((element) => element.getClientRects().length);
-    const first = controls[0], last = controls.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-    if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    const controls = [...modal.querySelectorAll("button:not(:disabled)")];
+    if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); }
+    if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); }
   });
-  setBusy(true);
+  modal.querySelector(".batch-submit").addEventListener("click", () => {
+    if (!current || closed) return;
+    close(true); void submitArchiveFeedback("archive", current);
+  });
+  modal.querySelector(".batch-cancel").focus();
   try {
-    history = (await apiJson(`/api/project-session-archive?projectId=${encodeURIComponent(projectId)}`)).data || [];
-    current = await request("preview", { projectId });
-    render();
+    current = await archiveFeedbackRequest("archive", "preview", { projectId, ...(retryOf ? { retryOf } : {}) });
+    if (closed) { void archiveFeedbackRequest("archive", "cancel", current).catch(() => {}); return; }
+    if (!current.total) { showToast(t("projectArchiveEmpty"), "warning"); close(); return; }
+    const namesUnavailable = current.items.some((item) => !item.titleAvailable);
+    modal.querySelector(".batch-body").innerHTML = `<p class="batch-project-identity"><strong>${escapeHtml(archiveFeedbackProjectName("archive", current))}</strong></p>
+      <p>${escapeHtml(t("projectArchivePreview", current))}</p>${current.active ? `<p>${escapeHtml(t("projectArchiveStopNotice", current))}</p>` : ""}
+      ${!current.total ? `<p>${escapeHtml(t("projectArchiveEmpty"))}</p>` : ""}
+      <ul class="batch-items">${current.items.map((item) => `<li><span>${escapeHtml(item.title || t(item.titleAvailable ? "untitledSession" : "archiveFeedbackSessionUnavailable"))}</span>${item.active ? `<small>${escapeHtml(t("sessionStopArchiveAction"))}</small>` : ""}</li>`).join("")}</ul>
+      ${namesUnavailable ? `<p role="alert">${escapeHtml(t("archiveFeedbackPreviewChanged"))}</p>` : ""}`;
+    const submit = modal.querySelector(".batch-submit"); submit.disabled = !current.total || namesUnavailable;
+    submit.textContent = t(current.active ? "sessionStopArchiveAction" : "projectArchiveConfirm");
   } catch {
-    render();
-    failure();
-  } finally {
-    setBusy(false);
-    modal.querySelector(".batch-cancel").focus();
+    if (!closed) modal.querySelector(".batch-body").innerHTML = `<p role="alert">${escapeHtml(t("archiveFeedbackPreviewFailed"))}</p>`;
   }
 }
 
@@ -18964,6 +19082,8 @@ async function init() {
   await refreshSessions();
   sessionStatusTicker.start();
   await loadProjectContext();
+  void recoverArchiveFeedback("archive");
+  void recoverArchiveFeedback("delete");
   setTimeout(preloadImportSessions, 3000);  // background: preload Codex + Claude Code session lists
 
   // Foreground restoration is independent from persisted task recovery.

@@ -375,3 +375,39 @@ def test_corrupt_generation_blocks_single_delete_before_core_changes(setup):
     with pytest.raises(srv.SessionDeleteError):
         srv.CodeHandler.delete_session(f.make_handler(),sid)
     assert before==(srv.session_path(sid).read_bytes(),srv.messages_path(sid).read_bytes())
+
+
+def test_display_metadata_and_explicit_all_projects_read_are_compatible(setup):
+    f,s = setup
+    sid = session(f,title='Full title outside the loaded sidebar')
+    preview = s.preview('fixture-project')
+    public = s.describe(preview)
+    assert public['items'][0]['title'] == 'Full title outside the loaded sidebar'
+    assert public['items'][0]['titleAvailable'] and public['projectName'] == 'Fixture'
+    assert public['retryOf'] is None
+    stored = s.store.confirm(preview['operationId'],preview['confirmationToken'],preview['action'])
+    operation_path = s.store.path(preview['operationId'])
+    before = operation_path.read_bytes()
+    def read(query):
+        handler = object.__new__(srv.CodeHandler)
+        handler.path = '/api/project-session-archive'+query
+        handler.send_json = mock.Mock()
+        srv.CodeHandler.project_session_archive(handler,'list')
+        return handler.send_json.call_args.args
+    assert read('')[0]['data'] == []
+    assert read('?projectId=unknown')[0]['data'] == []
+    assert len(read('?projectId=fixture-project')[0]['data']) == 1
+    srv._write_projects([])
+    records = read('?allProjects=1')[0]['data']
+    assert records[0]['operationId'] == preview['operationId'] and records[0]['items'][0]['state'] == 'pending'
+    assert records[0]['projectName'] == ''
+    assert read('?allProjects=1&projectId=fixture-project')[1] == 400
+    assert read('?allProjects=1&projectId=')[1] == 400
+    assert read('?projectId=')[0]['data'] == []
+    assert read('?allProjects=0')[1] == 400
+    srv.session_path(sid).unlink()
+    missing = read('?allProjects=1')[0]['data'][0]['items'][0]
+    assert missing['title'] == '' and not missing['titleAvailable']
+    assert set(missing) == {'sessionId','active','state','result','title','titleAvailable'}
+    assert operation_path.read_bytes() == before
+    assert not any(key in json.dumps(stored) for key in ('titleAvailable','projectName','Full title'))

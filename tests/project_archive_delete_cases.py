@@ -144,6 +144,7 @@ def test_partial_failure_retry_uses_only_old_failed_ids(setup):
     assert [i['state'] for i in result['items']]==['deleted','failed'],result
     later=make(f)
     retry=s.preview(GROUP,preview['operationId'])
+    assert retry['retryOf'] == preview['operationId']
     assert [i['sessionId'] for i in retry['items']]==[ids[1]]
     assert state(confirm(s,retry),ids[1])=='deleted'
     assert srv._session_archive_bundle_path(later).exists()

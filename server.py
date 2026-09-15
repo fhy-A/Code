@@ -30549,9 +30549,13 @@ class CodeHandler(BaseHTTPRequestHandler):
         service = _project_archive_service()
         try:
             if action == "list":
-                query = parse.parse_qs(parse.urlparse(self.path).query)
+                query = parse.parse_qs(parse.urlparse(self.path).query, keep_blank_values=True)
                 project_id = (query.get("projectId") or [""])[0]
-                self.send_json({"data": [service.public(v) for v in service.store.list(project_id)]})
+                if "allProjects" in query:
+                    if query["allProjects"] != ["1"] or "projectId" in query:
+                        raise BatchError("project_archive_invalid_query", "Use one explicit archive history scope.", 400)
+                    project_id = None
+                self.send_json({"data": [service.describe(service.public(v)) for v in service.store.list(project_id)]})
                 return
             body = CodeHandler.read_session_archive_action_json(self)
             if action == "preview":
@@ -30565,7 +30569,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                 result = {"ok": True}
             else:
                 raise BatchError("project_archive_unknown_action", "Unknown batch action.", 404)
-            self.send_json(result)
+            self.send_json(service.describe(result) if "operationId" in result else result)
         except BatchError as exc:
             self.send_json({"error":str(exc), "errorCode":exc.code}, exc.status)
         except (SessionLifecycleConflictError, SessionArchiveMutationError) as exc:

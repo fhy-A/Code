@@ -37,7 +37,7 @@ async function scenario(browser,host,runtime,width,language,dir) {
   });
   await context.route(/\/(?:app\.js|code\.bundle\.js)$/,async route=>{
     const response=await route.fetch(),source=await response.text(),needle='function openProjectContextMenu(projectId, anchor = {}) {';
-    assert(source.includes(needle));await route.fulfill({response,body:source.replace(needle,'window.__deleteProbe={settings:settingsFeature,state};'+needle)});
+    assert(source.includes(needle));await route.fulfill({response,body:source.replace(needle,'window.__deleteProbe={settings:settingsFeature,state,feedback:archiveFeedbackEntries,covered:archiveFeedbackCovered,store:archiveFeedbackStore};'+needle)});
   });
   const page=await context.newPage();page.on('pageerror',error=>errors.push(String(error)));
   const openGroup=async pid=>{
@@ -52,12 +52,16 @@ async function scenario(browser,host,runtime,width,language,dir) {
   try {
     await page.goto(new URL(runtime==='bundle'?'/':'/dist/frontend/index.classic.html',host.ready.codeUrl).href);
     await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');await openSettings();
+    const labels=await page.locator('#archivedProjectFilter option').allTextContents();
+    for(const id of [project.id,other.id,gone.id])assert(labels.every(label=>!label.includes(id)));
     await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(project.id));
     await page.locator('#archivedSessionSearchInput').fill('needle');
     await expect(page.locator('.archived-session-row')).toHaveCount(1);
+    await expect(page.locator('.archived-group-count')).toHaveText(language==='zh'?'（匹配 1 / 共 2）':'(1 matching / 2 total)');
     await openGroup(project.id);
     await expect(page.locator('.archive-delete-items li')).toHaveCount(2);
-    await expect(page.locator('.archive-delete-scope')).toContainText(project.id);
+    await expect(page.locator('.archive-delete-scope')).toContainText(project.label);
+    assert(!(await page.locator('.delete-batch-body').innerText()).includes(project.id));
     await expect(page.locator('.delete-batch-body')).toContainText(language==='zh'?'不可恢复':'cannot be undone');
     const before=(await api(host,'/api/session-archive')).data.map(v=>v.id).sort();
     await page.locator('.delete-batch-cancel').click();
@@ -67,13 +71,14 @@ async function scenario(browser,host,runtime,width,language,dir) {
     const bounds=await page.locator('.archive-group-delete-modal .modal-card').evaluate(el=>{const b=el.getBoundingClientRect();return {left:b.left,right:b.right,width:innerWidth,overflow:el.scrollWidth>el.clientWidth+1};});
     assert(bounds.left>=0&&bounds.right<=bounds.width+1&&!bounds.overflow);
     await page.route('**/api/project-archive-delete/confirm',async route=>{await route.fetch();await route.abort('failed');},{times:1});
-    await page.locator('.delete-batch-submit').click();await expect(page.locator('.delete-batch-body [role="alert"]')).toBeVisible();
-    await page.locator('.delete-batch-read').click();await expect(page.locator('.delete-batch-submit')).toBeDisabled();
-    await expect(page.locator('.delete-batch-body [role="alert"]')).toHaveCount(0);
+    await page.locator('.delete-batch-submit').click();await expect(page.locator('.archive-group-delete-modal')).toHaveCount(0);
+    const notice=page.locator('.archive-feedback-card[data-kind="delete"]');
+    await expect(notice.locator('.feedback-check')).toBeVisible();
+    await expect(notice).toContainText(language==='zh'?'暂时无法确认':'not confirmed');
+    await notice.locator('.feedback-check').click();await expect(notice).toHaveCount(0);
     const result=(await api(host,'/api/project-archive-delete')).data.find(v=>v.scope.projectId===project.id);
     assert.equal(result.total,2);assert(result.items.every(i=>i.state==='deleted'));
     await page.screenshot({path:path.join(dir,runtime+'-result.png')});
-    await page.locator('.delete-batch-cancel').click();
     assert((await api(host,'/api/sessions')).data.some(v=>v.id===active.id));
     assert((await api(host,'/api/session-archive')).data.some(v=>v.id===foreign.id));
     assert.equal(await fs.readFile(workspace,'utf8'),'Keep workspace');
@@ -84,29 +89,33 @@ async function scenario(browser,host,runtime,width,language,dir) {
     await openGroup(other.id);
     await api(host,`/api/session-archive/${foreign.id}/restore`,'POST',{});
     await page.locator('.delete-batch-submit').click();
-    await expect(page.locator('.archive-delete-items')).toContainText(language==='zh'?'已变化':'changed');
+    await expect(notice.locator('.feedback-retry')).toBeVisible();
+    await notice.locator('summary').click();
+    await expect(notice).toContainText(language==='zh'?'已变化':'changed');
     await api(host,`/api/session-archive/${foreign.id}/archive`,'POST',{});
     const later=await make(runtime+' later archive',other.id);
-    await page.locator('.delete-batch-submit').click();
+    await notice.locator('.feedback-retry').click();
     await expect(page.locator('.archive-delete-items li')).toHaveCount(1);
-    await page.locator('.delete-batch-submit').click();await expect(page.locator('.delete-batch-submit')).toBeDisabled();
-    await page.locator('.delete-batch-cancel').click();
+    await page.locator('.delete-batch-cancel').click();await expect(notice).toBeVisible();
+    await notice.locator('.feedback-retry').click();
+    await page.locator('.delete-batch-submit').click();await expect(notice).toHaveCount(0);
     assert((await api(host,'/api/session-archive')).data.some(v=>v.id===later.id));
     await page.locator('#archivedProjectFilter').selectOption('');
+    await expect(page.locator('.archived-session-group[data-project-id="__unassigned__"] .archived-group-count')).toHaveText(language==='zh'?'（1）':'(2)');
+    await expect(page.locator(`.archived-session-group[data-project-id="${gone.id}"] .archived-group-count`)).toHaveText(language==='zh'?'（1）':'(1)');
+    await expect(page.locator(`.archived-session-group[data-project-id="${other.id}"] .archived-group-count`)).toHaveText(language==='zh'?'（1）':'(1)');
     await openGroup(null);await expect(page.locator('.archive-delete-scope')).toHaveText(language==='zh'?'未归属项目':'No project');
     await page.locator('.delete-batch-cancel').click();
-    await openGroup(gone.id);await expect(page.locator('.archive-delete-scope')).toContainText(gone.id);
+    await openGroup(gone.id);await expect(page.locator('.archive-delete-scope')).toContainText(language==='zh'?'原项目已移除':'Former project');
     await page.locator('.delete-batch-cancel').click();
     // Keep the old single delete UI working alongside the new group action.
     await page.locator(`.archived-session-row[data-session-id="${historical.id}"] .archived-session-delete`).click();
     await page.locator('#confirmDeleteSession').click();
     await expect(page.locator(`.archived-session-row[data-session-id="${historical.id}"]`)).toHaveCount(0);
     await page.reload();await waitForRuntime(page,runtime);await openSettings();
-    await page.locator('.archive-delete-history').click();
-    await expect(page.locator('.archive-delete-history-item')).not.toHaveCount(0);
-    await page.locator('.archive-delete-history-item').filter({hasText:project.id}).click();
-    await expect(page.locator('.delete-batch-submit')).toBeDisabled();
-    await page.locator('.delete-batch-cancel').click();
+    await page.waitForLoadState('networkidle');
+    await expect(page.locator('.archive-delete-history,.archive-delete-history-item')).toHaveCount(0);
+    await expect(notice).toHaveCount(0);
     const cleanupCases=[];
     for(const kind of ['bundle','journal']) {
       const root=path.join(host.root,runtime+'-cleanup-'+kind);await fs.mkdir(root);
@@ -130,24 +139,29 @@ async function scenario(browser,host,runtime,width,language,dir) {
       await page.reload();await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');await openSettings();
       await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(cleanupProject.id));
       await openGroup(cleanupProject.id);await page.locator('.delete-batch-submit').click();
-      const targetRow=page.locator(`.archive-delete-items li[data-session-id="${target.id}"]`);
+      await expect(notice.locator('.feedback-continue')).toBeVisible();
+      await notice.locator('summary').click();
+      const targetRow=notice.locator(`li[data-session-id="${target.id}"]`);
       await expect(targetRow).toHaveAttribute('data-state','cleanup_pending');
       await expect(targetRow).toContainText(language==='zh'?'归档清理未完成':'Archive cleanup pending');
-      await expect(page.locator(`.archive-delete-items li[data-session-id="${healthy.id}"]`)).toHaveAttribute('data-state','deleted');
-      await expect(page.locator('.delete-batch-submit')).toHaveText(language==='zh'?'继续清理旧归档':'Resume archive cleanup');
-      await expect(page.locator('.delete-batch-submit')).toBeEnabled();
+      await expect(notice).toContainText(language==='zh'?'已完成 1 个':'Completed: 1');
+      await expect(notice.locator('.feedback-continue')).toHaveText(language==='zh'?'继续清理旧归档':'Resume archive cleanup');
       const batch=(await api(host,'/api/project-archive-delete')).data.find(v=>v.scope.projectId===cleanupProject.id);
       const item=batch.items.find(v=>v.sessionId===target.id);
       assert(item.factsDeleted&&!item.cleanupComplete&&item.result.errorCode);
       assert.equal(await exists(bundle),kind==='bundle');assert(await exists(journal));
-      await page.locator('.delete-batch-read').click();await expect(targetRow).toHaveAttribute('data-state','cleanup_pending');
-      await expect(page.getByText(language==='zh'?'会话列表刷新失败；请以弹窗中的逐项批次结果为准':'The session list did not refresh. Check each item in the batch result dialog.',{exact:true})).toBeVisible();
+      await notice.locator('.feedback-check').click();await expect(targetRow).toHaveAttribute('data-state','cleanup_pending');
+      await page.reload();await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');await openSettings();
+      await expect(notice.locator('.feedback-continue')).toBeVisible();await notice.locator('summary').click();
+      await expect(targetRow).toHaveAttribute('data-state','cleanup_pending');
+      const feedbackText=await notice.innerText();assert(!feedbackText.includes(batch.operationId)&&!feedbackText.includes(target.id));
+      await expect(page.locator('#settingsPage')).toHaveCSS('opacity','1');
       await page.screenshot({path:path.join(dir,runtime+'-'+kind+'-cleanup-pending.png')});
       const events=async()=> (await fs.readFile(path.join(host.root,'code072-cleanup-events.jsonl'),'utf8')).trim().split('\n').map(JSON.parse).filter(v=>v.sessionId===target.id);
       assert.equal((await events()).filter(v=>v.kind==='facts_delete').length,1);
       await fs.writeFile(control,JSON.stringify({sessionId:target.id,kind:'off'}));
-      await page.locator('.delete-batch-submit').click();await expect(page.locator('.delete-batch-submit')).toBeDisabled();
-      await expect(targetRow).toHaveAttribute('data-state','deleted');
+      await notice.locator('.feedback-continue').click();await expect(notice).toHaveCount(0);
+      await expect(page.locator('.archive-group-delete-modal')).toHaveCount(0);
       assert(!await exists(bundle)&&!await exists(journal));
       const after=await events();
       for(const event of ['facts_delete','bundle_removed','journal_removed'])assert.equal(after.filter(v=>v.kind===event).length,1,event);
@@ -155,12 +169,18 @@ async function scenario(browser,host,runtime,width,language,dir) {
       assert(repeated.items.every(v=>v.state==='deleted'&&v.cleanupComplete));
       assert.deepEqual(await events(),after);
       cleanupCases.push({kind,partialBatchVisible:true,readPreservesPending:true,cleanupOnlyResume:true,factsDeletedOnce:true,copyAndJournalRemoved:true});
-      await page.locator('.delete-batch-cancel').click();
     }
+    const association=await page.evaluate(()=>{
+      const old=__deleteProbe.store('delete',{operationId:'ui-parent',scope:{kind:'unassigned'},confirmed:true,total:2,items:[{sessionId:'a',state:'failed'},{sessionId:'b',state:'cleanup_pending'}]});
+      const child=__deleteProbe.store('delete',{operationId:'ui-child',scope:{kind:'unassigned'},retryOf:'ui-parent',confirmed:false,total:1,items:[{sessionId:'a',state:'pending'}]});
+      const preview=[...__deleteProbe.covered(old)];child.value.confirmed=true;child.value.items[0].state='failed';const failure=[...__deleteProbe.covered(old)];
+      child.unknown=true;child.value.items[0].state='deleted';const unknown=[...__deleteProbe.covered(old)];child.unknown=false;const success=[...__deleteProbe.covered(old)];
+      __deleteProbe.feedback.delete('delete:ui-parent');__deleteProbe.feedback.delete('delete:ui-child');return {preview,failure,unknown,success};
+    });assert.deepEqual(association,{preview:[],failure:[],unknown:[],success:['a']});
     assert.deepEqual(errors,[]);
     return {runtime,width,language,searchDoesNotLimitScope:true,cancel:true,lostResponseDirectRead:true,
       conflictAndFreshRetry:true,newArchiveExcludedFromRetry:true,unassignedAndHistorical:true,singleDelete:true,
-      reloadedHistory:true,activeProjectWorkspacePreserved:true,bounds,cleanupCases};
+      noCompletedHistory:true,unfinishedReload:true,completionCloses:true,activeProjectWorkspacePreserved:true,bounds,cleanupCases};
   } catch(error) {
     await page.screenshot({path:path.join(dir,runtime+'-failed.png')}).catch(()=>{});
     await fs.writeFile(path.join(dir,runtime+'-failure.json'),JSON.stringify({error:String(error.stack),errors,audit},null,2));

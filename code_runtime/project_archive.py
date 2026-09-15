@@ -289,7 +289,7 @@ class BatchStore:
         if not directory.exists():
             return []
         records = [self.load(p.stem, allow_preview=False) for p in directory.glob('*.json')]
-        return sorted((r for r in records if r['projectId'] == project_id), key=lambda r:r['createdAt'], reverse=True)
+        return sorted((r for r in records if project_id is None or r['projectId'] == project_id), key=lambda r:r['createdAt'], reverse=True)
 
 
 def work_identities(meta):
@@ -438,6 +438,27 @@ class ArchiveService:
                     targets.append(self.snapshot(sid, project_id, watch=True))
             value, token = self.store.preview(project_id, version, targets, retry_of=retry_of)
             return {**self.public(value), 'confirmationToken':token}
+
+    def describe(self, result):
+        """Read-only display labels; never add names to durable authorization."""
+        value = self.store.load(result['operationId'])
+        project = next((p for p in self.r._read_projects() if p['id'] == result['projectId']), None)
+        items = []
+        for item in result['items']:
+            title, available = '', False
+            try:
+                sid = item['sessionId']
+                path = self.r.session_path(sid)
+                if not path.exists():
+                    path = self.r._session_archive_bundle_path(sid) / 'session.json'
+                meta = self.r._read_session_meta_strict(self.store.plain(path))
+                if meta and meta.get('id') == sid:
+                    title, available = str(meta.get('title') or ''), True
+            except (OSError, ValueError):
+                pass
+            items.append({**item, 'title':title, 'titleAvailable':available})
+        return {**result, 'items':items, 'projectName':str((project or {}).get('label') or ''),
+                'retryOf':value['retryOf']}
 
     def public(self, value):
         items = []
