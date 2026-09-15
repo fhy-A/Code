@@ -1,1 +1,1 @@
-- [code-architecture](code-architecture.md) — Code 宿主架构导航：运行分层、AgentRun/Goal、受管记忆与输出预算边界
+- [code-architecture](code-architecture.md) — Code 使用环境参考：帮助理解用户项目、运行环境与任务状态，不代表实时配置
