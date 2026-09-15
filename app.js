@@ -6737,6 +6737,47 @@ const archiveFeedbackLoading = new Map();
 const archiveFeedbackErrors = new Set();
 let archiveFeedbackRefreshAttempt = 0;
 let archiveFeedbackLastFresh = 0;
+let archiveAllSubmitting = false;
+let archiveAllDataRoot = null;
+const archiveAllIntentKey = "code-all-archive-intent/v1";
+
+function archiveAllValue(intent) {
+  return { ...intent, scope: { kind: "all" }, action: "permanent_delete_all", confirmed: false,
+    captureState: "capturing", total: 0, items: [], retryable: false };
+}
+
+function recoverArchiveAllIntent(records) {
+  const raw = sessionStorage.getItem(archiveAllIntentKey);
+  if (!raw) return;
+  const intent = JSON.parse(raw);
+  if (intent.schema !== archiveAllIntentKey || intent.dataRoot !== archiveAllDataRoot || !/^[0-9a-f]{32}$/.test(intent.operationId)
+      || !/^[0-9a-f]{64}$/.test(intent.confirmationToken)) throw new Error("Invalid pending archive confirmation");
+  if (records.some((value) => value.operationId === intent.operationId)) {
+    sessionStorage.removeItem(archiveAllIntentKey);
+  } else if (!archiveFeedbackEntries.has(`delete:${intent.operationId}`)) {
+    archiveFeedbackStore("delete", archiveAllValue(intent), { unknown: true });
+  }
+}
+
+async function beginArchiveDeleteAll() {
+  if (archiveAllSubmitting) return;
+  archiveAllSubmitting = true;
+  try {
+    // Recover a request whose response/page was lost before issuing new consent.
+    if (!await ensureArchiveFeedbackReady("delete")) return;
+    recoverArchiveAllIntent([]);
+    const pending = archiveFeedbackFind("delete", { kind: "all" });
+    if (pending) { focusArchiveFeedback(pending); return; }
+    const hex = () => crypto.randomUUID().replaceAll("-", "");
+    if (!/^[0-9a-f]{64}$/.test(archiveAllDataRoot || "")) throw new Error("Missing archive data context");
+    const intent = { schema: archiveAllIntentKey, dataRoot: archiveAllDataRoot, operationId: hex(), confirmationToken: hex() + hex() };
+    sessionStorage.setItem(archiveAllIntentKey, JSON.stringify(intent));
+    await submitArchiveFeedback("delete", archiveAllValue(intent));
+  } catch {
+    showToast(t("archiveAllIntentFailed"), "error");
+  } finally { archiveAllSubmitting = false; }
+}
+
 
 function archiveFeedbackEndpoint(kind) {
   return kind === "archive" ? "/api/project-session-archive" : "/api/project-archive-delete";
@@ -6745,7 +6786,7 @@ function archiveFeedbackEndpoint(kind) {
 function archiveFeedbackRequest(kind, action, payload) {
   return apiJson(`${archiveFeedbackEndpoint(kind)}/${action}`, {
     method: "POST", body: JSON.stringify(Object.fromEntries(Object.entries(payload).filter(([key]) =>
-      ["projectId", "scope", "retryOf", "operationId", "confirmationToken", "action"].includes(key)))),
+      ["projectId", "scope", "retryOf", "operationId", "confirmationToken", "action", "dataRoot"].includes(key)))),
   });
 }
 
@@ -6759,6 +6800,7 @@ function archiveFeedbackUnfinished(kind, item) {
 
 function archiveFeedbackProjectName(kind, value) {
   const projectId = kind === "archive" ? value.projectId : value.scope?.projectId;
+  if (kind === "delete" && value.scope?.kind === "all") return t("archivedSessions");
   if (kind === "delete" && value.scope?.kind === "unassigned") return t("archivedSessionUnknownProject");
   const project = state.projects.find((entry) => entry.id === projectId);
   return value.projectName || project?.label || project?.name || t("archiveFeedbackFormerProject");
@@ -6802,7 +6844,7 @@ function archiveFeedbackIssues(entry) {
 function archiveFeedbackFind(kind, scope) {
   return [...archiveFeedbackEntries.values()].find((entry) => entry.kind === kind
     && (kind === "archive" ? entry.value.projectId === scope : JSON.stringify(entry.value.scope) === JSON.stringify(scope))
-    && (entry.busy || entry.unknown || archiveFeedbackIssues(entry).length));
+    && (entry.busy || entry.unknown || (entry.value.captureState && entry.value.captureState !== "ready") || archiveFeedbackIssues(entry).length));
 }
 
 function archiveFeedbackReason(entry, item) {
@@ -6837,8 +6879,9 @@ function renderArchiveFeedback() {
   for (const entry of archiveFeedbackEntries.values()) {
     const { kind, value } = entry;
     const issues = archiveFeedbackIssues(entry);
-    const complete = !entry.unknown && value.confirmed && value.items.every((item) => archiveFeedbackComplete(kind, item));
-    if (!entry.busy && !entry.unknown && !issues.length && !entry.successVisible && !entry.refreshFailed) continue;
+    const captureBlocked = value.captureState && value.captureState !== "ready";
+    const complete = !captureBlocked && !entry.unknown && value.confirmed && value.items.every((item) => archiveFeedbackComplete(kind, item));
+    if (!entry.busy && !entry.unknown && !issues.length && !entry.successVisible && !entry.refreshFailed && !captureBlocked) continue;
     const card = document.createElement("section");
     card.className = `archive-feedback-card${complete ? " is-success" : ""}${!entry.busy && (!complete || entry.refreshFailed) ? " is-warning" : ""}`;
     card.dataset.kind = kind; card.dataset.operationId = value.operationId; card.tabIndex = -1;
@@ -6846,16 +6889,16 @@ function renderArchiveFeedback() {
     const done = value.items.filter((item) => archiveFeedbackComplete(kind, item)).length;
     const allPending = issues.every((item) => archiveFeedbackUnfinished(kind, item));
     const summaryKey = entry.busy ? (kind === "archive" ? "archiveFeedbackArchiving" : "archiveFeedbackDeleting")
-      : entry.unknown ? "archiveFeedbackUnknown" : complete ? (kind === "archive" ? "archiveFeedbackArchiveSuccess" : "archiveFeedbackDeleteSuccess")
+      : entry.unknown ? "archiveFeedbackUnknown" : captureBlocked ? "archiveAllCaptureBlocked" : complete ? (kind === "archive" ? "archiveFeedbackArchiveSuccess" : value.scope?.kind === "all" ? "archiveAllSuccess" : "archiveFeedbackDeleteSuccess")
         : !issues.length ? "archiveFeedbackRefreshFailed" : allPending && !done ? "archiveFeedbackPending" : "archiveFeedbackPartial";
     card.innerHTML = `<strong>${escapeHtml(archiveFeedbackProjectName(kind, value))} · ${escapeHtml(t(kind === "archive" ? "archiveFeedbackArchive" : "archiveFeedbackDelete"))}</strong>
       <p role="${entry.busy || complete ? "status" : "alert"}">${escapeHtml(t(summaryKey, { total: value.total, count: value.total, done, remaining: issues.length }))}</p>
       ${entry.refreshFailed ? `${complete || issues.length ? `<p class="archive-feedback-refresh-error" role="alert">${escapeHtml(t("archiveFeedbackRefreshFailed"))}</p>` : ""}<button type="button" class="mini-btn feedback-refresh"${entry.refreshing ? " disabled" : ""}>${escapeHtml(t("archiveFeedbackRefreshList"))}</button>` : ""}
       ${!entry.busy && !entry.unknown && issues.length ? `<details${entry.expanded ? " open" : ""}><summary>${escapeHtml(t("archiveFeedbackViewIssues", { count: issues.length }))}</summary>
         <ul>${issues.map((item) => `<li data-session-id="${escapeHtml(item.sessionId)}" data-state="${escapeHtml(item.state)}"><span>${escapeHtml(entry.titles.get(item.sessionId) || (item.titleAvailable ? t("untitledSession") : t("archiveFeedbackSessionUnavailable")))}</span><small>${escapeHtml(t(`${kind === "archive" ? "projectArchiveState" : "archiveDeleteState"}_${item.state}`))}</small>${item.result?.errorCode ? `<small>${escapeHtml(archiveFeedbackReason(entry, item))}</small>` : ""}</li>`).join("")}</ul></details>` : ""}
-      ${!entry.busy && !complete && (entry.unknown || issues.length) ? `<div class="archive-feedback-actions"><button type="button" class="mini-btn feedback-check">${escapeHtml(t("archiveFeedbackCheck"))}</button>
-        ${entry.unknown || issues.some((item) => archiveFeedbackUnfinished(kind, item)) ? `<button type="button" class="mini-btn feedback-continue">${escapeHtml(t(kind === "delete" && issues.some((item) => item.state === "cleanup_pending") ? "archiveDeleteResumeCleanup" : "archiveFeedbackContinue"))}</button>` : ""}
-        ${!entry.unknown && !issues.some((item) => archiveFeedbackUnfinished(kind, item)) && value.retryable ? `<button type="button" class="mini-btn feedback-retry">${escapeHtml(t("archiveFeedbackRetry"))}</button>` : ""}</div>` : ""}`;
+      ${!entry.busy && !complete && (entry.unknown || issues.length || captureBlocked) ? `<div class="archive-feedback-actions"><button type="button" class="mini-btn feedback-check">${escapeHtml(t("archiveFeedbackCheck"))}</button>
+        ${entry.unknown || issues.some((item) => archiveFeedbackUnfinished(kind, item)) || (value.scope?.kind === "all" && value.retryable) ? `<button type="button" class="mini-btn feedback-continue">${escapeHtml(t(kind === "delete" && issues.some((item) => item.state === "cleanup_pending") ? "archiveDeleteResumeCleanup" : "archiveFeedbackContinue"))}</button>` : ""}
+        ${!entry.unknown && value.scope?.kind !== "all" && !issues.some((item) => archiveFeedbackUnfinished(kind, item)) && value.retryable ? `<button type="button" class="mini-btn feedback-retry">${escapeHtml(t("archiveFeedbackRetry"))}</button>` : ""}</div>` : ""}`;
     card.querySelector("details")?.addEventListener("toggle", (event) => { entry.expanded = event.currentTarget.open; });
     card.querySelector(".feedback-refresh")?.addEventListener("click", () => {
       if (!entry.refreshing) void refreshArchiveFeedbackLists(entry, entry.feedbackRevision);
@@ -6881,11 +6924,14 @@ async function recoverArchiveFeedback(kind) {
   if (archiveFeedbackLoading.has(kind)) return archiveFeedbackLoading.get(kind);
   const promise = (async () => {
     try {
-      const records = (await apiJson(archiveFeedbackEndpoint(kind) + (kind === "archive" ? "?allProjects=1" : ""))).data;
+      const response = await apiJson(archiveFeedbackEndpoint(kind) + (kind === "archive" ? "?allProjects=1" : ""));
+      const records = response.data;
+      if (kind === "delete") archiveAllDataRoot = response.deleteAllContext;
       if (!Array.isArray(records)) throw new Error("Archive result list unavailable");
       for (const value of records) {
         if (!archiveFeedbackEntries.get(`${kind}:${value.operationId}`)?.busy) archiveFeedbackStore(kind, value, { unknown: false });
       }
+      if (kind === "delete") recoverArchiveAllIntent(records);
       archiveFeedbackLoaded.add(kind); archiveFeedbackErrors.delete(kind);
       return records;
     } catch {
@@ -6952,7 +6998,10 @@ async function refreshArchiveFeedbackLists(entry, revision) {
 function applyArchiveFeedbackResult(entry, result) {
   archiveFeedbackStore(entry.kind, result, { unknown: false, busy: false, refreshFailed: false });
   entry.feedbackRevision = (entry.feedbackRevision || 0) + 1;
-  const complete = result.items.every((item) => archiveFeedbackComplete(entry.kind, item));
+  const complete = (!result.captureState || result.captureState === "ready") && result.items.every((item) => archiveFeedbackComplete(entry.kind, item));
+  if (entry.kind === "delete" && result.scope?.kind === "all" && result.confirmed) {
+    try { recoverArchiveAllIntent([result]); } catch { /* The durable operation remains authoritative. */ }
+  }
   clearTimeout(entry.successTimer);
   entry.successVisible = false;
   if (complete) expireArchiveFeedbackSuccess(entry);
@@ -6961,11 +7010,12 @@ function applyArchiveFeedbackResult(entry, result) {
 }
 
 async function submitArchiveFeedback(kind, value) {
+  if (kind === "delete" && value.scope?.kind === "all" && !value.operationId) return beginArchiveDeleteAll();
   const existing = archiveFeedbackEntries.get(`${kind}:${value.operationId}`);
   if (existing?.busy) return;
   const entry = archiveFeedbackStore(kind, value, { busy: true, unknown: false });
   renderArchiveFeedback();
-  try { await applyArchiveFeedbackResult(entry, await archiveFeedbackRequest(kind, "confirm", value)); }
+  try { await applyArchiveFeedbackResult(entry, await archiveFeedbackRequest(kind, value.scope?.kind === "all" ? "confirm-all" : "confirm", value)); }
   catch { entry.unknown = true; }
   finally { entry.busy = false; renderArchiveFeedback(); }
 }
@@ -6983,10 +7033,10 @@ async function checkArchiveFeedback(entry, continueWork = false) {
     const current = records.find((value) => value.operationId === entry.value.operationId);
     if (!current) {
       if (!continueWork || !entry.value.confirmationToken) throw new Error("Original confirmation is unavailable");
-      await applyArchiveFeedbackResult(entry, await archiveFeedbackRequest(entry.kind, "confirm", entry.value));
+      await applyArchiveFeedbackResult(entry, await archiveFeedbackRequest(entry.kind, entry.value.scope?.kind === "all" ? "confirm-all" : "confirm", entry.value));
     } else {
       let result = current;
-      if (continueWork && current.items.some((item) => archiveFeedbackUnfinished(entry.kind, item))) {
+      if (continueWork && (current.items.some((item) => archiveFeedbackUnfinished(entry.kind, item)) || (current.scope?.kind === "all" && current.retryable))) {
         result = await archiveFeedbackRequest(entry.kind, "resume", current);
       }
       await applyArchiveFeedbackResult(entry, result);

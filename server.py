@@ -22652,7 +22652,8 @@ def _validate_project_archive_delete_bundle(journal, manifest):
     value, item = _validate_project_archive_delete_journal_binding(journal)
     if manifest["archiveToken"] != journal["archiveToken"] or digest(manifest) != item["target"]["version"]:
         raise SessionArchiveMutationError(recovery_failed=True)
-    if journal["state"] != "facts_deleted" and service.scope_version(value["scope"]) != value["scopeVersion"]:
+    group, scope_version = service.target_scope(value, item)
+    if journal["state"] != "facts_deleted" and service.scope_version(group) != scope_version:
         raise SessionArchiveMutationError(recovery_failed=True)
 
 
@@ -30523,12 +30524,16 @@ class CodeHandler(BaseHTTPRequestHandler):
             if action == "list":
                 query = parse.parse_qs(parse.urlparse(self.path).query)
                 group = json.loads(query["scope"][0]) if "scope" in query else None
-                self.send_json({"data": [service.public(v) for v in service.store.list(group)]})
+                self.send_json({"data": [service.public(v) for v in service.store.list(group)], "deleteAllContext": service.store.identity})
                 return
             body = CodeHandler.read_session_archive_action_json(self)
-            if action == "preview":
+            if action == "confirm-all":
+                result = service.confirm_all(body.get("operationId"), body.get("scope"), body.get("action"), body.get("confirmationToken"), body.get("dataRoot"))
+            elif action == "preview":
                 result = service.preview(body.get("scope"), body.get("retryOf"))
             elif action in {"confirm", "resume"}:
+                if action == "confirm" and body.get("scope") == {"kind": "all"}:
+                    raise BatchError("archive_delete_confirmation_invalid", "Use the explicit all-archive confirmation.", 400)
                 result = service.execute(body.get("operationId"), body.get("scope"), body.get("action"),
                     token=body.get("confirmationToken"), resume=action == "resume")
             elif action == "cancel":

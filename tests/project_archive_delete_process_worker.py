@@ -13,9 +13,11 @@ CASE_ROOT = PROFILE.parent
 assert CASE_ROOT.parent == Path(tempfile.gettempdir()).resolve()
 assert CASE_ROOT.name.startswith('code072-delete-process-') and PROFILE.name == 'data'
 PHASE, CASE = sys.argv[1:]
+ALL_SCOPE = os.environ.get('CODE108_ALL_SCOPE') == '1'
 assert PHASE in {'seed','recover'}
-assert CASE in {'partial','facts_deleted','effect','prepared','core_restored'} or CASE.startswith(('prepared_','core_restored_','cleanup_'))
-GROUP = {'kind':'project','projectId':'process-project'}
+assert (ALL_SCOPE and CASE == 'capture') or CASE in {'partial','facts_deleted','effect','prepared','core_restored'} or CASE.startswith(('prepared_','core_restored_','cleanup_'))
+GROUP = {'kind':'all'} if ALL_SCOPE else {'kind':'project','projectId':'process-project'}
+ACTION = 'permanent_delete_all' if ALL_SCOPE else 'permanent_delete'
 
 
 def guard(event,args):
@@ -68,9 +70,19 @@ if PHASE == 'seed':
         handler.send_json = mock.Mock();srv.CodeHandler.create_session(handler)
         sid = handler.send_json.call_args.args[0]['id'];ids.append(sid)
         srv._mutate_session_archive_state(sid,archived=True)
-    ids.sort();preview = SERVICE.preview(GROUP);op = preview['operationId']
+    ids.sort()
+    if ALL_SCOPE:
+        import uuid
+        preview = {'operationId':uuid.uuid4().hex,'confirmationToken':uuid.uuid4().hex+uuid.uuid4().hex}
+    else:
+        preview = SERVICE.preview(GROUP)
+    op = preview['operationId']
+    def confirm_operation():
+        if ALL_SCOPE:
+            return SERVICE.confirm_all(op,GROUP,ACTION,preview['confirmationToken'],SERVICE.store.identity)
+        return SERVICE.execute(op,GROUP,ACTION,token=preview['confirmationToken'])
     evidence = {'case':CASE,'processA':os.getpid(),'operationId':op,'sessionIds':ids,
-                'freshRegistriesA':True,'networkListenersOpened':0,'connectionsOpened':0}
+                'freshRegistriesA':True,'networkListenersOpened':0,'connectionsOpened':0,'allScope':ALL_SCOPE,'confirmationToken':preview['confirmationToken']}
     def crash():
         value = SERVICE.store.load(op,allow_preview=False)
         evidence['statesAtExit'] = [i['state'] for i in value['items']]
@@ -78,7 +90,9 @@ if PHASE == 'seed':
         evidence['journalAtExit'] = journal
         write(HANDOFF,evidence)
         os._exit(73)
-    if CASE == 'partial':
+    if CASE == 'capture':
+        SERVICE.capture_all = crash
+    elif CASE == 'partial':
         original = SERVICE.execute_item
         def before_second(value,item):
             if item['target']['id'] == ids[1]:
@@ -112,7 +126,7 @@ if PHASE == 'seed':
                     crash()
             return original_unlink(path,*args,**kwargs)
         srv._remove_owned_archive_tree, Path.unlink = cleanup_tree, cleanup_unlink
-        result = SERVICE.execute(op,GROUP,'permanent_delete',token=preview['confirmationToken'])
+        result = confirm_operation()
         assert result['items'][0]['state'] == 'cleanup_pending',result
         assert result['items'][0]['factsDeleted'] and not result['items'][0]['cleanupComplete']
         assert result['items'][0]['result']['errorCode']
@@ -126,7 +140,7 @@ if PHASE == 'seed':
             if journal['action'] == 'delete' and journal['state'] == boundary:crash()
             return journal
         srv._write_session_archive_journal = journal_boundary
-    SERVICE.execute(op,GROUP,'permanent_delete',token=preview['confirmationToken'])
+    confirm_operation()
     raise AssertionError('Expected abrupt exit was not reached')
 
 
@@ -134,6 +148,18 @@ evidence = json.loads(HANDOFF.read_text(encoding='utf-8'))
 assert evidence['processA'] != os.getpid()
 op, ids = evidence['operationId'], evidence['sessionIds']
 sid = ids[-1]
+if CASE == 'capture':
+    original = SERVICE.capture_all
+    def recapture():raise AssertionError('Old confirmation attempted a new inventory')
+    SERVICE.capture_all = recapture
+    result = SERVICE.confirm_all(op,GROUP,ACTION,evidence['confirmationToken'],SERVICE.store.identity)
+    assert result['captureState'] == 'capturing' and result['items'] == []
+    assert all(srv._session_archive_bundle_path(i).exists() for i in ids)
+    evidence.update(processB=os.getpid(),freshRegistriesB=True,realProcessRestart=True,passed=True,
+                    interruptedCapturePreserved=True)
+    write(CASE_ROOT/'result.json',evidence)
+    print(json.dumps(evidence,ensure_ascii=False))
+    sys.exit(0)
 negative = not CASE.startswith('cleanup_') and CASE not in {'partial','facts_deleted','effect','prepared','core_restored'}
 cleanup_calls = []
 if CASE.startswith('cleanup_'):
@@ -177,7 +203,7 @@ def delete(self,target,**kwargs):
         raise AssertionError('Recovery repeated deletion or touched a replacement object')
     return original(self,target,**kwargs)
 srv.CodeHandler.delete_session = delete
-result = SERVICE.execute(op,GROUP,'permanent_delete',resume=True)
+result = SERVICE.execute(op,GROUP,ACTION,resume=True)
 if CASE == 'cleanup_replaced':
     assert result['items'][0]['state'] == 'cleanup_pending',result
     assert result['items'][0]['result']['errorCode'] == 'archive_delete_cleanup_conflict',result
@@ -209,7 +235,7 @@ else:
     srv._mutate_session_archive_state(sid,archived=True)
     new_archive = file_fact(srv._session_archive_bundle_path(sid)/'manifest.json')
     before_calls = list(calls)
-    assert all(i['state'] == 'deleted' for i in SERVICE.execute(op,GROUP,'permanent_delete',resume=True)['items'])
+    assert all(i['state'] == 'deleted' for i in SERVICE.execute(op,GROUP,ACTION,resume=True)['items'])
     assert calls == before_calls and file_fact(srv._session_archive_bundle_path(sid)/'manifest.json') == new_archive
     evidence['rebuiltArchivePreserved'] = True
 evidence.update(processB=os.getpid(),freshRegistriesB=True,realProcessRestart=True,deleteCallsB=calls,passed=True)

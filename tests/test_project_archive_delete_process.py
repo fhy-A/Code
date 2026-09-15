@@ -18,12 +18,16 @@ CASES = ['partial','facts_deleted','effect','prepared','core_restored'] + [
 
 @pytest.mark.parametrize('case',CASES)
 def test_archive_delete_real_process_recovery(case):
+    run_delete_process_case(case)
+
+
+def run_delete_process_case(case, *, all_scope=False):
     parent_service = sys.modules.get('server')
     processes = []
     with tempfile.TemporaryDirectory(prefix='code072-delete-process-') as directory:
         root = Path(directory).resolve()
         assert root.parent == Path(tempfile.gettempdir()).resolve()
-        env = dict(os.environ,CODE_DATA_DIR=str(root/'data'))
+        env = dict(os.environ,CODE_DATA_DIR=str(root/'data'),CODE108_ALL_SCOPE='1' if all_scope else '0')
         def run(phase,expected):
             child = subprocess.Popen([sys.executable,'-X','utf8','-B',str(WORKER),phase,case],cwd=ROOT,env=env,
                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,encoding='utf-8')

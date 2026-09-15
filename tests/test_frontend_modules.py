@@ -84,6 +84,41 @@ H4_CONFIG_PATH = ROOT / "tests" / "e2e" / "h4" / "playwright.config.cjs"
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_all_archive_intent_survives_reload_and_blocks_duplicate_or_wrong_root(self):
+        start = APP_SOURCE.index("let archiveAllSubmitting = false;")
+        end = APP_SOURCE.index("function archiveFeedbackEndpoint(", start)
+        script = r"""
+const assert=require('node:assert/strict');
+const crypto=require('node:crypto');
+let saved=null,denied=false,focused=0,readyResolve;
+const sent=[],toasts=[],archiveFeedbackEntries=new Map();
+const sessionStorage={getItem:()=>saved,setItem:(_k,v)=>{if(denied)throw Error('denied');saved=v;},removeItem:()=>{saved=null;}};
+const ensureArchiveFeedbackReady=()=>new Promise(resolve=>{readyResolve=resolve;});
+const archiveFeedbackFind=()=>[...archiveFeedbackEntries.values()][0];
+const archiveFeedbackStore=(_kind,value,options)=>{archiveFeedbackEntries.set(`delete:${value.operationId}`,{value,...options});};
+const focusArchiveFeedback=()=>focused++;
+const t=x=>x,showToast=x=>toasts.push(x);
+const submitArchiveFeedback=async(_kind,value)=>{assert.equal(JSON.parse(saved).operationId,value.operationId);sent.push(value);};
+""" + APP_SOURCE[start:end] + r"""
+(async()=>{
+ archiveAllDataRoot='a'.repeat(64);
+ const first=beginArchiveDeleteAll();await beginArchiveDeleteAll();readyResolve(true);await first;
+ assert.equal(sent.length,1);const original=JSON.parse(saved);
+ assert.equal(original.dataRoot,archiveAllDataRoot);
+ recoverArchiveAllIntent([]);assert.equal(archiveFeedbackEntries.size,1);
+ assert.equal([...archiveFeedbackEntries.values()][0].value.operationId,original.operationId);
+ const again=beginArchiveDeleteAll();readyResolve(true);await again;
+ assert.equal(sent.length,1);assert.equal(focused,1);assert.deepEqual(JSON.parse(saved),original);
+ archiveAllDataRoot='b'.repeat(64);assert.throws(()=>recoverArchiveAllIntent([]));
+ assert.deepEqual(JSON.parse(saved),original);
+ archiveAllDataRoot=original.dataRoot;recoverArchiveAllIntent([{operationId:original.operationId}]);assert.equal(saved,null);
+ archiveFeedbackEntries.clear();denied=true;const blocked=beginArchiveDeleteAll();readyResolve(true);await blocked;
+ assert.equal(sent.length,1);assert.deepEqual(toasts,['archiveAllIntentFailed']);
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_archive_refresh_outcomes_ignore_obsolete_errors(self):
         start = APP_SOURCE.index("async function refreshArchiveFeedbackLists(")
         end = APP_SOURCE.index("function applyArchiveFeedbackResult(", start)

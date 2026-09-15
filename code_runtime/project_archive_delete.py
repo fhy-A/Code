@@ -12,7 +12,9 @@ STATES = {'pending','deleting','cleanup_pending','deleted','conflict','failed','
 RETRYABLE = {'conflict','failed'}
 
 
-def scope(value):
+def scope(value, *, allow_all=False):
+    if allow_all and value == {'kind':'all'}:
+        return dict(value)
     if not isinstance(value, dict):
         raise BatchError('archive_delete_invalid_scope', 'An explicit archive group is required.', 400)
     if value == {'kind':'unassigned'}:
@@ -28,14 +30,22 @@ class DeleteStore(BatchStore):
     def validate(self, value):
         keys = {'schema','dataRoot','operationId','scope','scopeVersion','createdAt','confirmedAt',
                 'action','confirmationHash','retryOf','items'}
+        all_scope = isinstance(value, dict) and value.get('schema') == 'code-project-archive-delete/v2'
+        if all_scope:
+            keys |= {'captureState','captureError'}
         if (not isinstance(value, dict) or set(value) != keys
-                or value['schema'] != 'code-project-archive-delete/v1' or value['dataRoot'] != self.identity
-                or value['action'] != 'permanent_delete' or not isinstance(value['items'], list)
+                or value['schema'] not in {'code-project-archive-delete/v1','code-project-archive-delete/v2'} or value['dataRoot'] != self.identity
+                or value['action'] != ('permanent_delete_all' if all_scope else 'permanent_delete') or not isinstance(value['items'], list)
                 or type(value['createdAt']) not in (float,int) or not 0 < value['createdAt'] < float('inf')
                 or (value['confirmedAt'] is not None and (type(value['confirmedAt']) not in (float,int)
                     or not value['createdAt'] <= value['confirmedAt'] < float('inf')))):
             raise BatchError('archive_delete_invalid_state', 'Delete batch state is invalid.')
-        scope(value['scope']); identifier(value['operationId'])
+        scope(value['scope'],allow_all=all_scope); identifier(value['operationId'])
+        if all_scope and (value['scope'] != {'kind':'all'} or value['retryOf'] is not None
+                or value['captureState'] not in {'capturing','ready','failed'} or not isinstance(value['captureError'],str)
+                or value['confirmedAt'] is None or (value['captureState'] != 'ready' and value['items'])
+                or value['scopeVersion'] != digest({'kind':'all'})):
+            raise BatchError('archive_delete_invalid_state', 'All-archive admission is invalid.')
         if value['retryOf'] is not None:
             identifier(value['retryOf'])
         for key in ('scopeVersion','confirmationHash'):
@@ -49,9 +59,13 @@ class DeleteStore(BatchStore):
                     or (value['confirmedAt'] is None and (item['state'] != 'pending' or item['result'] is not None))):
                 raise BatchError('archive_delete_invalid_state', 'Delete item state is invalid.')
             target = item['target']
-            if (not isinstance(target,dict) or set(target) != {'id','archiveToken','version'}
+            if (not isinstance(target,dict) or set(target) != ({'id','archiveToken','version','scope','scopeVersion'} if all_scope else {'id','archiveToken','version'})
                     or not isinstance(target['version'],str) or not re.fullmatch('[0-9a-f]{64}',target['version'])):
                 raise BatchError('archive_delete_invalid_state', 'Delete target is invalid.')
+            if all_scope:
+                scope(target['scope'])
+                if not isinstance(target['scopeVersion'],str) or not re.fullmatch('[0-9a-f]{64}',target['scopeVersion']):
+                    raise BatchError('archive_delete_invalid_state', 'All-archive target scope is invalid.')
             sid = session_id(target['id']); identifier(target['archiveToken'])
             if sid in seen:
                 raise BatchError('archive_delete_invalid_state', 'Duplicate delete target.')
@@ -106,7 +120,7 @@ class DeleteStore(BatchStore):
 
     def list(self, group=None):
         if group is not None:
-            group = scope(group)
+            group = scope(group,allow_all=True)
         directory = self.owned(self.root/'operations')
         records = [self.load(p.stem,allow_preview=False) for p in directory.glob('*.json')] if directory.exists() else []
         return sorted((v for v in records if group is None or v['scope'] == group),key=lambda v:v['createdAt'],reverse=True)
@@ -205,6 +219,63 @@ class DeleteService:
             value, token = self.store.preview(group,version,targets,retry_of=retry_of)
             return {**self.public(value),'confirmationToken':token}
 
+    def confirm_all(self, op, group, action, token, data_root):
+        # Only this explicit endpoint can create an all-project authorization.
+        if group != {'kind':'all'} or action != 'permanent_delete_all' or data_root != self.store.identity:
+            raise BatchError('archive_delete_confirmation_invalid', 'Explicit all-archive confirmation required.', 400)
+        identifier(op)
+        if not isinstance(token,str) or not re.fullmatch('[0-9a-f]{64}',token):
+            raise BatchError('archive_delete_confirmation_invalid', 'Invalid all-archive confirmation.', 400)
+        with self.store.locked(digest(group)):
+            if not self.store.path(op).exists():
+                with _guard:
+                    if (self.store.identity,op) in _previews:
+                        raise BatchError('archive_delete_confirmation_invalid', 'This identity belongs to an existing group preview.')
+                now = time.time()
+                value = {'schema':'code-project-archive-delete/v2','dataRoot':self.store.identity,
+                         'operationId':op,'scope':group,'scopeVersion':digest(group),'createdAt':now,
+                         'confirmedAt':now,'action':action,'confirmationHash':digest(token),'retryOf':None,
+                         'captureState':'capturing','captureError':'','items':[]}
+                # Reserve the ID durably BEFORE enumeration. An interrupted capture
+                # can never silently take a later inventory under the old consent.
+                self.store.save(value)
+                try:
+                    value['items'] = self.capture_all()
+                    value['captureState'] = 'ready'
+                except Exception as exc:
+                    value['items'] = []
+                    value['captureState'] = 'failed'
+                    value['captureError'] = str(getattr(exc,'code','archive_delete_capture_failed'))
+                self.store.save(value)
+            return self.execute(op,group,action,token=token)
+
+    def capture_all(self):
+        # All lifecycle writers take agent/json locks before committing archives.
+        # Do not acquire per-Session locks underneath them (lock-order inversion).
+        r = self.r
+        with r._session_archive_bounded_lock(r._agent_run_lock):
+            with r._session_archive_bounded_lock(r._json_write_lock):
+                projects = {p['id'] for p in r._read_projects()}
+                self.scope_version({'kind':'unassigned'})  # Strict catalog validation.
+                items = []
+                for bundle in sorted(r._session_archive_owned_bundle_paths(),key=lambda p:p.name):
+                    sid = session_id(bundle.name)
+                    meta = r._read_session_meta_strict(bundle/'session.json')
+                    if not meta or meta.get('id') != sid:
+                        raise BatchError('archive_delete_invalid_state', 'Archive inventory is invalid.')
+                    pid = str(meta.get('projectId') or '').strip()
+                    group = ({'kind':'project' if pid in projects else 'deleted-project','projectId':pid}
+                             if pid else {'kind':'unassigned'})
+                    target = {**self.snapshot(sid,group),'scope':group,'scopeVersion':self.scope_version(group)}
+                    items.append({'target':target,'state':'pending','result':None})
+                return items
+
+    def target_scope(self, value, item):
+        target = item['target']
+        if value['scope'] == {'kind':'all'}:
+            return target['scope'], target['scopeVersion']
+        return value['scope'], value['scopeVersion']
+
     def cleanup_complete(self, value, item):
         receipt = self.store.cleanup(value,item)
         if not receipt:
@@ -245,14 +316,16 @@ class DeleteService:
                 result = {'errorCode':'archive_delete_cleanup_pending'}
             items.append({'sessionId':item['target']['id'],'state':projected,'result':result,
                           'factsDeleted':bool(fact),'cleanupComplete':complete})
-        return {'operationId':value['operationId'],'scope':value['scope'],'action':value['action'],
+        return {**({'captureState':value['captureState'],'captureError':value['captureError']} if value['scope'] == {'kind':'all'} else {}),
+                'operationId':value['operationId'],'scope':value['scope'],'action':value['action'],
                 'confirmed':value['confirmedAt'] is not None,'total':len(items),'items':items,'retryOf':value['retryOf'],
                 'retryable':any(i['state'] in RETRYABLE for i in items)}
 
     def execute(self, op, group, action, *, token=None, resume=False):
-        group = scope(group)
+        group = scope(group,allow_all=True)
         value = self.store.load(op,allow_preview=not resume)
-        if value['scope'] != group or action != 'permanent_delete':
+        expected_action = 'permanent_delete_all' if group == {'kind':'all'} else 'permanent_delete'
+        if value['scope'] != group or action != expected_action:
             raise BatchError('archive_delete_confirmation_invalid', 'Scope/action does not match this delete confirmation.')
         self.r._ensure_agent_run_session_index_ready(wait=True)
         with self.store.locked(digest(group)):
@@ -262,8 +335,10 @@ class DeleteService:
             if value['confirmedAt'] is None:
                 raise BatchError('archive_delete_confirmation_invalid', 'Delete batch has not been confirmed.')
             self.public(value)
+            if group == {'kind':'all'} and value['captureState'] != 'ready':
+                return self.public(value)
             for item in value['items']:
-                if (item['state'] not in {'pending','deleting','cleanup_pending'}
+                if (item['state'] not in ({'pending','deleting','cleanup_pending'} | (RETRYABLE if group == {'kind':'all'} else set()))
                         and not (self.store.effect(value,item) and not self.cleanup_complete(value,item))):
                     continue
                 self.execute_item(value,item)
@@ -289,7 +364,9 @@ class DeleteService:
                 else:
                     if item['state'] == 'deleting':
                         raise BatchError('archive_delete_unsettled', 'An interrupted delete has no transaction or receipt; inspect it first.')
-                    if self.scope_version(value['scope']) != value['scopeVersion'] or self.snapshot(sid,value['scope']) != target:
+                    group, version = self.target_scope(value,item)
+                    expected = {k:target[k] for k in ('id','archiveToken','version')}
+                    if self.scope_version(group) != version or self.snapshot(sid,group) != expected:
                         raise BatchError('archive_delete_target_changed', 'Archive incarnation or project changed after preview.')
                     item['state'] = 'deleting';self.store.save(value)
                     result = {}

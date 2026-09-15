@@ -2140,6 +2140,7 @@
       container.innerHTML = `<div class="settings-section archived-sessions-panel">
         <div class="settings-section-header">
           <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
+          <button class="danger-btn archive-all-delete" type="button">${escapeHtml(t("archiveAllDelete"))}</button>
         </div>
         <div class="archived-session-toolbar">
         <label class="archived-session-search-field" for="archivedSessionSearchInput">
@@ -2160,6 +2161,7 @@
         </div>
         <div class="archived-sessions-content">${archivedSessionsBodyHtml()}</div>
       </div>`;
+      container.querySelector(".archive-all-delete")?.addEventListener("click", (event) => openArchiveAllDelete(event.currentTarget));
       const projectFilter = container.querySelector("#archivedProjectFilter");
       if (projectFilter) {
         syncArchivedProjectFilter(container);
@@ -2243,6 +2245,37 @@
       if (scope.kind === "deleted-project") return t("archiveFeedbackFormerProject");
       const project = (state.projects || []).find((item) => item.id === scope.projectId);
       return project?.label || project?.name || t("archiveFeedbackFormerProject");
+    }
+
+    function openArchiveAllDelete(trigger) {
+      if (archiveDeleteDialogOpen) return;
+      archiveDeleteDialogOpen = true;
+      const modal = documentRef.createElement("div");
+      modal.className = "settings-modal archive-all-delete-modal";
+      modal.innerHTML = `<div class="modal-card confirm-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(t("archiveAllTitle"))}">
+        <header><h2>${escapeHtml(t("archiveAllTitle"))}</h2></header>
+        <div class="confirm-body"><p>${escapeHtml(t("archiveAllWarning"))}</p></div>
+        <footer class="confirm-actions"><button class="ghost-btn delete-all-cancel" type="button">${escapeHtml(t("cancel"))}</button><button class="danger-btn delete-all-submit" type="button">${escapeHtml(t("delete"))}</button></footer></div>`;
+      documentRef.body.appendChild(modal);
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true; modal.remove(); archiveDeleteDialogOpen = false; trigger?.focus?.();
+      };
+      modal.querySelector(".delete-all-cancel").addEventListener("click", close);
+      modal.querySelector(".delete-all-submit").addEventListener("click", () => {
+        if (closed) return;
+        close(); void archiveFeedback.submit("delete", { scope: { kind: "all" } });
+      });
+      modal.addEventListener("click", (event) => { if (event.target === modal) close(); });
+      modal.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+        if (event.key !== "Tab") return;
+        const controls = [...modal.querySelectorAll("button")];
+        if (event.shiftKey && documentRef.activeElement === controls[0]) { event.preventDefault(); controls[1].focus(); }
+        if (!event.shiftKey && documentRef.activeElement === controls[1]) { event.preventDefault(); controls[0].focus(); }
+      });
+      modal.querySelector(".delete-all-cancel").focus();
     }
 
     async function openArchiveGroupDelete(group, trigger, retryOf = null) {

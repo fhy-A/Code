@@ -15164,3 +15164,9 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   #modelPillWrap .model-picker-menu .model-pill-option { min-height: 44px; }
   #modelPillWrap .model-picker-back { width: 44px; height: 44px; }
 }
+
+/* The all-archive action stays in the panel title row, separate from filtering. */
+.archived-sessions-panel .settings-section-header { display: flex; align-items: flex-start; }
+.archived-sessions-panel .settings-section-header > div { flex: 1 1 220px; min-width: 0; }
+.archived-sessions-panel .archive-all-delete { margin-left: auto; flex: 0 0 auto; align-self: flex-start; color: color-mix(in srgb, var(--red) 75%, var(--text)); border-color: currentColor; }
+.archive-all-delete-modal .delete-all-submit { color: color-mix(in srgb, var(--red) 75%, var(--text)); border-color: currentColor; }
