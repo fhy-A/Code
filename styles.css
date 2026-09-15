@@ -7258,7 +7258,8 @@ body.theme-dark .syn-fn { color: #61afef; }
 .settings-detail { min-height: 0; padding: 16px 20px; overflow: auto; background: var(--panel-3); }
 .settings-detail .field input,
 .settings-detail .field select { height: 42px; font-size: 14px; }
-.settings-detail .field select {
+.settings-detail .field select,
+.archived-project-filter-field select {
   appearance: none; -webkit-appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 5l3 3 3-3' stroke='%237b8493' stroke-width='1.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
