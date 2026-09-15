@@ -84,6 +84,42 @@ H4_CONFIG_PATH = ROOT / "tests" / "e2e" / "h4" / "playwright.config.cjs"
 
 
 class TestFrontendCoreModules(unittest.TestCase):
+    def test_archive_refresh_outcomes_ignore_obsolete_errors(self):
+        start = APP_SOURCE.index("async function refreshArchiveFeedbackLists(")
+        end = APP_SOURCE.index("function applyArchiveFeedbackResult(", start)
+        script = r"""
+const assert = require('node:assert/strict');
+let archiveFeedbackRefreshAttempt=0, archiveFeedbackLastFresh=0;
+const archiveFeedbackEntries=new Map(), pending=[];
+const state={branchPanelOpen:false}, document={querySelector:()=>null};
+const settingsFeature={refreshArchivedSessions:async()=>{}};
+const renderArchiveFeedback=()=>{};
+const archiveFeedbackComplete=(_kind,item)=>item.state==='deleted';
+const expireArchiveFeedbackSuccess=entry=>{entry.successVisible=true;};
+function refreshSessions(options){assert.equal(options.reportFailure,true);return pending.shift().promise;}
+function deferred(){let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};}
+const a={kind:'delete',feedbackRevision:1,value:{items:[{state:'deleted'}]}},b={kind:'delete',feedbackRevision:1,value:{items:[{state:'deleted'}]}};
+archiveFeedbackEntries.set('a',a);archiveFeedbackEntries.set('b',b);
+""" + APP_SOURCE[start:end] + r"""
+(async()=>{
+  let old=deferred(), fresh=deferred();pending.push(old,fresh);
+  let oldRun=refreshArchiveFeedbackLists(a,1), freshRun=refreshArchiveFeedbackLists(b,1);
+  fresh.resolve();await freshRun;old.reject(new Error('late older error'));await oldRun;
+  assert.notEqual(a.refreshFailed,true);
+  let failed=deferred();pending.push(failed);let failedRun=refreshArchiveFeedbackLists(a,1);
+  failed.reject(new Error('visible older error'));await failedRun;assert.equal(a.refreshFailed,true);
+  fresh=deferred();pending.push(fresh);freshRun=refreshArchiveFeedbackLists(b,1);
+  fresh.resolve();await freshRun;assert.equal(a.refreshFailed,false);
+  old=deferred();let newer=deferred();pending.push(old,newer);
+  oldRun=refreshArchiveFeedbackLists(a,1);let newerRun=refreshArchiveFeedbackLists(b,1);
+  newer.reject(new Error('newer error'));await newerRun;old.resolve();await oldRun;
+  assert.equal(b.refreshFailed,true,'An older success must not hide a newer failure');
+  assert.deepEqual(a.value,{items:[{state:'deleted'}]});assert.deepEqual(b.value,{items:[{state:'deleted'}]});
+})().catch(error=>{console.error(error);process.exitCode=1;});
+"""
+        result = subprocess.run(["node", "-e", script], cwd=ROOT, capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_followup_immediate_projection_and_dispatch_guards(self):
         completed = subprocess.run(
             ["node", str(ROOT / "tests/e2e/h4/code081-followup-unit.cjs")],
@@ -9830,7 +9866,7 @@ const sessions = createSessionsFeature({requestJson});
         self.assertEqual(result["missingIdError"], "Session id is required")
 
         self.assertIn("createSessionsFeature({ requestJson: apiJson })", APP_SOURCE)
-        refresh_start = APP_SOURCE.index("async function refreshSessions()")
+        refresh_start = APP_SOURCE.index("async function refreshSessions(")
         refresh_end = APP_SOURCE.index("function scheduleDeferredSessionRefresh(", refresh_start)
         rename_start = APP_SOURCE.index("async function renameSession(")
         archive_start = APP_SOURCE.index("async function archiveSession(", rename_start)
@@ -26764,7 +26800,7 @@ async function scenario(conflicts, options = {{}}) {{
             create.index("if (session.cwd) await project.saveRoot"),
         )
 
-        refresh_start = APP_SOURCE.index("async function refreshSessions()")
+        refresh_start = APP_SOURCE.index("async function refreshSessions(")
         refresh_end = APP_SOURCE.index("function scheduleDeferredSessionRefresh(", refresh_start)
         refresh = APP_SOURCE[refresh_start:refresh_end]
         self.assertIn("if (!isSessionStreaming(session.id))", refresh)
@@ -30045,7 +30081,7 @@ process.stdout.write(JSON.stringify(samples));
         self.assertNotIn('querySelectorAll(".project-more-btn")', listeners_source)
 
         outside_start = APP_SOURCE.index("// Close any context menu on outside click")
-        outside_end = APP_SOURCE.index("async function refreshSessions()", outside_start)
+        outside_end = APP_SOURCE.index("async function refreshSessions(", outside_start)
         outside_source = APP_SOURCE[outside_start:outside_end]
         self.assertIn('if (!e.target.closest(".project-context-menu"))', outside_source)
         self.assertIn('event.key === "Escape"', outside_source)

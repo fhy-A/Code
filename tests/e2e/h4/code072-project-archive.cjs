@@ -63,6 +63,9 @@ async function scenario(browser, host, runtime, width, language, dir) {
     await expect(page.locator(`.archived-session-row[data-session-id="${unassigned.id}"]`)).toBeVisible();
     await open();
     await expect(page.locator('.batch-items li')).toHaveCount(2);
+    await expect(page.locator('.batch-target-list')).not.toHaveAttribute('open','');
+    await expect(page.locator('.batch-active-panel')).toContainText(second.title);
+    await expect(page.locator('.batch-target-list .batch-items')).not.toBeVisible();
     const before=(await api(host,'/api/sessions')).data.map(v=>v.id).sort();
     await page.locator('.batch-cancel').click();
     assert.deepEqual((await api(host,'/api/sessions')).data.map(v=>v.id).sort(),before);
@@ -73,11 +76,14 @@ async function scenario(browser, host, runtime, width, language, dir) {
     const previewText=await page.locator('.batch-body').innerText();
     for(const id of [project.id,first.id,second.id])assert(!previewText.includes(id));
     await expect(page.locator('.batch-submit')).toHaveText(language==='zh'?'停止并归档':'Stop and archive');
+    await expect(page.locator('.project-archive-modal')).toHaveCSS('opacity','1');
     await page.screenshot({path:path.join(dir,runtime+'-confirm.png')});
     const bounds=await page.locator('.project-archive-card').evaluate(el=>{const b=el.getBoundingClientRect();return {left:b.left,right:b.right,width:innerWidth,overflow:el.scrollWidth>el.clientWidth+1};});
     assert(bounds.left>=0&&bounds.right<=bounds.width+1&&!bounds.overflow);
     let releaseResponse;const held=new Promise(resolve=>{releaseResponse=resolve;});let confirms=0;
     await page.route('**/api/project-session-archive/confirm',async route=>{confirms++;const response=await route.fetch();await held;await route.fulfill({response});},{times:1});
+    let releaseRefresh;const slowRefresh=new Promise(resolve=>{releaseRefresh=resolve;});
+    await page.route('**/api/sessions',async route=>{await slowRefresh;await route.abort('failed');},{times:1});
     await page.evaluate(sid=>{__batchProbe.state.sessionId=sid;const button=document.querySelector('.batch-submit');button.click();button.click();},unrelated.id);
     await expect(page.locator('.project-archive-modal')).toHaveCount(0);
     await expect(page.locator('.archive-feedback-card[data-kind="archive"]')).toBeVisible();
@@ -86,9 +92,20 @@ async function scenario(browser, host, runtime, width, language, dir) {
     await expect(page.locator('.project-archive-modal')).toHaveCount(0);
     await page.evaluate(()=>__batchProbe.settings.openSettingsPage("theme"));
     releaseResponse();
-    await expect(page.locator('.toast.success')).toContainText(language==='zh'?'已归档 2 个会话':'Archived 2 sessions');
-    await expect(page.locator('.toast.success')).toContainText(language==='zh'?'设置 → 已归档会话':'Settings → Archived sessions');
-    await expect(page.locator('.archive-feedback-card[data-kind="archive"]')).toHaveCount(0);
+    const success=page.locator('.archive-feedback-card[data-kind="archive"].is-success');
+    await expect(success).toContainText(language==='zh'?'已归档 2 个会话':'Archived 2 sessions');
+    await expect(success).toContainText(language==='zh'?'设置 → 已归档会话':'Settings → Archived sessions');
+    await expect(page.locator('.toast.success')).toHaveCount(0);
+    await expect(page.locator('.archive-feedback-card[data-state="processing"]')).toHaveCount(0);
+    assert.equal(await success.evaluate(el=>el.closest('#toastContainer')!==null),true);
+    await expect(success).toHaveCount(0,{timeout:9000});
+    releaseRefresh();
+    await expect(success.locator('.feedback-refresh')).toBeVisible();
+    await expect(success).toHaveAttribute('data-state','success');
+    await expect(success.locator('.feedback-continue,.feedback-retry')).toHaveCount(0);
+    await page.screenshot({path:path.join(dir,runtime+'-refresh-failed.png')});
+    await success.locator('.feedback-refresh').click();
+    await expect(success.locator('.archive-feedback-refresh-error')).toHaveCount(0);
     await expect(page.locator(".settings-nav-item.active")).toHaveAttribute("data-panel","theme");
     await expect(page.locator("#settingsDetail .tp-row").first()).toBeVisible();
     assert.equal(confirms,1);assert.equal(await page.evaluate(()=>__batchProbe.state.sessionId),unrelated.id);
@@ -129,7 +146,7 @@ async function scenario(browser, host, runtime, width, language, dir) {
     await page.route('**/api/project-session-archive/confirm',async route=>{await route.fetch();await route.abort('failed');},{times:1});
     await open();await page.locator('.batch-submit').click();
     await expect(page.locator('.project-archive-modal')).toHaveCount(0);
-    const notice=page.locator('.archive-feedback-card[data-kind="archive"]');
+    const notice=page.locator('.archive-feedback-card[data-kind="archive"]:not(.is-success)');
     await expect(notice.locator('.feedback-check')).toBeVisible();
     await expect(notice).toContainText(language==='zh'?'暂时无法确认':'not confirmed');
     const unknownText=await notice.innerText();
@@ -149,7 +166,7 @@ async function scenario(browser, host, runtime, width, language, dir) {
     await api(host,`/api/session-archive/${failed.id}/restore`,'POST',{});
     const later=await make(runtime+' later excluded from retry',project.id);
     await notice.locator('.feedback-retry').click();await expect(page.locator('.batch-items li')).toHaveCount(1);
-    await expect(page.locator('.batch-body')).toContainText(failed.title);
+    await page.locator('.batch-target-list > summary').click();await expect(page.locator('.batch-body')).toContainText(failed.title);
     await page.locator('.batch-cancel').click();await expect(notice.locator('.feedback-retry')).toBeVisible();
     await notice.locator('.feedback-retry').click();await page.locator('.batch-submit').click();
     await expect(notice).toHaveCount(0);assert((await api(host,'/api/sessions')).data.some(v=>v.id===later.id));
@@ -162,6 +179,22 @@ async function scenario(browser, host, runtime, width, language, dir) {
     await page.route('**/api/project-session-archive/confirm',async route=>{continued=route.request().postDataJSON();await route.continue();},{times:1});
     await notice.locator('.feedback-continue').click();await expect(notice).toHaveCount(0);
     assert.equal(continued.operationId,lostBeforeSend.operationId);assert.equal(continued.confirmationToken,lostBeforeSend.confirmationToken);
+    const largeRoot=path.join(host.root,'large-preview-'+runtime);await fs.mkdir(largeRoot);
+    const large=await api(host,'/api/projects','POST',{label:'Large preview',rootPaths:[largeRoot]});
+    for(let i=0;i<32;i++)await api(host,'/api/sessions','POST',{title:(i<12?'Running ':'Normal ')+i+' '+('Long session title '.repeat(16)),projectId:large.id,cwd:largeRoot,runState:i<12?{status:'running'}:{},messages:[]});
+    await page.evaluate(pid=>__batchProbe.menu(pid,{x:20,y:20}),large.id);await page.locator('[data-action="archive-all"]').click();
+    await expect(page.locator('.batch-submit')).toBeEnabled();
+    await expect(page.locator('.batch-active-panel .batch-items li')).toHaveCount(12);
+    await expect(page.locator('.batch-target-list .batch-items li')).toHaveCount(20);
+    await expect(page.locator('.batch-target-list .batch-items')).not.toBeVisible();
+    await page.locator('.batch-target-list > summary').click();
+    const listBounds=await page.locator('.batch-list-panel .batch-items').evaluateAll(nodes=>nodes.map(el=>({height:el.clientHeight,scroll:el.scrollHeight,overflow:el.scrollWidth>el.clientWidth+1})));
+    assert(listBounds.every(b=>b.height<=201&&b.scroll>b.height&&!b.overflow),JSON.stringify(listBounds));
+    await expect(page.locator('.project-archive-modal')).toHaveCSS('opacity','1');
+const footerBounds=await page.locator('.project-archive-card .confirm-actions').evaluate(el=>({bottom:el.getBoundingClientRect().bottom,height:innerHeight}));assert(footerBounds.bottom<=footerBounds.height-8);
+    const panelStyle=await page.locator('.batch-list-panel').first().evaluate(el=>({border:parseFloat(getComputedStyle(el).borderTopWidth),background:getComputedStyle(el).backgroundColor,card:getComputedStyle(el.closest('.project-archive-card')).backgroundColor}));assert(panelStyle.border>=1&&panelStyle.background!==panelStyle.card);
+        await page.screenshot({path:path.join(dir,runtime+'-large-lists.png')});
+    await page.locator('.batch-cancel').click();
     // Association alone is never success: previews, failed or unknown child results do not hide a parent item.
     const association=await page.evaluate(()=>{
       const old=__batchProbe.store('archive',{operationId:'ui-parent',projectId:'ui-fixture',confirmed:true,total:2,items:[{sessionId:'a',state:'archive_failed'},{sessionId:'b',state:'uncertain'}]});
@@ -173,7 +206,7 @@ async function scenario(browser, host, runtime, width, language, dir) {
     });
     assert.deepEqual(association,{preview:[],failure:[],unknown:[],success:['a']});
     assert.deepEqual(errors,[]);
-    return {runtime,width,language,cancel:true,lostResponseRead:true,fixedProject:true,searchAndIdFilter:true,singleRestore:true,unfinishedReload:true,noCompletedHistory:true,successCloses:true,fullPreviewTitles:true,partialFailureRetry:true,retryAssociation:true,duplicateClickProtected:true,backgroundCompletionPreservesPanel:true,coldFilter:true,deletedAndUnassigned:true,missingOptionReset:true,unrelatedAndRestoredNavigation:true,bounds};
+    return {runtime,width,language,cancel:true,lostResponseRead:true,fixedProject:true,searchAndIdFilter:true,singleRestore:true,unfinishedReload:true,noCompletedHistory:true,successCloses:true,fullPreviewTitles:true,partialFailureRetry:true,retryAssociation:true,duplicateClickProtected:true,backgroundCompletionPreservesPanel:true,oneTopNotification:true,successExpiresDuringSlowRefresh:true,refreshFailurePreservesSuccess:true,coldFilter:true,deletedAndUnassigned:true,missingOptionReset:true,unrelatedAndRestoredNavigation:true,bounds};
   } catch(error) {
     await page.screenshot({path:path.join(dir,runtime+'-failed.png')}).catch(()=>{});
     await fs.writeFile(path.join(dir,runtime+'-failure.json'),JSON.stringify({error:String(error.stack),errors,audit},null,2));

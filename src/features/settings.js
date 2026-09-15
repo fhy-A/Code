@@ -2141,12 +2141,7 @@
         <div class="settings-section-header">
           <div><h3>${escapeHtml(t("archivedSessions"))}</h3><p>${escapeHtml(t("archivedSessionsDescription"))}</p></div>
         </div>
-        <label class="archived-project-filter-field" for="archivedProjectFilter">
-          <span>${escapeHtml(t("archivedProjectFilter"))}</span>
-          <select id="archivedProjectFilter">
-            <option value="">${escapeHtml(t("archivedProjectAll"))}</option>
-          </select>
-        </label>
+        <div class="archived-session-toolbar">
         <label class="archived-session-search-field" for="archivedSessionSearchInput">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/>
@@ -2156,6 +2151,13 @@
             placeholder="${escapeHtml(t("archivedSessionSearchPlaceholder"))}"
             aria-label="${escapeHtml(t("archivedSessionSearchLabel"))}">
         </label>
+        <label class="archived-project-filter-field" for="archivedProjectFilter">
+          <span class="sr-only">${escapeHtml(t("archivedProjectFilter"))}</span>
+          <select id="archivedProjectFilter">
+            <option value="">${escapeHtml(t("archivedProjectAll"))}</option>
+          </select>
+        </label>
+        </div>
         <div class="archived-sessions-content">${archivedSessionsBodyHtml()}</div>
       </div>`;
       const projectFilter = container.querySelector("#archivedProjectFilter");
@@ -2273,7 +2275,7 @@
       modal.addEventListener("keydown", (event) => {
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
         if (event.key !== "Tab") return;
-        const controls = [...modal.querySelectorAll("button:not(:disabled)")];
+        const controls = [...modal.querySelectorAll("button:not(:disabled), summary")].filter((element) => element.getClientRects().length);
         if (event.shiftKey && documentRef.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); }
         if (!event.shiftKey && documentRef.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); }
       });
@@ -2291,9 +2293,12 @@
           const record = archivedSessions.find((entry) => entry.id === item.sessionId);
           return { ...item, title: record?.title || t("untitledSession"), titleAvailable: Boolean(record) };
         });
+        const matchingIds = new Set(filteredArchivedSessions().map((record) => record.id));
+        const outsideSearch = archivedSessionQuery.trim() && current.items.some((item) => !matchingIds.has(item.sessionId));
         modal.querySelector(".delete-batch-body").innerHTML = `<p class="archive-delete-scope"><strong>${escapeHtml(current.projectName)}</strong></p>
-          <p>${escapeHtml(t("archiveGroupDeleteWarning", { count: current.total }))}</p><p>${escapeHtml(t("archiveGroupDeleteSearchScope"))}</p>
-          <ul class="batch-items archive-delete-items">${current.items.map((item) => `<li><span>${escapeHtml(item.titleAvailable ? item.title : t("archiveFeedbackSessionUnavailable"))}</span></li>`).join("")}</ul>`;
+          <p>${escapeHtml(t("archiveGroupDeleteWarning", { count: current.total }))}</p>${outsideSearch ? `<p class="archive-delete-search-note">${escapeHtml(t("archiveGroupDeleteOutsideSearch", { count: current.total }))}</p>` : ""}
+          <details class="batch-target-list"><summary>${escapeHtml(t("archivePreviewList", { count: current.total }))}</summary><section class="batch-list-panel"><h3>${escapeHtml(t("archivePreviewListTitle"))}</h3>
+          <ul class="batch-items archive-delete-items">${current.items.map((item) => `<li><span>${escapeHtml(item.titleAvailable ? item.title : t("archiveFeedbackSessionUnavailable"))}</span></li>`).join("")}</ul></section></details>`;
         modal.querySelector(".delete-batch-submit").disabled = !current.total;
       } catch {
         if (!closed) modal.querySelector(".delete-batch-body").innerHTML = `<p role="alert">${escapeHtml(t("archiveFeedbackPreviewFailed"))}</p>`;

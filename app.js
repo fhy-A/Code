@@ -6735,6 +6735,8 @@ const archiveFeedbackEntries = new Map();
 const archiveFeedbackLoaded = new Set();
 const archiveFeedbackLoading = new Map();
 const archiveFeedbackErrors = new Set();
+let archiveFeedbackRefreshAttempt = 0;
+let archiveFeedbackLastFresh = 0;
 
 function archiveFeedbackEndpoint(kind) {
   return kind === "archive" ? "/api/project-session-archive" : "/api/project-archive-delete";
@@ -6821,7 +6823,8 @@ function renderArchiveFeedback() {
   let rail = document.querySelector(".archive-feedback");
   if (!rail) {
     rail = document.createElement("aside"); rail.className = "archive-feedback";
-    rail.setAttribute("aria-label", t("archiveFeedbackLabel")); document.body.appendChild(rail);
+    rail.setAttribute("aria-label", t("archiveFeedbackLabel"));
+    (document.getElementById("toastContainer") || document.body).appendChild(rail);
   }
   rail.setAttribute("aria-label", t("archiveFeedbackLabel"));
   rail.innerHTML = "";
@@ -6834,22 +6837,29 @@ function renderArchiveFeedback() {
   for (const entry of archiveFeedbackEntries.values()) {
     const { kind, value } = entry;
     const issues = archiveFeedbackIssues(entry);
-    if (!entry.busy && !entry.unknown && !issues.length) continue;
+    const complete = !entry.unknown && value.confirmed && value.items.every((item) => archiveFeedbackComplete(kind, item));
+    if (!entry.busy && !entry.unknown && !issues.length && !entry.successVisible && !entry.refreshFailed) continue;
     const card = document.createElement("section");
-    card.className = `archive-feedback-card${entry.busy ? "" : " is-warning"}`;
+    card.className = `archive-feedback-card${complete ? " is-success" : ""}${!entry.busy && (!complete || entry.refreshFailed) ? " is-warning" : ""}`;
     card.dataset.kind = kind; card.dataset.operationId = value.operationId; card.tabIndex = -1;
+    card.dataset.state = entry.busy ? "processing" : entry.unknown ? "unknown" : complete ? "success" : "attention";
     const done = value.items.filter((item) => archiveFeedbackComplete(kind, item)).length;
     const allPending = issues.every((item) => archiveFeedbackUnfinished(kind, item));
     const summaryKey = entry.busy ? (kind === "archive" ? "archiveFeedbackArchiving" : "archiveFeedbackDeleting")
-      : entry.unknown ? "archiveFeedbackUnknown" : allPending && !done ? "archiveFeedbackPending" : "archiveFeedbackPartial";
+      : entry.unknown ? "archiveFeedbackUnknown" : complete ? (kind === "archive" ? "archiveFeedbackArchiveSuccess" : "archiveFeedbackDeleteSuccess")
+        : !issues.length ? "archiveFeedbackRefreshFailed" : allPending && !done ? "archiveFeedbackPending" : "archiveFeedbackPartial";
     card.innerHTML = `<strong>${escapeHtml(archiveFeedbackProjectName(kind, value))} · ${escapeHtml(t(kind === "archive" ? "archiveFeedbackArchive" : "archiveFeedbackDelete"))}</strong>
-      <p role="${entry.busy ? "status" : "alert"}">${escapeHtml(t(summaryKey, { total: value.total, done, remaining: issues.length }))}</p>
+      <p role="${entry.busy || complete ? "status" : "alert"}">${escapeHtml(t(summaryKey, { total: value.total, count: value.total, done, remaining: issues.length }))}</p>
+      ${entry.refreshFailed ? `${complete || issues.length ? `<p class="archive-feedback-refresh-error" role="alert">${escapeHtml(t("archiveFeedbackRefreshFailed"))}</p>` : ""}<button type="button" class="mini-btn feedback-refresh"${entry.refreshing ? " disabled" : ""}>${escapeHtml(t("archiveFeedbackRefreshList"))}</button>` : ""}
       ${!entry.busy && !entry.unknown && issues.length ? `<details${entry.expanded ? " open" : ""}><summary>${escapeHtml(t("archiveFeedbackViewIssues", { count: issues.length }))}</summary>
         <ul>${issues.map((item) => `<li data-session-id="${escapeHtml(item.sessionId)}" data-state="${escapeHtml(item.state)}"><span>${escapeHtml(entry.titles.get(item.sessionId) || (item.titleAvailable ? t("untitledSession") : t("archiveFeedbackSessionUnavailable")))}</span><small>${escapeHtml(t(`${kind === "archive" ? "projectArchiveState" : "archiveDeleteState"}_${item.state}`))}</small>${item.result?.errorCode ? `<small>${escapeHtml(archiveFeedbackReason(entry, item))}</small>` : ""}</li>`).join("")}</ul></details>` : ""}
-      ${!entry.busy ? `<div class="archive-feedback-actions"><button type="button" class="mini-btn feedback-check">${escapeHtml(t("archiveFeedbackCheck"))}</button>
+      ${!entry.busy && !complete && (entry.unknown || issues.length) ? `<div class="archive-feedback-actions"><button type="button" class="mini-btn feedback-check">${escapeHtml(t("archiveFeedbackCheck"))}</button>
         ${entry.unknown || issues.some((item) => archiveFeedbackUnfinished(kind, item)) ? `<button type="button" class="mini-btn feedback-continue">${escapeHtml(t(kind === "delete" && issues.some((item) => item.state === "cleanup_pending") ? "archiveDeleteResumeCleanup" : "archiveFeedbackContinue"))}</button>` : ""}
         ${!entry.unknown && !issues.some((item) => archiveFeedbackUnfinished(kind, item)) && value.retryable ? `<button type="button" class="mini-btn feedback-retry">${escapeHtml(t("archiveFeedbackRetry"))}</button>` : ""}</div>` : ""}`;
     card.querySelector("details")?.addEventListener("toggle", (event) => { entry.expanded = event.currentTarget.open; });
+    card.querySelector(".feedback-refresh")?.addEventListener("click", () => {
+      if (!entry.refreshing) void refreshArchiveFeedbackLists(entry, entry.feedbackRevision);
+    });
     card.querySelector(".feedback-check")?.addEventListener("click", () => void checkArchiveFeedback(entry));
     card.querySelector(".feedback-continue")?.addEventListener("click", () => void checkArchiveFeedback(entry, true));
     card.querySelector(".feedback-retry")?.addEventListener("click", () => {
@@ -6904,18 +6914,50 @@ async function reconcileProjectArchiveNavigation(batch, projectId) {
   return false;
 }
 
-async function applyArchiveFeedbackResult(entry, result) {
-  archiveFeedbackStore(entry.kind, result, { unknown: false });
-  const complete = result.items.every((item) => archiveFeedbackComplete(entry.kind, item));
-  // Reconcile navigation from this exact result even when list refresh fails.
-  if (entry.kind === "archive") await reconcileProjectArchiveNavigation(result, result.projectId);
-  if (complete) showToast(t(entry.kind === "archive" ? "archiveFeedbackArchiveSuccess" : "archiveFeedbackDeleteSuccess", { count: result.total }), "success", { duration: 6000 });
+function expireArchiveFeedbackSuccess(entry) {
+  clearTimeout(entry.successTimer);
+  entry.successVisible = true;
+  entry.successTimer = setTimeout(() => {
+    entry.successVisible = false; renderArchiveFeedback();
+  }, 6000);
+}
+
+async function refreshArchiveFeedbackLists(entry, revision) {
+  const attempt = ++archiveFeedbackRefreshAttempt;
+  entry.refreshing = true;
+  renderArchiveFeedback();
   try {
-    await refreshSessions();
+    // Preserve the original navigation guard; list work must not delay the result.
+    if (entry.kind === "archive") await reconcileProjectArchiveNavigation(entry.value, entry.value.projectId);
+    await refreshSessions({ reportFailure: true });
     if (state.branchPanelOpen) renderBranchTree();
     const archivePanelVisible = document.querySelector('.settings-nav-item.active')?.dataset.panel === "archives";
     await settingsFeature?.refreshArchivedSessions?.({ rerender: archivePanelVisible });
-  } catch { showToast(t("archiveFeedbackRefreshFailed"), "warning"); }
+    if (entry.feedbackRevision !== revision) return;
+    const wasFailed = entry.refreshFailed;
+    archiveFeedbackLastFresh = Math.max(archiveFeedbackLastFresh, attempt);
+    for (const older of archiveFeedbackEntries.values()) {
+      if ((older.refreshFailureAttempt || 0) <= attempt) older.refreshFailed = false;
+    }
+    if (wasFailed && entry.value.items.every((item) => archiveFeedbackComplete(entry.kind, item))) expireArchiveFeedbackSuccess(entry);
+  } catch {
+    if (entry.feedbackRevision === revision && attempt > archiveFeedbackLastFresh) {
+      entry.refreshFailed = true; entry.refreshFailureAttempt = attempt;
+    }
+  } finally {
+    if (entry.feedbackRevision === revision) { entry.refreshing = false; renderArchiveFeedback(); }
+  }
+}
+
+function applyArchiveFeedbackResult(entry, result) {
+  archiveFeedbackStore(entry.kind, result, { unknown: false, busy: false, refreshFailed: false });
+  entry.feedbackRevision = (entry.feedbackRevision || 0) + 1;
+  const complete = result.items.every((item) => archiveFeedbackComplete(entry.kind, item));
+  clearTimeout(entry.successTimer);
+  entry.successVisible = false;
+  if (complete) expireArchiveFeedbackSuccess(entry);
+  renderArchiveFeedback();
+  void refreshArchiveFeedbackLists(entry, entry.feedbackRevision);
 }
 
 async function submitArchiveFeedback(kind, value) {
@@ -6979,7 +7021,7 @@ async function openProjectArchive(projectId, retryOf = null) {
   modal.addEventListener("keydown", (event) => {
     if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
     if (event.key !== "Tab") return;
-    const controls = [...modal.querySelectorAll("button:not(:disabled)")];
+    const controls = [...modal.querySelectorAll("button:not(:disabled), summary")].filter((element) => element.getClientRects().length);
     if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); }
     if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); }
   });
@@ -6994,9 +7036,9 @@ async function openProjectArchive(projectId, retryOf = null) {
     if (!current.total) { showToast(t("projectArchiveEmpty"), "warning"); close(); return; }
     const namesUnavailable = current.items.some((item) => !item.titleAvailable);
     modal.querySelector(".batch-body").innerHTML = `<p class="batch-project-identity"><strong>${escapeHtml(archiveFeedbackProjectName("archive", current))}</strong></p>
-      <p>${escapeHtml(t("projectArchivePreview", current))}</p>${current.active ? `<p>${escapeHtml(t("projectArchiveStopNotice", current))}</p>` : ""}
-      ${!current.total ? `<p>${escapeHtml(t("projectArchiveEmpty"))}</p>` : ""}
-      <ul class="batch-items">${current.items.map((item) => `<li><span>${escapeHtml(item.title || t(item.titleAvailable ? "untitledSession" : "archiveFeedbackSessionUnavailable"))}</span>${item.active ? `<small>${escapeHtml(t("sessionStopArchiveAction"))}</small>` : ""}</li>`).join("")}</ul>
+      <p>${escapeHtml(t("projectArchivePreview", current))}</p>
+      ${current.active ? `<section class="batch-list-panel batch-active-panel"><h3>${escapeHtml(t("archivePreviewActiveTitle", { count: current.active }))}</h3><ul class="batch-items">${current.items.filter((item) => item.active).map((item) => `<li>${escapeHtml(item.title || t(item.titleAvailable ? "untitledSession" : "archiveFeedbackSessionUnavailable"))}</li>`).join("")}</ul></section>` : ""}
+      ${current.total > current.active ? `<details class="batch-target-list"><summary>${escapeHtml(t(current.active ? "archivePreviewOtherList" : "archivePreviewList", { count: current.total - current.active }))}</summary><section class="batch-list-panel"><h3>${escapeHtml(t("archivePreviewListTitle"))}</h3><ul class="batch-items">${current.items.filter((item) => !item.active).map((item) => `<li>${escapeHtml(item.title || t(item.titleAvailable ? "untitledSession" : "archiveFeedbackSessionUnavailable"))}</li>`).join("")}</ul></section></details>` : ""}
       ${namesUnavailable ? `<p role="alert">${escapeHtml(t("archiveFeedbackPreviewChanged"))}</p>` : ""}`;
     const submit = modal.querySelector(".batch-submit"); submit.disabled = !current.total || namesUnavailable;
     submit.textContent = t(current.active ? "sessionStopArchiveAction" : "projectArchiveConfirm");
@@ -7507,7 +7549,7 @@ document.addEventListener("keydown", function (event) {
   }
 });
 
-async function refreshSessions() {
+async function refreshSessions(options = {}) {
 
   try {
     state.sessions = await listSessionRecords();
@@ -7529,6 +7571,7 @@ async function refreshSessions() {
     }
   } catch (err) {
     console.error("Failed to refresh sessions:", err);
+    if (options?.reportFailure === true) throw err;
     // Keep existing sessions on error — don't wipe the list
   }
 

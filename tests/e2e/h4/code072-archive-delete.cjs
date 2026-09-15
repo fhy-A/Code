@@ -54,12 +54,20 @@ async function scenario(browser,host,runtime,width,language,dir) {
     await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');await openSettings();
     const labels=await page.locator('#archivedProjectFilter option').allTextContents();
     for(const id of [project.id,other.id,gone.id])assert(labels.every(label=>!label.includes(id)));
+    const toolbar=await page.locator('.archived-session-toolbar').evaluate(el=>{
+      const search=el.querySelector('.archived-session-search-field').getBoundingClientRect(),filter=el.querySelector('.archived-project-filter-field').getBoundingClientRect();
+      return {search:{left:search.left,top:search.top,width:search.width},filter:{left:filter.left,top:filter.top,width:filter.width},overflow:el.scrollWidth>el.clientWidth+1};
+    });assert(!toolbar.overflow);
+    if(width>600)assert(Math.abs(toolbar.search.top-toolbar.filter.top)<3&&toolbar.search.left<toolbar.filter.left&&toolbar.search.width>toolbar.filter.width);
+    else assert(toolbar.filter.top>toolbar.search.top);
     await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(project.id));
     await page.locator('#archivedSessionSearchInput').fill('needle');
     await expect(page.locator('.archived-session-row')).toHaveCount(1);
     await expect(page.locator('.archived-group-count')).toHaveText(language==='zh'?'（匹配 1 / 共 2）':'(1 matching / 2 total)');
     await openGroup(project.id);
     await expect(page.locator('.archive-delete-items li')).toHaveCount(2);
+    await expect(page.locator('.archive-delete-items')).not.toBeVisible();
+    await expect(page.locator('.archive-delete-search-note')).toContainText(language==='zh'?'搜索结果之外':'outside the search');
     await expect(page.locator('.archive-delete-scope')).toContainText(project.label);
     assert(!(await page.locator('.delete-batch-body').innerText()).includes(project.id));
     await expect(page.locator('.delete-batch-body')).toContainText(language==='zh'?'不可恢复':'cannot be undone');
@@ -67,12 +75,13 @@ async function scenario(browser,host,runtime,width,language,dir) {
     await page.locator('.delete-batch-cancel').click();
     assert.deepEqual((await api(host,'/api/session-archive')).data.map(v=>v.id).sort(),before);
     await openGroup(project.id);
+    await expect(page.locator('.archive-group-delete-modal')).toHaveCSS('opacity','1');
     await page.screenshot({path:path.join(dir,runtime+'-confirm.png')});
     const bounds=await page.locator('.archive-group-delete-modal .modal-card').evaluate(el=>{const b=el.getBoundingClientRect();return {left:b.left,right:b.right,width:innerWidth,overflow:el.scrollWidth>el.clientWidth+1};});
     assert(bounds.left>=0&&bounds.right<=bounds.width+1&&!bounds.overflow);
     await page.route('**/api/project-archive-delete/confirm',async route=>{await route.fetch();await route.abort('failed');},{times:1});
     await page.locator('.delete-batch-submit').click();await expect(page.locator('.archive-group-delete-modal')).toHaveCount(0);
-    const notice=page.locator('.archive-feedback-card[data-kind="delete"]');
+    const notice=page.locator('.archive-feedback-card[data-kind="delete"]:not(.is-success)');
     await expect(notice.locator('.feedback-check')).toBeVisible();
     await expect(notice).toContainText(language==='zh'?'暂时无法确认':'not confirmed');
     await notice.locator('.feedback-check').click();await expect(notice).toHaveCount(0);
@@ -87,9 +96,12 @@ async function scenario(browser,host,runtime,width,language,dir) {
     await page.locator('#archivedSessionSearchInput').fill('');
     await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(other.id));
     await openGroup(other.id);
+    await expect(page.locator('.archive-delete-search-note')).toHaveCount(0);
     await api(host,`/api/session-archive/${foreign.id}/restore`,'POST',{});
+    await page.route('**/api/sessions',route=>route.abort('failed'),{times:1});
     await page.locator('.delete-batch-submit').click();
     await expect(notice.locator('.feedback-retry')).toBeVisible();
+    await expect(notice.locator('.feedback-refresh')).toBeVisible();
     await notice.locator('summary').click();
     await expect(notice).toContainText(language==='zh'?'已变化':'changed');
     await api(host,`/api/session-archive/${foreign.id}/archive`,'POST',{});
@@ -170,6 +182,20 @@ async function scenario(browser,host,runtime,width,language,dir) {
       assert.deepEqual(await events(),after);
       cleanupCases.push({kind,partialBatchVisible:true,readPreservesPending:true,cleanupOnlyResume:true,factsDeletedOnce:true,copyAndJournalRemoved:true});
     }
+    const largeRoot=path.join(host.root,'delete-large-'+runtime);await fs.mkdir(largeRoot);
+    const large=await api(host,'/api/projects','POST',{label:'Large delete preview',rootPaths:[largeRoot]});projects.push(large);
+    for(let i=0;i<24;i++)await make('Long archive title '+i+' '+('Long text '.repeat(25)),large.id);
+    await page.reload();await waitForRuntime(page,runtime);await page.waitForLoadState('networkidle');await openSettings();
+    await page.locator('#archivedProjectFilter').selectOption(JSON.stringify(large.id));await openGroup(large.id);
+    await expect(page.locator('.archive-delete-search-note')).toHaveCount(0);
+    await expect(page.locator('.archive-delete-items')).not.toBeVisible();await page.locator('.batch-target-list > summary').click();
+    await expect(page.locator('.archive-delete-items li')).toHaveCount(24);
+    const largeBounds=await page.locator('.archive-delete-items').evaluate(el=>({height:el.clientHeight,scroll:el.scrollHeight,overflow:el.scrollWidth>el.clientWidth+1}));
+    assert(largeBounds.height<=201&&largeBounds.scroll>largeBounds.height&&!largeBounds.overflow,JSON.stringify(largeBounds));
+    await expect(page.locator('.archive-group-delete-modal')).toHaveCSS('opacity','1');const footerBounds=await page.locator('.project-archive-card .confirm-actions').evaluate(el=>({bottom:el.getBoundingClientRect().bottom,height:innerHeight}));assert(footerBounds.bottom<=footerBounds.height-8);
+    const panelStyle=await page.locator('.batch-list-panel').first().evaluate(el=>({border:parseFloat(getComputedStyle(el).borderTopWidth),background:getComputedStyle(el).backgroundColor,card:getComputedStyle(el.closest('.project-archive-card')).backgroundColor}));assert(panelStyle.border>=1&&panelStyle.background!==panelStyle.card);
+    await page.screenshot({path:path.join(dir,runtime+'-large-lists.png')});
+    await page.locator('.delete-batch-cancel').click();
     const association=await page.evaluate(()=>{
       const old=__deleteProbe.store('delete',{operationId:'ui-parent',scope:{kind:'unassigned'},confirmed:true,total:2,items:[{sessionId:'a',state:'failed'},{sessionId:'b',state:'cleanup_pending'}]});
       const child=__deleteProbe.store('delete',{operationId:'ui-child',scope:{kind:'unassigned'},retryOf:'ui-parent',confirmed:false,total:1,items:[{sessionId:'a',state:'pending'}]});
@@ -180,7 +206,7 @@ async function scenario(browser,host,runtime,width,language,dir) {
     assert.deepEqual(errors,[]);
     return {runtime,width,language,searchDoesNotLimitScope:true,cancel:true,lostResponseDirectRead:true,
       conflictAndFreshRetry:true,newArchiveExcludedFromRetry:true,unassignedAndHistorical:true,singleDelete:true,
-      noCompletedHistory:true,unfinishedReload:true,completionCloses:true,activeProjectWorkspacePreserved:true,bounds,cleanupCases};
+      noCompletedHistory:true,unfinishedReload:true,completionCloses:true,collapsedList:true,largeListScroll:true,toolbarResponsive:true,activeProjectWorkspacePreserved:true,bounds,cleanupCases};
   } catch(error) {
     await page.screenshot({path:path.join(dir,runtime+'-failed.png')}).catch(()=>{});
     await fs.writeFile(path.join(dir,runtime+'-failure.json'),JSON.stringify({error:String(error.stack),errors,audit},null,2));
