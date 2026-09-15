@@ -1,39 +1,31 @@
 ---
-description: Code design decisions and architecture
+description: Code 宿主架构导航：运行分层、AgentRun/Goal、受管记忆与输出预算边界
 ---
 
-Code is a local web-based AI Coding Agent. It uses a Python `http.server` backend, a vanilla JavaScript frontend, and an OpenAI-compatible gateway such as New API.
+# Code 宿主架构导航
 
-## Current architecture
+本条介绍 Code 本地 Web 编程 Agent 宿主，不代表用户当前项目的架构、目录或授权。以下路径均相对于 Code 源码仓库；实际任务仍须读取用户项目文件及其协作规则，不可套用宿主约定。
 
-Three tiers: Browser UI → local Python service → model gateway.
+## 分层与职责
 
-- **server.py** owns HTTP routing, filesystem/command safety, session persistence, local tools, upstream model connections, retry, SSE event buffering, cancellation, structured model-round aggregation, and a durable AgentRun state machine with project-read, tool-image vision expansion, network, Skill, questionnaire, edit/file authorization, non-replayable command, idempotent project-memory, recoverable direct file mutation, and persistent child-agent delegation protocols.
-- **app.js** owns prompt/context assembly, UI projection, and questionnaire/authorization interactions. All four permission profiles delegate new main tasks to the server. A message sent while the same session is already streaming creates a separate durable background AgentRun and is restored from a session background checkpoint. Persisted legacy browser checkpoints fail explicitly without replay; the obsolete browser Agent loop, browser tool executor, delegation scheduler and message queue have been removed.
-- **agent-runtime.js** bridges the browser to both server-owned model rounds and durable AgentRun tasks. It polls by cursor, reconnects after transient failures, submits questionnaire/authorization decisions, resumes credentials after a service restart, and cancels parent/child runs. `app.js` projects durable authorization waits into the existing diff review card and stores the stable request in the session checkpoint.
-- **New API / compatible gateway** supplies models through `/v1/chat/completions`.
+整体为浏览器界面 → 本地 Python HTTP 服务 → New API 等兼容模型网关。后端基于 Python `http.server`，前端使用原生 JavaScript；网关提供模型连接，不承担本地任务的文件操作与执行状态。
 
-## Runtime boundary
+`server.py` 负责 HTTP 入口及运行协调，`code_runtime/` 承载模型、Agent、Goal、Skill、权限和持久状态等服务端实现。工具执行与授权校验以服务端为准。`app.js` 与 `src/` 负责请求准备、界面状态及事件投影；`agent-runtime.js` 是请求、事件/SSE、游标重连和用户决定提交的桥接层，不是另一套工具执行器。
 
-A server model run owns exactly one upstream model round. It survives browser refresh and buffers replayable raw events. The server also aggregates a structured result containing answer text, reasoning, split tool calls, finish reason, and usage.
+## 生命周期与数据
 
-The independent `/api/agent/runs` path can persist messages and checkpoints, execute the four registered read-only tools, pause durably on `request_user_input`, and run the registered `propose_edit` protocol. Questionnaire state is stored as `pendingInput`; edit approval state is stored as `pendingAuthorization`. Validated answers or authorization decisions become the matching tool result before the run resumes. Edit proposals carry stable content hashes and the original mtime; approved applications are serialized, backed up, atomically replaced, verified, and replay-safe if the process exits after writing. API keys remain memory-only; a process restart loads active model/tool work as `waiting_credentials`, while questionnaire and authorization waits remain actionable without credentials.
+单轮模型运行负责一次逻辑模型调用的流式聚合、结束原因与用量。AgentRun 串联模型和工具轮次，保存检查点、输入或授权等待及终态；恢复须沿用运行标识和事件游标，不能自行重放已有副作用。一个 Session 可承载多个 Run，各自的执行状态不能混用。
 
-The production UI selects a single durable AgentRun execution owner for every valid permission profile. `read` exposes only project reads and interaction, `plan` adds proposal/delegation without direct side effects, `accept` persists user authorization before side effects, and `bypass` executes its allowed side effects without authorization. Session checkpoints store `executionOwner`, `agentRunId`, `agentEventCursor`, the active child `runtimeRunId`, visible questionnaire/authorization state, and independent `backgroundRuns`. Each same-session background message receives a stable `clientRequestId`; the server derives an idempotent AgentRun ID from it so a lost create response, browser refresh, or service restart cannot create a second upstream task. Background runs preserve their own deadline, model policy, authorization projection, submission/start timestamps, result and usage, never replace the main run checkpoint, and remove the checkpoint only after terminal state is saved. Visible timing is end-to-end from each message submission through its own terminal result and never resets on reconnect. Main and background results follow completion order; background result metadata keeps both its job ID and parent task timestamp so the UI can render a compact clickable reply reference to the exact user message without duplicating prompt text. An explicitly saved legacy browser owner is marked failed during recovery, with its existing messages preserved and no model or tool replay. Model rounds reuse the existing SSE renderer while durable model/tool events are projected into the session in order. Cursor advancement and the projected message snapshot are persisted together. Authorization cards preserve the real action (`apply_edit`, `write_file`, `delete_file`, or `run_command`), target and diff/command preview across refresh, and a restored card can submit its decision without an in-memory Promise. The server registry and AgentRun execute `web_fetch`, `use_skill`, `read_skill_resource`, `run_command`, `save_memory`, `write_file`, `delete_file`, and `task` delegation without browser relay. Each `task` creates a durable Child AgentRun with parent IDs and depth, inherits the parent model/permission/tool policy, removes nested delegation and questionnaires, proxies child authorizations through the parent, propagates cancellation, and merges child usage once. Same-turn task calls use a concurrency limit of three; additional children wait for a slot, while tool results are appended to the parent protocol in original call order. Restart recovery reuses persisted child IDs and terminal results.
+Goal 是会话级目标、步骤、证据和验收状态，可跨 Run 推进。模型回答结束、工具调用成功或 AgentRun 进入终态，都不自动证明 Goal 已完成；应核对实际验收状态与证据。
 
-## Safety invariants
+会话消息使用 JSONL，Run 状态另行持久化。源码模式默认使用 `data/`，打包版使用用户目录的 `.code/`，两者不自动同步。定位问题须先确认实际实例和数据目录，不按当前浏览器页签猜测执行归属。
 
-- The service listens on `127.0.0.1` by default.
-- API keys and request payloads are cleared from model runs at terminal state and are never returned by runtime snapshots.
-- Durable AgentRun records never contain API keys; credential-like model option fields and credential-bearing Base URLs are rejected.
-- Path and command checks remain server-side.
-- A tool call must have one execution owner; frontend and backend must never execute the same tool-call ID concurrently.
-- Side-effecting tools require durable idempotency and permission state before they move into the server Agent loop; `propose_edit` is the reference implementation for that rule.
-- Child agents cannot raise the parent permission profile, delegate grandchildren, or request their own interactive questionnaire; child side-effect authorizations are exposed and decided through the parent run.
+## 记忆、权限与预算
 
-## Persistence
+受管 Markdown 正文是记忆事实源，`MEMORY.md` 是派生索引。服务端按每次请求和 Run 所属项目读取最新可见记忆；界面缓存只作展示，不追溯改写已发送请求或历史。持久记忆删除必须确认确切目标、作用域和版本，`bypass` 也不例外。
 
-- Packaged builds use `%USERPROFILE%/.code/`; source mode defaults to `data/`.
-- Session messages use JSONL while metadata and run checkpoints are stored separately.
-- Browser refresh recovery uses persisted session `runState` plus either a single-round runtime ID or a durable AgentRun ID/event cursor.
-- Durable AgentRun state is stored separately under `data/agent-runs/`; all new production task checkpoints reference it without copying credentials into session data.
+自动模式不等于硬沙箱，仍须遵守用户授权及具体服务端边界。“自动单次输出预算”只决定一次模型请求的输出额度，不是整个任务预算，也不能替代上下文容量、Goal 或 Skill 的完成门槛。
+
+## 查阅入口
+
+运行与目录看 `README.md`；记忆看 `docs/memory-consistency.md`；输出额度看 `docs/output-budget.md`；Goal 收尾与验收看 `docs/goal-closeout.md`、`docs/goal-acceptance.md`。最新完成事实看 `docs/development-log/README.md` 及对应日志。工具集合、并发限制和参数应查当前注册表与实现，不依赖本条固化数字。
