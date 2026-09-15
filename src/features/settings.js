@@ -2330,7 +2330,7 @@
         const outsideSearch = archivedSessionQuery.trim() && current.items.some((item) => !matchingIds.has(item.sessionId));
         modal.querySelector(".delete-batch-body").innerHTML = `<p class="archive-delete-scope"><strong>${escapeHtml(current.projectName)}</strong></p>
           <p>${escapeHtml(t("archiveGroupDeleteWarning", { count: current.total }))}</p>${outsideSearch ? `<p class="archive-delete-search-note">${escapeHtml(t("archiveGroupDeleteOutsideSearch", { count: current.total }))}</p>` : ""}
-          <details class="batch-target-list"><summary>${escapeHtml(t("archivePreviewList", { count: current.total }))}</summary><section class="batch-list-panel"><h3>${escapeHtml(t("archivePreviewListTitle"))}</h3>
+          <details class="batch-target-list"><summary>${escapeHtml(t("archivePreviewList", { count: current.total }))}</summary><section class="batch-list-panel">
           <ul class="batch-items archive-delete-items">${current.items.map((item) => `<li><span>${escapeHtml(item.titleAvailable ? item.title : t("archiveFeedbackSessionUnavailable"))}</span></li>`).join("")}</ul></section></details>`;
         modal.querySelector(".delete-batch-submit").disabled = !current.total;
       } catch {

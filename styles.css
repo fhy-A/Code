@@ -7271,7 +7271,7 @@ body.theme-dark .syn-fn { color: #61afef; }
 .settings-detail .system-prompt-text { min-height: 320px; }
 .settings-detail .memory-form textarea { min-height: 140px; }
 .archived-project-filter-field { display: grid; gap: 6px; min-width: 0; }
-.archived-project-filter-field select { width: 100%; min-width: 0; max-width: 100%; }
+.archived-project-filter-field select { width: 100%; min-width: 0; max-width: 100%; padding: 0 32px 0 12px; }
 .archived-session-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .archived-session-toolbar .archived-session-search-field { flex: 1 1 260px; min-width: 0; width: auto; max-width: none; margin: 0; }
 .archived-session-toolbar .archived-project-filter-field { flex: 0 1 200px; min-width: 0; max-width: 100%; margin: 0; }
