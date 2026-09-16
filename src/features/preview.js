@@ -100,6 +100,106 @@
     let restoreTarget = null;
     let lastData = null;
     let rendererSeq = 0;
+    let review = null;
+    let reviewMode = false;
+    const reviewModes = documentRef.getElementById?.("previewWorkspaceModes");
+    function syncReviewModes() {
+      if (reviewModes) {
+        reviewModes.hidden = !review;
+        reviewModes.querySelectorAll("button").forEach(button => button.setAttribute("aria-pressed", String((button.dataset.previewView === "changes") === reviewMode)));
+      }
+      if (tabsElement) tabsElement.hidden = reviewMode;
+    }
+    function renderReview() {
+      if (!reviewMode || !review) return;
+      syncReviewModes();
+      els.previewTitle.textContent = t("reviewTitle");
+      els.previewMeta.textContent = review.summary ? `${t("reviewCount", {count: review.summary.recordedFileCount})} · ${t(review.summary.coverage.complete ? "reviewRecordedOnly" : "reviewIncomplete")}` : t("previewLoading");
+      els.previewLanguage.textContent = "";
+      els.refreshPreview.disabled = true;
+      els.copyPreview.disabled = true;
+      renderModeActions([]);
+      els.filePreview.className = "file-preview recorded-review";
+      if (review.error) { renderNotice(t("reviewUnavailable"), t("reviewUnavailableHint")); return; }
+      if (!review.summary) { els.filePreview.textContent = t("previewLoading"); return; }
+      const summary = review.summary;
+      const groups = new Map();
+      for (const item of summary.operations) {
+        if (!groups.has(item.groupKey)) groups.set(item.groupKey, []);
+        groups.get(item.groupKey).push(item);
+      }
+      const displayPath = path => {
+        const value = path.replaceAll("\\", "/"), root = String(summary.originRoot || "").replaceAll("\\", "/").replace(/\/$/, "");
+        const windows = /^[a-z]:/i.test(value);
+        const comparable = windows ? value.toLowerCase() : value;
+        const prefix = (windows ? root.toLowerCase() : root) + "/";
+        return root && comparable.startsWith(prefix) ? value.slice(prefix.length) : value.split("/").pop();
+      };
+      const selected = summary.operations.find(item => item.operationKey === review.selected);
+      const deleteReasonKey = review.detail?.kind === "delete" && ["binary", "encoding", "limit", "unreadable", "changed", "unverifiable"].includes(review.detail?.bodyReason)
+        ? `reviewDelete_${review.detail.bodyReason}` : null;
+      els.filePreview.innerHTML = `<p class="review-coverage">${escapeHtml(t("reviewRecordedOnly"))}${summary.steerCount ? ` · ${escapeHtml(t("reviewIncludesSteer"))}` : ""}</p>
+        ${!summary.coverage.complete ? `<p class="review-coverage" role="status">${escapeHtml(t("reviewIncompleteHint"))}</p>` : ""}
+        <div class="review-file-list">${[...groups.values()].map(items => `<section><strong title="${escapeHtml(items[0].path)}">${escapeHtml(displayPath(items[0].path))}</strong><small>${escapeHtml(t("reviewExecution", {number: [...new Set(summary.operations.map(op => op.runId))].indexOf(items[0].runId) + 1}))}</small>${items.map((item,index) => `<button type="button" class="review-operation${item.operationKey === review.selected ? " active" : ""}" data-review-operation="${escapeHtml(item.operationKey)}">${escapeHtml(t(`reviewKind_${item.kind}`))}${item.entityKind === "directory" ? ` · ${escapeHtml(t("reviewDirectory"))}` : ""} · ${index + 1}</button>`).join("")}</section>`).join("")}</div>
+        <div class="review-detail">${!selected ? escapeHtml(t(summary.operations.length ? "reviewChooseOperation" : "reviewNoRecords")) : review.detailError ? escapeHtml(t("reviewUnavailableHint")) : !review.detail ? escapeHtml(t("previewLoading")) : review.detail.bodyState === "diff" ? options.renderDiff(review.detail.diff) : escapeHtml(t(deleteReasonKey || (review.detail.bodyState === "not-retained" ? "reviewBodyMissing" : review.detail.bodyState === "limit" ? "reviewBodyLimit" : "reviewNoLineDiff")))}</div>`;
+      els.filePreview.onclick = event => {
+        const key = event.target.closest?.("[data-review-operation]")?.dataset.reviewOperation;
+        if (key) void selectReviewOperation(key);
+      };
+    }
+    function reviewUrl(id, suffix = "", revision = null) {
+      const query = new URLSearchParams({ dataSourceId: scope.dataSourceId, sessionId: scope.sessionId, sessionInstanceId: scope.sessionInstanceId });
+      if (revision) query.set("revision", revision);
+      return `/api/agent/runs/${encodeURIComponent(id)}/file-changes${suffix}?${query}`;
+    }
+    async function readReviewSummary(id, {signal} = {}) {
+      const currentScope = scope;
+      if (!currentScope?.sessionId || !/^[a-f0-9]{32}$/.test(id || "")) throw new Error("review_unavailable");
+      const summary = await apiJson(reviewUrl(id), {signal});
+      if (scope !== currentScope || summary.rootRunId !== id || summary.sessionId !== currentScope.sessionId
+          || summary.dataSourceId !== currentScope.dataSourceId || summary.sessionInstanceId !== currentScope.sessionInstanceId) throw new Error("review_changed");
+      return summary;
+    }
+    async function openReview(id, {fileKey} = {}) {
+      if (!/^[a-f0-9]{32}$/.test(id || "")) return false;
+      const intent = ++openIntentSeq, sessionId = state.sessionId;
+      const initialization = scope ? null : (restoring || restore());
+      const navigation = epoch; // restore begins navigation synchronously; no tolerated extra epoch.
+      if (initialization) await initialization;
+      if (intent !== openIntentSeq || sessionId !== state.sessionId || scope?.sessionId !== sessionId || !scope?.sessionId || navigation !== epoch) return false;
+      saveView(); clearRenderer(false);
+      reviewMode = true; review = { id, summary: null, selected: null, detail: null };
+      const current = review, ownEpoch = epoch, seq = requestSeq;
+      if (workspace) workspace.paneOpen = true;
+      els.workbench.classList.add("preview-open");
+      renderReview();
+      try {
+        const summary = await apiJson(reviewUrl(id));
+        if (review !== current || epoch !== ownEpoch || requestSeq !== seq || !reviewMode) return false;
+        review.summary = summary;
+      } catch (_) {
+        if (review !== current || epoch !== ownEpoch || requestSeq !== seq || !reviewMode) return false;
+        review.error = true;
+      }
+      renderReview();
+      const selected = fileKey && review.summary?.operations.filter(op => op.fileKey === fileKey).at(-1);
+      if (selected) await selectReviewOperation(selected.operationKey);
+      return true;
+    }
+    async function selectReviewOperation(key) {
+      if (!reviewMode || !review?.summary?.operations.some(item => item.operationKey === key)) return;
+      const current = review, ownEpoch = epoch, seq = ++requestSeq;
+      review.selected = key; review.detail = null; review.detailError = false; renderReview();
+      try {
+        const detail = await apiJson(reviewUrl(review.id, `/${encodeURIComponent(key)}`, review.summary.revision));
+        if (review !== current || epoch !== ownEpoch || seq !== requestSeq || !reviewMode) return;
+        review.detail = detail;
+      } catch (_) {
+        if (review !== current || epoch !== ownEpoch || seq !== requestSeq || !reviewMode) return;
+        review.detailError = true;
+      }
+      renderReview();
+    }
     const contentCache = new Map();
     const CACHE_ENTRIES = 8;
     const CACHE_BYTES = 8 * 1024 * 1024;
@@ -262,6 +362,7 @@
       gesture = null;
       closedFiles.clear();
       clearCached();
+      review = null; reviewMode = false; syncReviewModes();
       scope = null;
       workspace = null;
       restoring = null;
@@ -349,6 +450,7 @@
     }
     function activate(id, options = {}) {
       if (!workspace) return;
+      reviewMode = false; syncReviewModes();
       saveView();
       clearRenderer(false);
       workspace.active = id;
@@ -746,7 +848,7 @@
 
     function startAutoRefresh() {
       stopAutoRefresh();
-      if (scope && workspace?.paneOpen && activeTab()) {
+      if (!reviewMode && scope && workspace?.paneOpen && activeTab()) {
         pollTimer = global.setTimeout(() => readActive({ refresh: true }), 3000);
       }
     }
@@ -789,6 +891,7 @@
       const beforeGesture = gesture;
       stopAutoRefresh();
       if (ownSeq === requestSeq) {
+        reviewMode = false; syncReviewModes();
         clearRenderer(false);
         ownSeq = requestSeq;
         workspace.paneOpen = true;
@@ -918,10 +1021,12 @@
     }
 
     function close() {
+      openIntentSeq += 1;
       gesture = null;
       saveView();
       if (workspace) workspace.paneOpen = false;
       persist();
+      reviewMode = false; syncReviewModes();
       clearRenderer();
       els.workbench.classList.remove("preview-open");
       els.togglePreview?.focus?.({ preventScroll: true });
@@ -964,6 +1069,15 @@
     function bind() {
       if (bound) return;
       bound = true;
+      reviewModes?.addEventListener("click", event => {
+        const mode = event.target.closest?.("[data-preview-view]")?.dataset.previewView;
+        if (mode === "changes" && review) void openReview(review.id);
+        else if (mode === "files") {
+          reviewMode = false; syncReviewModes();
+          if (activeTab()) void activate(workspace.active);
+          else clearRenderer();
+        }
+      });
       els.refreshPreview.addEventListener("click", () => {
         gesture = null;
         readActive();
@@ -1017,6 +1131,8 @@
     }
 
     return Object.freeze({
+      openReview,
+      readReviewSummary,
       applyPreviewWidth,
       beginNavigation,
       newDraft,
@@ -1040,6 +1156,7 @@
       isOpenIntentCurrent: (token, explicit = false) => token.epoch === epoch && Boolean(scope)
         && token.scopeKey === keyOf(scope) && (explicit || token.seq === openIntentSeq),
       refreshLanguage: () => {
+        if (reviewMode) { renderReview(); return; }
         saveView();
         renderTabs();
         if (lastData && state.previewPath) { renderData(lastData, { scheduleRefresh: false }); restoreView(activeTab()); }

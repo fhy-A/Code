@@ -2627,7 +2627,53 @@
       `;
     }
 
+    function renderRecordedChangeCard(ref, entry) {
+      const summary = entry?.summary;
+      const files = new Map();
+      for (const op of summary?.operations || []) {
+        if (op.entityKind !== "file") continue;
+        if (!files.has(op.fileKey)) files.set(op.fileKey, []);
+        files.get(op.fileKey).push(op);
+      }
+      const hasStats = op => Number.isSafeInteger(op.lineStats?.additions)
+        && op.lineStats.additions >= 0 && Number.isSafeInteger(op.lineStats?.deletions) && op.lineStats.deletions >= 0;
+      const stats = ops => ops.length && ops.every(hasStats)
+        ? ops.reduce((sum, op) => ({additions: sum.additions + op.lineStats.additions,
+          deletions: sum.deletions + op.lineStats.deletions}), {additions: 0, deletions: 0}) : null;
+      const renderStats = value => value ? `<span class="review-additions">+${value.additions}</span><span class="review-deletions">−${value.deletions}</span>` : "";
+      const all = [...files.values()].flat(), known = all.filter(hasStats), total = stats(known);
+      const partial = known.length !== all.length || summary?.coverage?.complete === false;
+      const statsHint = `${t("reviewCumulativeHint")}${partial ? ` ${t("reviewPartialStatsHint")}` : ""}`;
+      const totalLabel = total ? `+${total.additions} −${total.deletions}` : t("reviewStatsUnknown");
+      const root = String(summary?.originRoot || "").replace(/\\/g, "/").replace(/\/$/, "");
+      const pathLabel = path => {
+        const normalized = String(path || "").replace(/\\/g, "/");
+        const windows = /^[a-z]:\//i.test(root) || root.startsWith("//");
+        const withinRoot = windows ? normalized.toLowerCase().startsWith(root.toLowerCase() + "/") : normalized.startsWith(root + "/");
+        return withinRoot ? normalized.slice(root.length + 1) : normalized;
+      };
+      const fileRows = [...files.entries()].slice(0, entry?.expanded ? files.size : 3).map(([key, ops]) => {
+        const last = ops[ops.length - 1], count = stats(ops), label = pathLabel(last.path);
+        return `<button type="button" class="recorded-change-file" data-recorded-review="${escapeHtml(ref.rootRunId)}" data-review-file="${escapeHtml(key)}" title="${escapeHtml(last.path)}">
+          <svg class="recorded-file-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 2h6l4 4v12H5z M11 2v5h4"/></svg>
+          <span class="recorded-file-path">${escapeHtml(label)}</span><span class="recorded-file-stats">${renderStats(count)}${!count ? escapeHtml(t(last.kind === "delete" ? "reviewDeleted" : "reviewStatsUnknown")) : ""}</span></button>`;
+      }).join("");
+      return `<section class="recorded-change-summary" data-review-card="${escapeHtml(ref.rootRunId)}">
+        <div class="recorded-change-heading"><strong>${escapeHtml(t("reviewCardTitle"))}${summary ? `<span class="recorded-file-count"> · ${escapeHtml(t("reviewCardCount", {count: files.size}))}</span>` : ""}</strong>
+        <span class="recorded-total" role="group" title="${escapeHtml(statsHint)}" aria-label="${escapeHtml(`${totalLabel}. ${statsHint}`)}">${total ? `${renderStats(total)}${partial ? '<sup class="review-stats-partial" aria-hidden="true">*</sup>' : ""}` : summary && all.length ? escapeHtml(t("reviewStatsUnknown")) : ""}</span>
+        <button type="button" data-recorded-review="${escapeHtml(ref.rootRunId)}">${escapeHtml(t("reviewInspect"))}</button></div>
+        ${summary ? `${fileRows}${!files.size ? `<p class="recorded-change-note">${escapeHtml(t("reviewNoRecords"))}</p>` : ""}${!summary.coverage.complete ? `<p class="recorded-change-note">${escapeHtml(t("reviewIncompleteHint"))}</p>` : ""}
+        ${files.size > 3 ? `<button type="button" class="recorded-change-expand" data-review-expand="${escapeHtml(ref.rootRunId)}" aria-expanded="${Boolean(entry?.expanded)}">${escapeHtml(t(entry?.expanded ? "reviewCollapse" : "reviewShowMore", {count: files.size - 3}))}</button>` : ""}`
+        : `<button type="button" class="recorded-change-load" data-review-load="${escapeHtml(ref.rootRunId)}" ${entry?.loading ? "disabled" : ""}>${escapeHtml(t(entry?.loading ? "reviewLoadingFiles" : entry?.error ? "reviewRetryFiles" : "reviewLoadFiles"))}</button>`}
+      </section>`;
+    }
+
     function projectMessages(messages = [], projection = {}) {
+      const reviewOwners = new Map();
+      messages.forEach((message, index) => {
+        const ref = message?.meta?.recordedChangeReview;
+        if (/^[a-f0-9]{32}$/.test(ref?.rootRunId || "")) reviewOwners.set(ref.rootRunId, index);
+      });
       const hasActiveRun = Boolean(projection.hasActiveRun);
       const runOwnership = agentRunProjectionOwnership(projection.runState, hasActiveRun);
       const branchMarker = projection.branchMarker || null;
@@ -2659,6 +2705,28 @@
             && !["pending", "canceled"].includes(message.meta?.queuedDispatch?.status)) legacyScope = index;
         legacyScopes[index] = legacyScope;
       });
+      const reviewAnchors = new Map();
+      for (const ownerIndex of reviewOwners.values()) {
+        const owner = messages[ownerIndex], ref = owner.meta.recordedChangeReview;
+        let anchor = ownerIndex;
+        const detached = isDetachedProjectionMessage(owner);
+        const jobId = owner.meta?.jobId || owner.meta?.backgroundDispatch?.id;
+        for (let i = ownerIndex + 1; i < messages.length; i += 1) {
+          const message = messages[i];
+          if (!message || isInternalMessage(message)) continue;
+          if (detached) {
+            if (jobId && (message.meta?.jobId || message.meta?.backgroundDispatch?.id) === jobId) anchor = i;
+          } else {
+            if (message.role === "user" && !isSteerProjectionMessage(message) && !isDetachedProjectionMessage(message)
+                && message.meta?.kind !== "user-input-summary"
+                && !["pending", "canceled"].includes(message.meta?.queuedDispatch?.status)) break;
+            if (!isDetachedProjectionMessage(message)
+                && !["pending", "canceled"].includes(message.meta?.queuedDispatch?.status)) anchor = i;
+          }
+        }
+        if (!reviewAnchors.has(anchor)) reviewAnchors.set(anchor, []);
+        reviewAnchors.get(anchor).push(ref);
+      }
       const toolIdentity = (message, id, index) => `${String(message.meta?.agentRunId || `legacy-turn-${legacyScopes[index]}`)}\u0000${String(id)}`;
       const resultIsTerminal = (message) => ["succeeded", "failed", "cancelled", "completed", "interrupted"].includes(
         getProcessCallView({args: {}, resultMessage: message,
@@ -2838,6 +2906,10 @@
       };
 
       for (let index = 0; index < messages.length; index += 1) {
+        if (reviewAnchors.has(index - 1)) {
+          closeExecutionTrace();
+          for (const ref of reviewAnchors.get(index - 1)) rows.push(renderRecordedChangeCard(ref, projection.reviewSummaries?.get?.(ref)));
+        }
         if (index === branchBoundary) insertBranchMarker();
         let msg = messages[index];
         if (!msg) continue;
@@ -2982,6 +3054,7 @@
       closeExecutionTrace({
         activeStage: hasActiveRun && currentUserIndex === activeUserIndex,
       });
+      for (const ref of reviewAnchors.get(messages.length - 1) || []) rows.push(renderRecordedChangeCard(ref, projection.reviewSummaries?.get?.(ref)));
       const actionStatus = global.Code?.agent?.tools?.validActionStatus?.(projection.actionStatus);
       const actionRunId = String(projection.runState?.agentRunId || "");
       if (hasActiveRun && actionRunId && actionStatus) {

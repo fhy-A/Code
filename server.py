@@ -33,6 +33,7 @@ import webbrowser
 
 from code_runtime import (
     preview_identity,
+    run_file_changes,
     managed_memory,
     agent_protocol,
     context_calibration,
@@ -3911,13 +3912,106 @@ def _agent_normalize_skill_completion(run, lifecycle):
     )
 
 
+def _public_run_review_binding(run):
+    try:
+        return run_file_changes.binding(run.get("review_binding"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _new_run_review_binding(session_id, rid, client_id, kind, cwd, origin_id, parent_id, continuation):
+    """Best-effort server-owned provenance; never change ordinary Run admission."""
+    try:
+        if not session_id or kind not in {"foreground", "background", "child"}:
+            return None
+        context = _preview_context({"sessionId": session_id}, initialize=True)
+        inherited_id = parent_id or (continuation or {}).get("parentRunId")
+        if inherited_id:
+            with _agent_run_lock:
+                parent = _agent_runs.get(inherited_id)
+                value = _json_clone(parent.get("review_binding")) if parent else None
+            if value is None:
+                value = run_file_changes.Reader(_agent_runs_dir()).get(inherited_id).get("reviewBinding")
+            value = run_file_changes.binding(value)
+            if any(value[k] != context[k] for k in ("dataSourceId", "sessionId", "sessionInstanceId")):
+                return None
+            return value
+        if not client_id:
+            return None
+        return run_file_changes.binding({"schema": run_file_changes.BINDING,
+            **{k: context[k] for k in ("dataSourceId", "sessionId", "sessionInstanceId")},
+            "rootRunId": rid, "rootClientRequestId": client_id,
+            "originMessageId": str(origin_id or ""), "originRoot": str(cwd)})
+    except Exception:
+        return None
+
+
+def _with_file_change(result, target, *, kind, operation_id, directory=False, removed=True):
+    """Auxiliary recording cannot turn a completed tool into a failed tool."""
+    try:
+        if not removed:
+            raise ValueError("Deletion raced with another writer")
+        identity = os.path.normcase(str(target))
+        if preview_identity.path_identity(target) != identity:
+            raise ValueError("Target identity changed")
+        result["fileChange"] = run_file_changes.make_receipt(result, identity,
+            kind=kind, operation_id=operation_id, directory=directory)
+    except Exception:
+        result.pop(run_file_changes.DELETE_PRIVATE, None)
+        result["fileChangeUnavailable"] = True
+    return result
+
+
+def _read_review_scope(session_id):
+    """No bootstrap, recovery, directory creation or access to project content."""
+    def bounded_json(path, limit):
+        metadata = path.stat()
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size > limit:
+            raise ValueError("invalid metadata file")
+        with path.open("rb") as stream:
+            payload = stream.read(limit + 1)
+        if len(payload) > limit:
+            raise ValueError("oversized metadata file")
+        return json.loads(payload)
+    try:
+        sid = safe_session_id(session_id)
+        source = bounded_json(Path(DATA_DIR) / "preview-workspace" / "source.json", 4096)
+        if (source.get("schema") != "code-preview-source/v1"
+                or source.get("rootBinding") != preview_identity.digest(preview_identity.path_identity(DATA_DIR))
+                or not re.fullmatch(r"[a-f0-9]{32}", source.get("dataSourceId", ""))):
+            raise ValueError("invalid source")
+        if (_session_archive_stop_fence_active(sid) or _session_was_deleted(sid)
+                or _session_archive_journal_path(sid).exists()
+                or _session_archive_managed_bundle_path(sid).exists()
+                or _session_archive_legacy_bundle_path(sid).exists()):
+            raise ValueError("inactive Session")
+        matches = []
+        for candidate in SESSIONS_DIR.glob(f"*/*/*/{sid}.json"):
+            matches.append(candidate)
+            if len(matches) == 2:
+                break
+        flat = SESSIONS_DIR / f"{sid}.json"
+        if flat.is_file():
+            matches.append(flat)
+        if len(matches) != 1:
+            raise ValueError("ambiguous or missing Session")
+        path = matches[0]
+        meta = bounded_json(path, 1024 * 1024)
+        if meta.get("id") != sid:
+            raise ValueError("Session mismatch")
+        return {"dataSourceId": source["dataSourceId"], "sessionId": sid,
+                "sessionInstanceId": preview_identity.identity_id(meta.get("previewIdentity"))}
+    except (OSError, ValueError, TypeError, AttributeError):
+        raise run_file_changes.ReviewError("review_scope_unavailable") from None
+
+
 def _agent_run_record(run):
     """Return the credential-free durable representation of an Agent run."""
     rounds = _json_clone(run.get("rounds") or [])
     for item in rounds:
         if isinstance(item, dict):
             item["reasoning"] = ""
-    events = _json_clone(run.get("events") or [])
+    events = run_file_changes.public_value(_json_clone(run.get("events") or []))
     for event in events:
         if not isinstance(event, dict) or event.get("type") != "model_completed":
             continue
@@ -3999,7 +4093,7 @@ def _agent_run_record(run):
            if run.get("reasoning_snapshot") is not None else {}),
         **({"protocolReplay": protocol_replay.normalize(run.get("protocol_replay"), run.get("reasoning_snapshot"))}
            if protocol_replay.kind(run.get("reasoning_snapshot")) else {}),
-        "messages": _json_clone(run.get("messages") or []),
+        "messages": run_file_changes.public_messages(_json_clone(run.get("messages") or [])),
         "tools": _json_clone(run.get("tools") or []),
         "toolBudgets": _json_clone(run.get("tool_budgets") or []),
         "rounds": rounds,
@@ -4040,6 +4134,7 @@ def _agent_run_record(run):
         "pendingSteers": _json_clone(run.get("pending_steers") or []),
         "steerReceipts": _json_clone(run.get("steer_receipts") or []),
         "toolExecutions": tool_executions_record,
+        **({"reviewBinding": _json_clone(run["review_binding"])} if run.get("review_binding") is not None else {}),
         **({"skillLifecycle": skill_lifecycle_record}
            if skill_lifecycle_record else {}),
         **({"skillOutcome": (
@@ -4138,7 +4233,7 @@ def _agent_public_tool_executions(run):
     for call_id, execution in (run.get("tool_executions") or {}).items():
         if _agent_internal_tool(execution.get("name")):
             continue
-        public_result = _json_clone(execution.get("result"))
+        public_result = run_file_changes.public_value(_json_clone(execution.get("result")))
         if execution.get("status") == "waiting_authorization" and isinstance(public_result, dict):
             for private_key in ("newContent", "baseHash", "newHash"):
                 public_result.pop(private_key, None)
@@ -4230,7 +4325,7 @@ def _agent_public_pending_authorization(run):
 def _agent_snapshot(run, cursor=0):
     cursor = max(0, int(cursor or 0))
     with run["condition"]:
-        events = [_json_clone(event) for event in run["events"] if event["seq"] > cursor]
+        events = [run_file_changes.public_value(_json_clone(event)) for event in run["events"] if event["seq"] > cursor]
         for event in events:
             if not isinstance(event, dict) or event.get("type") != "model_completed":
                 continue
@@ -4244,6 +4339,7 @@ def _agent_snapshot(run, cursor=0):
                 tools.append(str(function["name"]))
         return {
             "agentRunId": run["id"],
+            "reviewBinding": _public_run_review_binding(run),
             "sessionId": run["session_id"],
             "cwd": run.get("cwd", ""),
             "workspaceRoots": list(run.get("workspace_roots") or []),
@@ -4357,7 +4453,7 @@ def _build_agent_event(seq, event_type, data, created_at):
     event = {
         "seq": int(seq),
         "type": str(event_type or "event"),
-        "data": _json_clone(data if data is not None else {}),
+        "data": run_file_changes.public_value(_json_clone(data if data is not None else {})),
         "createdAt": _agent_event_created_at(created_at),
     }
     if _AGENT_EVENT_PROTOCOL_V1_ENABLED:
@@ -5120,7 +5216,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
             )
             status = "waiting_recovery"
             resume_status = skill_recovery["priorState"]["status"]
-    events = list(record.get("events") or [])
+    events = run_file_changes.public_value(list(record.get("events") or []))
     next_seq = max(
         int(record.get("nextSeq") or 1),
         max((int(event.get("seq") or 0) for event in events), default=0) + 1,
@@ -5562,6 +5658,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         "cwd": cwd,
         "workspace_roots": workspace_roots,
         "client_request_id": client_request_id,
+        "review_binding": _json_clone(record.get("reviewBinding")),
         "run_kind": run_kind,
         "origin_message_id": origin_message_id,
         "goal_operations_enabled": goal_operations_enabled,
@@ -5628,7 +5725,7 @@ def _agent_run_from_record(record, immutable_skill_reader=None):
         "memory_context_version": _normalize_memory_policy(record.get("memoryContextVersion")),
         "reasoning_snapshot": reasoning_snapshot,
         "protocol_replay": replay,
-        "messages": list(record.get("messages") or []),
+        "messages": run_file_changes.public_messages(list(record.get("messages") or [])),
         "tools": restored_tools,
         "tool_budgets": restored_tool_budgets,
         "rounds": list(record.get("rounds") or []),
@@ -6538,7 +6635,7 @@ def _agent_assistant_tool_calls(tool_calls):
 
 
 def _agent_tool_message_content(result):
-    value = _json_clone(result)
+    value = run_file_changes.public_value(_json_clone(result))
     if isinstance(value, dict):
         value.pop("base64", None)
         value.pop("svgText", None)
@@ -7713,7 +7810,7 @@ def _submit_agent_child_authorization(run, pending, normalized_decision):
         "action": "task_authorization",
         "childAgentRunId": child_run_id,
         "decision": normalized_decision,
-        "childResult": _json_clone(child_result),
+        "childResult": run_file_changes.public_value(_json_clone(child_result)),
     }
 
 
@@ -10764,7 +10861,7 @@ def _agent_model_payload(run):
     goal_final_response = (
         not force_final_round and _agent_goal_final_response_pending(run)
     )
-    payload["messages"] = _agent_model_messages(run)
+    payload["messages"] = run_file_changes.public_messages(_agent_model_messages(run))
     # Keep original safety instructions first and tool-call/result groups intact.
     # Rebuild one request-only message; never search user/history text to dedupe.
     workspace_index = next((index for index, message in enumerate(payload["messages"])
@@ -12920,6 +13017,7 @@ def _create_agent_run(
         "cwd": resolved_cwd,
         "workspace_roots": resolved_workspace_roots,
         "client_request_id": client_request_id,
+        "review_binding": _new_run_review_binding(session_id, run_id, client_request_id, normalized_run_kind, resolved_cwd, origin_message_id, parent_run_id, continuation),
         "run_kind": normalized_run_kind,
         "origin_message_id": origin_message_id,
         "goal_operations_enabled": goal_operations_enabled,
@@ -21900,7 +21998,7 @@ def execute_write_file_tool(payload):
         _atomic_write_edit_text(target, content)
         if _read_edit_text(target) != content:
             raise OSError("written file failed content verification")
-        return {
+        result = {
             "ok": True,
             "action": "write_file",
             "path": rel,
@@ -21911,6 +22009,7 @@ def execute_write_file_tool(payload):
             ),
             "replayed": False,
         }
+        return _with_file_change(result, target, kind="update" if target_existed else "create", operation_id=operation_id)
 
 
 def execute_delete_file_tool(payload):
@@ -21942,6 +22041,12 @@ def execute_delete_file_tool(payload):
             )
 
         size = 0 if is_dir else target.stat().st_size
+        delete_capture, delete_signature, delete_reason = None, None, None
+        if not is_dir:
+            try:
+                delete_capture, delete_signature, delete_reason = run_file_changes.capture_delete(target, operation_id)
+            except Exception:
+                delete_reason = 'unreadable'
         backup_path = None
         if not is_dir:
             backup_path = _file_mutation_backup_path(rel, operation_id, "delete")
@@ -21964,15 +22069,19 @@ def execute_delete_file_tool(payload):
                 json.dumps(receipt, ensure_ascii=False, indent=2) + "\n",
             )
 
+        if delete_capture and not run_file_changes.delete_capture_current(target, delete_capture, delete_signature):
+            delete_capture, delete_reason = None, 'changed'
+        removed = False
         try:
             if is_dir:
                 target.rmdir()
             else:
                 target.unlink()
+            removed = True
         except FileNotFoundError:
             if not receipt_path:
                 raise
-        return {
+        result = {
             "ok": True,
             "action": "delete_file",
             "path": rel,
@@ -21981,6 +22090,11 @@ def execute_delete_file_tool(payload):
             "isDirectory": bool(is_dir),
             "replayed": False,
         }
+        if removed and delete_capture is not None:
+            result[run_file_changes.DELETE_PRIVATE] = delete_capture
+        elif delete_reason:
+            result['deleteReviewReason'] = delete_reason
+        return _with_file_change(result, target, kind="delete", operation_id=operation_id, directory=bool(is_dir), removed=removed)
 
 
 def delete_memory(name, *, expected=None, expected_scope=None, operation=None):
@@ -27857,7 +27971,7 @@ def _execute_apply_edit_proposal_locked(proposal):
     written_text = _read_edit_text(target)
     if _edit_content_hash(written_text) != expected_new_hash:
         raise OSError("written file failed content verification")
-    return {
+    result = {
         "ok": True,
         "action": "apply_edit",
         "proposalId": proposal["proposalId"],
@@ -27868,6 +27982,7 @@ def _execute_apply_edit_proposal_locked(proposal):
         "replayed": False,
         "mtime": int(target.stat().st_mtime * 1000),
     }
+    return _with_file_change(result, target, kind="update" if current_exists else "create", operation_id=proposal["proposalId"])
 
 
 def execute_apply_edit_proposal(proposal):
@@ -28589,6 +28704,20 @@ class CodeHandler(BaseHTTPRequestHandler):
                     if not has_new_events and run["status"] == "running" and wait_seconds > 0:
                         run["condition"].wait(timeout=wait_seconds)
                 self.send_json(_runtime_snapshot(run, cursor))
+                return
+            review_match = re.fullmatch(r"/api/agent/runs/([a-f0-9]{32})/file-changes(?:/([a-f0-9]{64}))?", route)
+            if route.startswith("/api/agent/runs/") and "/file-changes" in route and not review_match:
+                self.send_json({"error": "review_invalid_route", "errorCode": "review_invalid_route"}, 400)
+                return
+            if review_match:
+                binding_query = {key: query.get(key, [""])[0] for key in ("dataSourceId", "sessionId", "sessionInstanceId")}
+                try:
+                    result = run_file_changes.project(_agent_runs_dir(), review_match[1], binding_query,
+                        lambda: _read_review_scope(binding_query["sessionId"]),
+                        operation=review_match[2], revision=query.get("revision", [None])[0])
+                    self.send_json(result)
+                except run_file_changes.ReviewError as exc:
+                    self.send_json({"error": exc.code, "errorCode": exc.code}, exc.status)
                 return
             if route.startswith("/api/agent/runs/"):
                 run_id = route.rsplit("/", 1)[-1]
@@ -31795,7 +31924,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         self.send_json(execute_registered_tool("write_file", self.read_body_json()))
 
     def tool_delete_file(self):
-        self.send_json(execute_registered_tool("delete_file", self.read_body_json()))
+        self.send_json(run_file_changes.public_value(execute_registered_tool("delete_file", self.read_body_json())))
 
     def tool_web_fetch(self):
         result = execute_registered_tool("web_fetch", self.read_body_json())

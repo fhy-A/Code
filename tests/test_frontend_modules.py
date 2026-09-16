@@ -4047,6 +4047,9 @@ const setAgentProjectionShadowEnabled = () => {{}};
         loop_start = APP_SOURCE.index("async function runServerAgentLoop(ctx)")
         loop_end = APP_SOURCE.index("async function executeRunContext(ctx)", loop_start)
         loop_source = APP_SOURCE[loop_start:loop_end]
+        review_start = APP_SOURCE.index("function recordTaskReview(")
+        review_end = APP_SOURCE.index("\n}", review_start) + 2
+        loop_source = APP_SOURCE[review_start:review_end] + "\n" + loop_source
         guard_start = APP_SOURCE.index("function assertAutoOutputSupported(")
         guard_end = APP_SOURCE.index("\n}", guard_start) + 2
         loop_source = APP_SOURCE[guard_start:guard_end] + "\n" + loop_source
@@ -26640,6 +26643,9 @@ eval(source);
         loop_start = APP_SOURCE.index("async function runServerAgentLoop(")
         loop_end = APP_SOURCE.index("async function executeRunContext(", loop_start)
         loop_source = APP_SOURCE[loop_start:loop_end]
+        review_start = APP_SOURCE.index("function recordTaskReview(")
+        review_end = APP_SOURCE.index("\n}", review_start) + 2
+        loop_source = APP_SOURCE[review_start:review_end] + "\n" + loop_source
         self.assertLess(
             loop_source.index("recoverSupersededActiveServerProjection(ctx)"),
             loop_source.index("ctx.messages = Array.isArray(ctx.messages) ? ctx.messages.filter(Boolean) : [];"),

@@ -56,6 +56,12 @@ module.exports = async function reviewCases(browser, baseUrl) {
       const oldInitialization=feature.restore();feature.beginNavigation();contextGate=null;state.sessionId="current-init";
       await feature.restore();await feature.loadFile("current.txt");rejectOld(new Error("late initialization failure"));await oldInitialization;
       check(elements.filePreview.textContent.includes("current.txt"),"late initialization failure cannot clear the new scope");
+      feature.beginNavigation();state.sessionId="review-initialization-A";
+      let releaseReviewInit;contextGate={promise:new Promise(resolve=>releaseReviewInit=resolve)};
+      const oldReview=feature.openReview("1".repeat(32));
+      state.sessionId="review-initialization-B";contextGate=null;await feature.restore();
+      const callsBeforeOldReview=calls.length;releaseReviewInit();await oldReview;
+      check(calls.length===callsBeforeOldReview && !elements.workbench.classList.contains("preview-open") && elements.filePreview.textContent.includes("noFileOpen"),"review click waiting for initialization cannot open a new Session sidebar");
       feature.close();store.clear();
       const id="1".repeat(32),tab={id,fileKey:"2".repeat(64),path:"/fixture/a.txt",locator:"/fixture/a.txt",name:"a.txt",mode:"source",scroll:0,scale:null,page:0,order:1};
       const valid={tabs:[tab],active:id,reuse:id,mru:[id],paneOpen:true,orderCounter:1};

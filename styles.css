@@ -15183,3 +15183,37 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
   .workbench.preview-open .preview-pane { position: fixed; z-index: 40; top: 44px; bottom: 0; right: 0; width: min(420px, 100vw); height: auto; }
   .preview-resizer { display: none; }
 }
+
+/* Recorded task changes reuse the single preview detail area. */
+.preview-workspace-modes { display:flex; gap:6px; padding:8px; border-bottom:1px solid var(--line); }
+.preview-workspace-modes[hidden], .preview-tabs[hidden] { display:none; }
+.preview-workspace-modes button, .review-operation, .recorded-change-summary button { border:1px solid var(--line); border-radius:6px; background:var(--bg); color:inherit; padding:6px 9px; cursor:pointer; }
+.preview-workspace-modes [aria-pressed="true"], .review-operation.active { background:var(--accent-bg); color:var(--accent, #1769d2); }
+.recorded-review { white-space:normal; font-family:"Microsoft YaHei UI", "Segoe UI", sans-serif; display:block; padding:12px; overflow:auto; }
+.review-coverage { margin:0 0 10px; font-size:12px; opacity:.8; overflow-wrap:anywhere; }
+.review-file-list { max-height:210px; overflow:auto; border-bottom:1px solid var(--line); padding-bottom:10px; }
+.review-file-list section { margin:6px 0 12px; }
+.review-file-list strong { display:block; font-size:12px; overflow-wrap:anywhere; }
+.review-file-list small { display:block; opacity:.6; margin:3px 0; }
+.review-operation { margin:2px 4px 2px 0; font-size:12px; }
+.review-detail { margin-top:12px; font-size:12px; overflow:auto; }
+.recorded-change-summary { width:min(760px, 90%); margin:14px auto 20px; font:12px/1.5 "Microsoft YaHei UI", "Segoe UI", sans-serif; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+.recorded-change-summary button { font:inherit; }
+.recorded-change-heading { display:flex; align-items:center; gap:10px; padding:10px 12px; }
+.recorded-change-heading strong { font-size:13px; white-space:nowrap; }
+.recorded-file-count { font-weight:400; opacity:.7; }
+.recorded-change-heading > button { margin-left:auto; flex-shrink:0; }
+.recorded-total, .recorded-file-stats { display:flex; align-items:center; gap:6px; font-variant-numeric:tabular-nums; }
+.recorded-total small, .recorded-file-stats small { opacity:.65; font-size:10px; }
+.recorded-change-summary .recorded-change-file { display:flex; align-items:center; gap:9px; width:100%; border:0; border-radius:0; padding:8px 12px; text-align:left; background:transparent; }
+.recorded-change-file:hover, .recorded-change-expand:hover, .recorded-change-load:hover { background:var(--accent-bg); }
+.recorded-file-icon { width:16px; height:16px; flex-shrink:0; fill:none; stroke:currentColor; stroke-width:1.3; opacity:.65; }
+.recorded-file-path { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.recorded-file-stats { margin-left:auto; flex-shrink:0; font-size:11px; }
+.review-additions { color:#168249; }
+.review-deletions { color:#c64d53; }
+html[data-theme-mode="dark"] .review-additions, html:not([data-theme-mode]) .theme-dark .review-additions { color:#65d69a; }
+html[data-theme-mode="dark"] .review-deletions, html:not([data-theme-mode]) .theme-dark .review-deletions { color:#f28489; }
+.recorded-change-summary .recorded-change-expand, .recorded-change-summary .recorded-change-load { border:0; border-top:1px solid var(--line); border-radius:0; width:100%; padding:9px 12px; background:transparent; text-align:left; opacity:.75; }
+.recorded-change-note { margin:4px 12px 10px; opacity:.65; font-size:11px; }
+@media (max-width:480px) { .recorded-change-heading { gap:6px; } .recorded-total { gap:3px; flex-wrap:wrap; } .recorded-total small { width:100%; } }

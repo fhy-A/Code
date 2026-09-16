@@ -5848,6 +5848,44 @@ def main() -> int:
                 continue
             request_id = command.get("id")
             operation = command.get("command")
+            if operation == "seed-code042-delete-review":
+                # Fixed, stdin-only fixture. Never exposes a general mutation endpoint.
+                session_id = str(command.get("sessionId") or "")
+                if not re.fullmatch(r"[a-f0-9]{16}", session_id) or not code_server.session_path(session_id).is_file():
+                    raise ValueError("Invalid isolated review Session")
+                fixture_root = project_dir / "code042-review"
+                fixture_root.mkdir(exist_ok=True)
+                notes, temporary = fixture_root / "notes.md", fixture_root / "temporary.txt"
+                if notes.exists() or temporary.exists():
+                    raise ValueError("Review fixture already used")
+                run = code_server._create_agent_run(session_id,
+                    {"model": "fixture", "messages": [{"role": "user", "content": "Review fixture"}]},
+                    "http://127.0.0.1:9", [], allowed_tools=[], start_worker=False,
+                    client_request_id="code042-delete-review", run_kind="foreground", cwd=str(fixture_root))
+                effects = []
+                effects.append(("write_file", "review-write-notes", original_execute_registered_tool("write_file",
+                    {"path": str(notes), "content": "one\ntwo\nthree\n", "_operationId": "review-write-notes"})))
+                proposal = code_server.execute_propose_edit_tool({"path": str(notes), "newContent": "ONE\nTWO\nthree\n"})
+                proposal["path"] = str(notes)
+                effects.append(("propose_edit", proposal["proposalId"], original_execute_apply_edit_proposal(proposal)))
+                effects.append(("write_file", "review-write-temp", original_execute_registered_tool("write_file",
+                    {"path": str(temporary), "content": "temporary\n", "_operationId": "review-write-temp"})))
+                effects.append(("delete_file", "review-delete-temp", original_execute_registered_tool("delete_file",
+                    {"path": str(temporary), "_operationId": "review-delete-temp"})))
+                for index, (name, operation_id, result) in enumerate(effects):
+                    if not result.get("ok"):
+                        raise ValueError("Real fixture mutation failed")
+                    execution = {"name": name, "operationId": operation_id, "arguments": "{}"}
+                    code_server._set_agent_execution_result(execution, result)
+                    run["tool_executions"][f"review-{index}"] = execution
+                run["status"] = "completed"
+                code_server._persist_agent_run(run)
+                snapshot = code_server._agent_snapshot(run)
+                if "_codeReviewDelete" in json.dumps(snapshot):
+                    raise ValueError("Private deletion evidence leaked into public Run")
+                _json_line({"type": "response", "id": request_id, "ok": True, "runId": run["id"],
+                            "privateEvidenceRetained": "_codeReviewDelete" in effects[-1][2], "publicProjectionClean": True})
+                continue
             if operation == "enable-static-reasoning":
                 STATIC_REASONING_GATE.set()
                 _json_line({"type": "response", "id": request_id, "ok": True})

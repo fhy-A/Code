@@ -2146,6 +2146,7 @@ function clearPlatformLocalData() {
   updateSendButtonState();
 }
 
+const recordedChangeSummaries = new WeakMap();
 const previewFeature = createPreviewFeature({
   state,
   elements: els,
@@ -2154,6 +2155,7 @@ const previewFeature = createPreviewFeature({
   apiJson,
   renderMarkdown: renderMarkdownLite,
   resolveSyntaxPatterns: _resolveSyntaxPatterns,
+  renderDiff,
   highlightSyntax,
   languageFromPath,
   formatSize,
@@ -2163,6 +2165,84 @@ const previewFeature = createPreviewFeature({
 });
 const { loadFile, applyPreviewWidth } = previewFeature;
 previewFeature.bind();
+els.messageList.addEventListener("click", event => {
+  const load = event.target.closest?.("[data-review-load]");
+  if (load) { event.preventDefault(); void loadTaskReview(load.dataset.reviewLoad); return; }
+  const expand = event.target.closest?.("[data-review-expand]");
+  if (expand) {
+    const ref = getSessionMessages(state.sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === expand.dataset.reviewExpand)?.meta.recordedChangeReview;
+    const entry = ref && recordedChangeSummaries.get(ref);
+    if (entry?.summary) { entry.expanded = !entry.expanded; renderSessionMessages(state.sessionId); }
+    return;
+  }
+  const button = event.target.closest?.("[data-recorded-review]");
+  if (button) { event.preventDefault(); void previewFeature.openReview(button.dataset.recordedReview, {fileKey: button.dataset.reviewFile}); }
+});
+
+async function loadTaskReview(rootId) {
+  const sessionId = state.sessionId;
+  const owner = getSessionMessages(sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId);
+  const ref = owner?.meta.recordedChangeReview;
+  if (!ref || recordedChangeSummaries.get(ref)?.loading || recordedChangeSummaries.get(ref)?.summary) return;
+  const entry = {loading: true}, controller = new AbortController();
+  recordedChangeSummaries.set(ref, entry);
+  const timer = setTimeout(() => controller.abort(), 3000);
+  const deadline = new Promise((_, reject) => controller.signal.addEventListener("abort",
+    () => reject(new Error("review_timeout")), {once: true}));
+  renderSessionMessages(sessionId);
+  try {
+    // Bound this card's wait without cancelling the shared workspace restoration.
+    await Promise.race([previewFeature.ensureRestored(), deadline]);
+    if (controller.signal.aborted || state.sessionId !== sessionId || owner.meta?.recordedChangeReview !== ref
+        || getSessionMessages(sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId) !== owner) throw new Error("review_changed");
+    const summary = await previewFeature.readReviewSummary(rootId, {signal: controller.signal});
+    if (controller.signal.aborted || state.sessionId !== sessionId || owner.meta?.recordedChangeReview !== ref
+        || getSessionMessages(sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId) !== owner) throw new Error("review_changed");
+    entry.summary = summary;
+  } catch (_) { entry.error = true; }
+  finally {
+    clearTimeout(timer); entry.loading = false;
+    if (state.sessionId === sessionId) renderSessionMessages(sessionId);
+  }
+}
+
+function recordTaskReview(ctx, snapshot) {
+  if ((ctx.isSubAgent && !ctx.isDetachedBackground) || !["completed", "failed", "cancelled"].includes(snapshot?.status)) return;
+  const binding = snapshot.reviewBinding;
+  const rootId = binding?.rootRunId || snapshot.agentRunId || ctx.agentRunId;
+  if (!/^[a-f0-9]{32}$/.test(rootId || "")) return;
+  const reference = {rootRunId: rootId, recordedFileCount: 0, incomplete: true, unverified: true};
+  const existing = ctx.messages.findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId);
+  const owner = existing || [...ctx.messages].reverse().find(message => message?.meta?.agentRunId === ctx.agentRunId)
+    || ctx.foregroundOriginMessage;
+  if (!owner) return;
+  owner.meta = {...owner.meta, recordedChangeReview: reference};
+  // The durable terminal path immediately owns a reference, never an awaited network dependency.
+  if (binding?.sessionId !== ctx.sessionId) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  const query = new URLSearchParams({dataSourceId: binding.dataSourceId, sessionId: binding.sessionId, sessionInstanceId: binding.sessionInstanceId});
+  void Promise.resolve().then(() => apiJson(`/api/agent/runs/${rootId}/file-changes?${query}`, {signal: controller.signal}))
+    .then(summary => {
+      if (controller.signal.aborted || owner.meta?.recordedChangeReview !== reference
+          || getSessionMessages(ctx.sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId) !== owner
+          || summary.rootRunId !== rootId || summary.sessionId !== binding.sessionId
+          || summary.dataSourceId !== binding.dataSourceId || summary.sessionInstanceId !== binding.sessionInstanceId) return;
+      if (summary.coverage.complete && summary.operations.length === 0) {
+        // Removing only the last locator would reveal an older duplicate card.
+        for (const message of getSessionMessages(ctx.sessionId)) {
+          if (message?.meta?.recordedChangeReview?.rootRunId === rootId) delete message.meta.recordedChangeReview;
+        }
+      }
+      else {
+        Object.assign(reference, {recordedFileCount: summary.recordedFileCount,
+          incomplete: !summary.coverage.complete, unverified: false, revision: summary.revision});
+        recordedChangeSummaries.set(reference, {summary});
+      }
+      // A late optional response must never save over a newer Session/CAS owner.
+      renderSessionMessages(ctx.sessionId);
+    }).catch(() => {}).finally(() => clearTimeout(timer));
+}
 
 const filesFeature = createFilesFeature({
   state,
@@ -4912,6 +4992,7 @@ function renderMessages() {
     )
     : new Set();
   const html = projectMessages(msgs, {
+    reviewSummaries: recordedChangeSummaries,
     hasActiveRun,
     actionStatus: hasActiveRun && !run.abortController?.signal.aborted
       && run._activeCtx?.sessionId === state.sessionId
@@ -13386,6 +13467,8 @@ async function runBackgroundSubAgentJob(job) {
         await persistBackgroundJob(job);
         continue;
       }
+      recordTaskReview({...subCtx, messages:getSessionMessages(job.sessionId),
+        foregroundOriginMessage:findBackgroundUserMessage(job)}, snapshot);
       if (snapshot.status === "completed") {
         return {
           ok: true,
@@ -15347,6 +15430,7 @@ async function runServerAgentLoop(ctx) {
       });
       continue;
     }
+    recordTaskReview(ctx, snapshot);
     if (snapshot.status === "completed") {
       const result = snapshot.result || {};
       if (result.continuationPaused && result.continuationMessage) {
