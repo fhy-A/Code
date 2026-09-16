@@ -274,20 +274,19 @@
         <aside class="preview-pane" id="previewPane">
           <div class="preview-resizer" id="previewResizer" title="拖拽调整预览宽度" data-i18n-title="dragPreviewWidth"></div>
           <header class="preview-head">
-            <div class="preview-title-wrap">
-              <strong id="previewTitle" data-i18n="noFileOpen">No file open</strong>
-              <span id="previewMeta" data-i18n="selectFileToPreview">Select a file to preview</span>
+            <div class="preview-tab-strip">
+              <div id="previewTabs" class="preview-tabs" role="tablist" data-i18n-aria-label="previewTabs" aria-label="File tabs"></div>
+              <button id="previewTabListToggle" class="preview-tab-list-toggle" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="previewTabListMenu" data-i18n-title="previewTabList" data-i18n-aria-label="previewTabList" title="标签列表" aria-label="标签列表" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M3 3h10M3 6h10M3 9h6m1 3 2 2 2-2"/></svg></button>
+              <button id="previewNewTab" class="preview-tab-add" type="button" data-i18n-title="previewNewTab" data-i18n-aria-label="previewNewTab" title="新标签页" aria-label="新标签页">＋</button>
+              <div id="previewTabListMenu" class="preview-tab-list-menu" role="menu" data-i18n-aria-label="previewOpenTabs" aria-label="已打开的标签" hidden></div>
             </div>
             <div class="preview-actions">
               <div id="previewModeActions" class="preview-mode-actions" aria-label="Preview controls"></div>
-              <span id="previewLanguage" class="preview-language">text</span>
-              <button id="closePreview" class="mini-btn icon-only" type="button" data-i18n-title="close" data-i18n-aria-label="close" aria-label="Close preview">×</button>
+              <span id="previewStatus" class="preview-status" role="status" hidden></span>
               <button id="refreshPreview" class="mini-btn icon-only" type="button" disabled title="Refresh"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg></button>
               <button id="copyPreview" class="mini-btn icon-only" type="button" disabled title="Copy"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
             </div>
           </header>
-          <nav id="previewWorkspaceModes" class="preview-workspace-modes" hidden><button type="button" data-preview-view="files" data-i18n="reviewProjectFiles">项目文件</button><button type="button" data-preview-view="changes" data-i18n="reviewTitle">本轮已记录改动</button></nav>
-          <div id="previewTabs" class="preview-tabs" role="tablist" data-i18n-aria-label="previewTabs" aria-label="File tabs"></div>
           <div id="filePreview" class="file-preview empty">
             <div class="preview-notice">
               <strong data-i18n="noFileOpen">No file open</strong>

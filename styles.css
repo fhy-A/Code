@@ -2733,7 +2733,7 @@ html[data-theme-mode="dark"] .path-image-thumb{outline-color:color-mix(in srgb,v
 .workbench.preview-open .preview-pane {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
 }
 
@@ -15170,14 +15170,35 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 .archive-all-delete-modal .delete-all-submit { color: color-mix(in srgb, var(--red) 75%, var(--text)); border-color: currentColor; }
 
 /* Session preview tabs: one scrollable row, one shared detail renderer. */
-.preview-tabs { display: flex; flex: 0 0 auto; min-width: 0; overflow-x: auto; border-bottom: 1px solid var(--line); gap: 2px; padding: 4px 8px; }
+.preview-tabs { display:flex; flex:0 1 auto; min-width:0; overflow-x:auto; overflow-y:hidden; gap:6px; padding:4px; scrollbar-width:thin; overscroll-behavior-inline:contain; }
 .preview-tabs:empty { display: none; }
-.preview-tab { display: flex; flex: 0 0 auto; max-width: 220px; align-items: center; border-bottom: 2px solid transparent; }
-.preview-tab.active { border-bottom-color: var(--accent); background: var(--accent-bg); }
+.preview-tab-strip { display:flex; position:relative; align-items:stretch; min-width:0; gap:4px; border-bottom:1px solid var(--line); }
+.preview-tab-add { flex:0 0 30px; width:30px; margin:4px 4px 4px 0; padding:0; border:1px solid var(--line); border-radius:6px; color:var(--text); background:var(--panel-2); font-size:20px; cursor:pointer; }
+.preview-tab-strip:has(.preview-tabs:empty) .preview-tab-add { margin-left:4px; min-height:32px; }
+.preview-tab-add:hover, .preview-tab-add:focus-visible { border-color:var(--accent); background:var(--accent-bg); outline-offset:-2px; }
+.preview-tab { display:flex; flex:0 1 auto; min-width:112px; max-width:236px; align-items:stretch; overflow:hidden; border:1px solid var(--line); border-radius:6px; background:var(--panel-2); }
+.preview-tab.is-review { min-width:88px; }
+.preview-tab:hover { background:color-mix(in srgb, var(--accent) 6%, var(--panel-2)); }
+.preview-tab.active { border-color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, var(--panel)); box-shadow:inset 0 -2px var(--accent); }
 .preview-tab button { color: inherit; background: transparent; border: 0; padding: 7px 8px; cursor: pointer; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-tab button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.preview-tab .preview-tab-close { flex: 0 0 28px; padding: 5px; font-size: 18px; }
-@media (max-width: 600px) { .preview-tab { max-width: 180px; } }
+.preview-tab .preview-tab-close { flex:0 0 28px; min-width:28px; width:28px; min-height:32px; padding:3px; font-size:18px; }
+.preview-tab .preview-tab-close:hover { background:color-mix(in srgb, var(--accent) 12%, transparent); }
+.preview-tab-list-toggle { flex:0 0 32px; width:32px; margin:4px 4px 4px 0; padding:0; display:flex; align-items:center; justify-content:center; border:1px solid var(--line); border-radius:6px; color:var(--text); background:var(--panel-2); cursor:pointer; }
+.preview-tab-list-toggle[hidden], .preview-tab-list-menu[hidden] { display:none; }
+.preview-tab-list-toggle:hover, .preview-tab-list-toggle[aria-expanded="true"] { background:var(--accent-bg); border-color:var(--accent); }
+.preview-tab-list-toggle:focus-visible { outline:2px solid var(--accent); outline-offset:-3px; }
+.preview-tab-list-menu { position:absolute; z-index:70; top:100%; right:4px; width:min(360px, calc(100% - 8px)); max-height:min(360px, 60vh); overflow:auto; overscroll-behavior:contain; padding:4px; border:1px solid var(--line); border-radius:8px; background:var(--panel); box-shadow:0 8px 24px #0003; }
+.preview-tab-list-menu button { display:flex; align-items:flex-start; gap:7px; width:100%; padding:8px 6px; border:0; border-radius:4px; color:var(--text); background:transparent; text-align:left; cursor:pointer; }
+.preview-tab-list-menu button:hover, .preview-tab-list-menu button[aria-checked="true"] { background:var(--accent-bg); }
+.preview-tab-list-menu button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.preview-tab-list-menu .preview-menu-check { flex:0 0 16px; margin:0; color:var(--accent); visibility:hidden; }
+.preview-tab-list-menu [aria-checked="true"] .preview-menu-check { visibility:visible; }
+.preview-tab-list-menu .preview-menu-description { min-width:0; margin:0; color:var(--text); text-overflow:clip; }
+.preview-menu-description strong { font:500 12px/1.5 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+.preview-tab-list-menu .preview-menu-description strong, .preview-tab-list-menu .preview-menu-description > span { white-space:normal; overflow-wrap:anywhere; }
+.preview-tab-list-menu .preview-menu-description > span { font-size:11px; line-height:1.4; margin-top:2px; color:var(--muted); }
+@media (pointer:coarse) { .preview-tab .preview-tab-close { min-height:36px; } }
 @media (max-width: 900px) {
   .workbench.preview-open { grid-template-columns: minmax(0, 1fr); }
   .workbench.preview-open .preview-pane { position: fixed; z-index: 40; top: 44px; bottom: 0; right: 0; width: min(420px, 100vw); height: auto; }
@@ -15197,6 +15218,76 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 .review-file-list small { display:block; opacity:.6; margin:3px 0; }
 .review-operation { margin:2px 4px 2px 0; font-size:12px; }
 .review-detail { margin-top:12px; font-size:12px; overflow:auto; }
+
+/* Files and the page-local review share one browser-like tab strip. */
+.preview-head { display:grid; grid-template-columns:minmax(0,1fr); min-height:0; gap:0; padding:0; }
+.preview-head .preview-tabs { padding:4px; gap:6px; border:0; }
+.preview-head .preview-actions { padding:4px 8px; min-height:32px; gap:5px; justify-content:flex-end; }
+.preview-head .preview-mode-actions { margin-right:auto; }
+.preview-head .preview-actions:not(:has(#refreshPreview:enabled, #copyPreview:enabled, .preview-mode-actions button, .preview-status:not([hidden]))) { display:none; }
+.preview-head #refreshPreview:disabled, .preview-head #copyPreview:disabled { display:none; }
+.preview-tab > [role="tab"] { display:flex; flex:1 1 auto; align-items:center; gap:6px; padding:5px 6px; }
+.preview-tab .preview-tab-icon { flex:0 0 14px; width:14px; height:14px; margin:0; color:inherit; }
+.preview-tab .preview-tab-name { display:flex; flex:1 1 auto; align-items:baseline; min-width:0; margin:0; color:inherit; font-size:12px; overflow:hidden; }
+.preview-tab .preview-tab-name span { margin:0; color:inherit; font:inherit; }
+.preview-tab .preview-tab-basename { display:flex; flex:1 1 auto; min-width:0; }
+.preview-tab .preview-tab-stem { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.preview-tab .preview-tab-extension { flex:0 0 auto; max-width:calc(100% - 12px); overflow:hidden; }
+.preview-tab .preview-tab-parent { flex:0 0 auto; max-width:45%; overflow:hidden; text-overflow:ellipsis; opacity:.7; }
+.preview-tab-icon svg { display:block; width:14px; height:14px; }
+.preview-head .preview-status { margin:0; font-size:11px; }
+.preview-head .preview-status[hidden] { display:none; }
+.preview-picker { display:flex; flex-direction:column; overflow:hidden; padding:16px; white-space:normal; font:13px/1.5 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+.preview-picker > :not(.preview-picker-results) { flex-shrink:0; }
+.preview-picker-results { min-height:0; overflow:auto; flex:1 1 auto; }
+.preview-picker-heading h2 { margin:2px 0 6px; font-size:20px; font-weight:600; }
+.preview-picker-heading p { margin:0 0 8px; color:var(--muted); }
+.preview-picker > input { display:block; width:100%; min-width:0; padding:9px 10px; margin:0 0 10px; border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--text); }
+.preview-picker > input:focus { outline:2px solid var(--accent); outline-offset:-2px; }
+.preview-picker-status button, .preview-tree-status button { flex-shrink:0; border:1px solid var(--line); border-radius:5px; padding:4px 7px; background:var(--panel-2); color:var(--text); cursor:pointer; }
+.preview-picker-status { display:flex; align-items:center; gap:8px; justify-content:space-between; color:var(--muted); font-size:12px; }
+.preview-picker-status:not(:empty) { padding:6px 0 10px; }
+.preview-picker-item { display:flex; align-items:center; gap:8px; width:100%; padding:9px 7px; border:0; border-radius:5px; color:var(--text); background:transparent; cursor:pointer; text-align:left; }
+.preview-picker-item > span:first-child { flex:0 0 16px; color:var(--muted); }
+.preview-picker-item > span:last-child { min-width:0; }
+.preview-picker-item strong, .preview-picker-item small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.preview-picker-item strong { font-size:12px; font-weight:500; }
+.preview-picker-item small { font-size:10px; color:var(--muted); }
+.preview-picker-item:hover, .preview-picker-item:focus-visible { background:var(--accent-bg); outline:1px solid var(--accent); outline-offset:-1px; }
+.preview-tree-status { padding:3px 7px 7px; color:var(--muted); font-size:11px; overflow-wrap:anywhere; }
+.preview-tree-status button { margin-left:5px; }
+.preview-picker-tree .preview-picker-item { padding-top:6px; padding-bottom:6px; }
+.preview-picker-tree [aria-level="1"] strong { font-weight:600; }
+.preview-picker-item .preview-tree-toggle { display:flex; align-items:center; justify-content:center; align-self:center; height:16px; }
+.review-task-heading { display:flex; align-items:center; gap:12px; margin:2px 0 12px; font-size:13px; }
+.review-task-total, .review-operation-stats { display:inline-flex; flex:0 0 auto; gap:7px; font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.review-operation-section { margin:0 0 4px; min-width:0; }
+.review-operation-row { display:flex; align-items:center; gap:7px; min-width:0; min-height:34px; cursor:pointer; }
+.review-operation-row > .review-operation { display:flex; flex:0 1 auto; align-items:baseline; min-width:0; overflow:hidden; margin:0; padding:4px 0; border:0; border-radius:3px; background:transparent; color:var(--text); text-align:left; white-space:nowrap; }
+.review-operation-parent { color:var(--muted); overflow:hidden; text-overflow:ellipsis; flex:0 999 auto; }
+.review-operation-name { font-weight:500; overflow:hidden; text-overflow:ellipsis; flex:0 1 auto; min-width:25px; }
+.review-operation-parent + .review-operation-name { max-width:100%; }
+.review-operation-stats { gap:5px; font-size:11px; }
+.review-file-icon { flex:0 0 18px; display:flex; align-items:center; justify-content:center; color:var(--muted); }
+.review-file-badge { font:600 9px/16px ui-monospace, monospace; color:var(--muted); }
+.review-file-badge[data-extension="js"] { color:#b88900; }
+.review-file-badge[data-extension="css"], .review-file-badge[data-extension="ts"] { color:#4f85cf; }
+.review-row-actions { display:flex; flex:0 0 auto; gap:1px; }
+.review-row-action { display:inline-flex; align-items:center; justify-content:center; width:24px; height:28px; padding:0; border:0; border-radius:4px; color:var(--muted); background:transparent; cursor:pointer; }
+.review-row-action:hover, .review-row-action:focus-visible, .review-operation:hover { color:var(--text); background:var(--accent-bg); }
+.review-operation-section > .review-detail { margin:0 0 8px; padding:0; overflow:auto; border:1px solid var(--line); border-radius:5px; }
+.review-detail:not(:has(.compact-diff)) { padding:8px; color:var(--muted); font-size:12px; }
+.compact-diff { margin:0; overflow:hidden; font:12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.compact-diff .diff-lines { overflow-x:auto; }
+.compact-diff .diff-line { white-space:pre; min-width:max-content; }
+.compact-diff-gap { padding:3px 12px; color:var(--muted); border-block:1px solid var(--line); background:var(--panel-2); font:11px/1.6 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+.compact-diff-warning, .compact-diff-empty { padding:8px 12px; margin:0; color:var(--muted); font:12px/1.6 "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+.compact-diff-raw { margin:0; padding:8px 12px; font:inherit; white-space:pre; }
+.compact-diff-no-newline { color:var(--muted); padding-inline:6px; }
+@media (pointer:coarse) { .review-row-action { height:34px; } }
+.recorded-review .review-detail .diff-block { margin:0; border:0; border-radius:0; }
+.recorded-review .review-detail .diff-lines { max-height:none; }
+.recorded-review .review-detail .diff-expand-btn { display:none; }
 .recorded-change-summary { width:min(760px, 90%); margin:14px auto 20px; font:12px/1.5 "Microsoft YaHei UI", "Segoe UI", sans-serif; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
 .recorded-change-summary button { font:inherit; }
 .recorded-change-heading { display:flex; align-items:center; gap:10px; padding:10px 12px; }

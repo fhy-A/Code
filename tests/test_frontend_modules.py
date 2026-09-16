@@ -12691,8 +12691,8 @@ process.stdout.write(JSON.stringify(out));
         self.assertNotIn('prefers-color-scheme', STYLE_SOURCE)
         self.assertIn('#fff 88%', STYLE_SOURCE)
         self.assertIn('FILE_ICON_SVG', APP_SOURCE)
-        self.assertIn('classifyLocalPath?.(p)', APP_SOURCE)
-        self.assertIn('icon.innerHTML = FILE_ICON_SVG', APP_SOURCE)
+        self.assertIn('classifyLocalPath?.(path)', APP_SOURCE)
+        self.assertIn('icon.innerHTML = renderLocalFileIcon(p)', APP_SOURCE)
         self.assertNotIn('icon.textContent = "📄"', APP_SOURCE)
         self.assertIn('--muted', STYLE_SOURCE)
 
@@ -17785,8 +17785,8 @@ const markdownCard = feature.renderEditSuggestionProjection({
 const longDiff = [
   "--- a/long.txt",
   "+++ b/long.txt",
-  "@@ -1,41 +1,41 @@",
-  ...Array.from({length: 41}, (_, index) => ` line-${index + 1}`),
+  "@@ -0,0 +1,41 @@",
+  ...Array.from({length: 41}, (_, index) => `+line-${index + 1}`),
 ].join("\n");
 disclosure.setExpanded("edit-long", true);
 const boundedLongCard = feature.renderEditSuggestionProjection({
@@ -17851,9 +17851,9 @@ process.stdout.write(JSON.stringify({
         self.assertNotIn("data-edit-diff-toggle", data["markdownCard"])
         self.assertNotIn("data-edit-diff-body", data["markdownCard"])
         self.assertIn("tool-edit-markdown", data["markdownCard"])
-        self.assertIn('class="code-block diff-block is-collapsed"', data["boundedLongCard"])
-        self.assertIn("expandDiff:44", data["boundedLongCard"])
-        self.assertIn('class="code-block diff-block is-expanded"', data["fullLongCard"])
+        self.assertIn('class="diff-block compact-diff is-collapsed"', data["boundedLongCard"])
+        self.assertIn("expandDiff:41", data["boundedLongCard"])
+        self.assertIn('class="diff-block compact-diff is-expanded"', data["fullLongCard"])
         self.assertIn("collapseDiff", data["fullLongCard"])
         self.assertFalse(data["sameSessionKept"])
         self.assertEqual(data["beforeSwitch"], {
@@ -21869,12 +21869,14 @@ process.stdout.write(JSON.stringify({
 const handlers = {};
 let resizeCallback = null;
 let workbenchWidth = 1000;
+const pickerNodes = Object.fromEntries(['[data-picker-query]', '.preview-picker-location', '.preview-picker-status', '.preview-picker-results'].map(key => [key, {value:'', focus(){}, setSelectionRange(){}}]));
 const classes = new Set();
 const styles = [];
 const storage = [];
 global.window = {
   Code: {features: {}},
   innerWidth: 2000,
+  setTimeout, clearTimeout,
   addEventListener: (type, callback) => { if (type === "resize") resizeCallback = callback; },
   requestAnimationFrame: (callback) => { callback(); return 1; },
   cancelAnimationFrame: () => {},
@@ -21907,10 +21909,10 @@ const feature = createPreviewFeature({
     copyPreview: eventElement("copy"),
     togglePreview: eventElement("toggle"),
     previewResizer,
-    filePreview: {innerHTML: "", querySelector: () => null},
+    filePreview: {innerHTML: "", dataset: {}, querySelector: selector => pickerNodes[selector] || null},
     previewTitle: {}, previewMeta: {}, previewLanguage: {},
   },
-  apiJson: async () => ({dataSourceId:"source",sessionId:"",sessionInstanceId:"draft"}),
+  apiJson: async () => ({dataSourceId:"source",sessionId:"",sessionInstanceId:"draft",root:"/fixture",items:[],path:"",query:""}),
   renderMarkdown: (value) => value,
   document: {
     documentElement: {style: {setProperty: (...args) => styles.push(args), removeProperty: () => {}}},
@@ -22239,7 +22241,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("const diffFeature = createDiffFeature", APP_SOURCE)
         self.assertIn("const { createPreviewFeature } = window.Code.features.preview", APP_SOURCE)
         self.assertIn("const previewFeature = createPreviewFeature", APP_SOURCE)
-        self.assertIn("const { createFilesFeature, shortPath } = window.Code.features.files", APP_SOURCE)
+        self.assertIn("const { createFilesFeature, shortPath, isAbsoluteFilePath } = window.Code.features.files", APP_SOURCE)
         self.assertIn("const filesFeature = createFilesFeature", APP_SOURCE)
         self.assertIn("getSkillToolBudgets,", APP_SOURCE)
         self.assertIn("const skillsMemoryFeature = createSkillsMemoryFeature", APP_SOURCE)

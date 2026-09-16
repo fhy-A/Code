@@ -37,7 +37,7 @@ async function scenario(browser,host,fixture,runtime,width,language,dir){
   assert.deepEqual(await page.evaluate(()=>window.__menuPreviewArgs),[fixture.summary.operations[0].path,undefined,{newTab:true}]);
   await expect(page.locator('#filePreview')).toContainText(fixture.summary.operations[0].path);
   // Close preview before menu screenshots; no OS process or real path was opened.
-  await page.locator('#closePreview').click();
+  await page.locator('#togglePreview').click();
   const stale=[];
   for(const mode of ['session','navigation','owner','reference','summary']){
    await show();const before={actions:actions.length,previews:previews.length,copies:await page.evaluate(()=>window.__menuCopies.length)};
@@ -61,7 +61,7 @@ async function scenario(browser,host,fixture,runtime,width,language,dir){
   for(const action of ['open','reveal','preview-new']){
    await tree.evaluate(el=>el.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,clientX:100,clientY:100})));
    await menu.locator(`[data-action="${action}"]`).click();
-   if(action==='preview-new'){await expect.poll(()=>previews.length).toBe(2);assert.equal(previews.at(-1),'tree file.txt');await page.locator('#closePreview').click();}
+   if(action==='preview-new'){await expect.poll(()=>previews.length).toBe(2);assert.equal(previews.at(-1),'tree file.txt');await page.locator('#togglePreview').click();}
    else {assert.deepEqual(actions.at(-1),action==='reveal'?{path:'tree file.txt',reveal:true}:{path:'tree file.txt'});}
   }
   // Left click still dispatches historical review, independently of the menu.

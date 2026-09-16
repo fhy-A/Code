@@ -9,7 +9,7 @@ module.exports = async function stateCases(browser, baseUrl) {
     await page.route("**/__preview_state_fixture", (route) => route.fulfill({ contentType: "text/html", body: `<!doctype html>
       <div id="workbench"><div id="previewTabs"></div><div id="filePreview"></div></div>
       <div id="previewTitle"></div><div id="previewMeta"></div><div id="previewLanguage"></div><div id="previewModeActions"></div>
-      <button id="refreshPreview"></button><button id="copyPreview"></button><button id="togglePreview"></button><button id="closePreview"></button><div id="previewResizer"></div>` }));
+      <button id="refreshPreview"></button><button id="copyPreview"></button><button id="togglePreview"></button><div id="previewResizer"></div>` }));
     await page.goto(baseUrl + "/__preview_state_fixture");
     await page.evaluate(() => { window.Code = { features: {} }; });
     await page.addScriptTag({ path: path.resolve(__dirname, "../../..", "src/features/preview.js") });
@@ -23,7 +23,7 @@ module.exports = async function stateCases(browser, baseUrl) {
       } };
       const state = { sessionId: "A", previewWidth: 420 };
       const elements = Object.fromEntries(["workbench", "filePreview", "previewTitle", "previewMeta", "previewLanguage", "previewModeActions",
-        "refreshPreview", "copyPreview", "togglePreview", "closePreview", "previewResizer"].map((id) => [id, document.getElementById(id)]));
+        "refreshPreview", "copyPreview", "togglePreview", "previewResizer"].map((id) => [id, document.getElementById(id)]));
       const digest = async (value) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))].map((n) => n.toString(16).padStart(2,"0")).join("");
       const apiJson = async (url, options = {}) => {
         calls.push(url);

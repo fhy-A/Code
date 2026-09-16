@@ -1345,7 +1345,6 @@ const els = {
 
   copyPreview: document.getElementById("copyPreview"),
 
-  closePreview: document.getElementById("closePreview"),
 
   toggleSidebar: document.getElementById("toggleSidebar"),
   sidebarPeekZone: document.getElementById("sidebarPeekZone"),
@@ -2146,6 +2145,17 @@ function clearPlatformLocalData() {
   updateSendButtonState();
 }
 
+function renderLocalFileIcon(path) {
+  const markdownApi = window.Code?.ui?.markdown;
+  const fileKind = markdownApi?.classifyLocalPath?.(path) || "text";
+    const FILE_ICON_SVG = {
+      binary: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M2 3l1-1h10l1 1v10l-1 1H3l-1-1V3zm1 1v8h10V4H3zm2 2h6v1H5V6zm0 2h4v1H5V8z\"/></svg>",
+      derived: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M4 2.5v11l9-5.5-9-5.5z\"/></svg>",
+      text: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M3 1.5h6l4 4V14a.5.5 0 0 1-.5.5h-9A.5.5 0 0 1 3 14V1.5z\"/><path d=\"M9 1.5V5.5H13\"/></svg>",
+    };
+  return FILE_ICON_SVG[fileKind] || FILE_ICON_SVG.text;
+}
+
 const recordedChangeSummaries = new WeakMap();
 const previewFeature = createPreviewFeature({
   state,
@@ -2153,6 +2163,8 @@ const previewFeature = createPreviewFeature({
   t,
   escapeHtml,
   apiJson,
+  renderFileIcon: renderLocalFileIcon,
+  isAbsoluteFilePath,
   renderMarkdown: renderMarkdownLite,
   resolveSyntaxPatterns: _resolveSyntaxPatterns,
   renderDiff,
@@ -3186,9 +3198,12 @@ function bindCopyButtons() {
       const expanded = block.classList.toggle("is-expanded");
       block.classList.toggle("is-collapsed", !expanded);
       btn.setAttribute("aria-expanded", String(expanded));
+      const projectedLineCount = Number(block.dataset.diffLineCount);
+      const lineCount = Number.isSafeInteger(projectedLineCount) && projectedLineCount >= 0
+        ? projectedLineCount : block.querySelectorAll(".diff-line").length;
       btn.textContent = expanded
         ? t("collapseDiff")
-        : t("expandDiff", { count: block.querySelectorAll(".diff-line").length });
+        : t("expandDiff", { count: lineCount });
       const editId = btn.closest("article.edit-suggestion")?.dataset.editId || "";
       if (editId) editDiffDisclosureState.setFullyExpanded(editId, expanded);
       messageScrollController?.onContentChanged(state.sessionId);
@@ -3826,13 +3841,7 @@ function maybeRenderFileCard(el, p, projectRoot) {
     const icon = document.createElement("span");
     icon.className = "path-file-icon";
     icon.setAttribute("aria-hidden", "true");
-    const fileKind = markdownApi?.classifyLocalPath?.(p) || "text";
-    const FILE_ICON_SVG = {
-      binary: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M2 3l1-1h10l1 1v10l-1 1H3l-1-1V3zm1 1v8h10V4H3zm2 2h6v1H5V6zm0 2h4v1H5V8z\"/></svg>",
-      derived: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M4 2.5v11l9-5.5-9-5.5z\"/></svg>",
-      text: "<svg viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M3 1.5h6l4 4V14a.5.5 0 0 1-.5.5h-9A.5.5 0 0 1 3 14V1.5z\"/><path d=\"M9 1.5V5.5H13\"/></svg>",
-    };
-    icon.innerHTML = FILE_ICON_SVG[fileKind] || FILE_ICON_SVG.text;
+    icon.innerHTML = renderLocalFileIcon(p);
     const name = document.createElement("span");
     name.className = "path-file-name";
     name.textContent = el.textContent || "";

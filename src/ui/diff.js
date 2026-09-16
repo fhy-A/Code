@@ -26,6 +26,63 @@
     };
   }
 
+  // Presentation only. Never use this projection as an edit/apply payload.
+  function compactUnifiedDiff(text = "") {
+    let source = String(text).replace(/\r\n/g, "\n");
+    const fence = source.match(/^```(?:diff)?[^\S\n]*\n([\s\S]*?)\n```[^\S\n]*$/i);
+    if (fence) source = fence[1];
+    const lines = source.split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    const fail = () => ({ok: false, source});
+    // Bound parser work independently of the review controller's retained-body cap.
+    if (source.length > 1048576 || lines.length > 20000) return fail();
+    let i = 0, path = "", previousEnd = [1, 1];
+    while (i < lines.length && /^(diff --git |index |new file mode |deleted file mode |old mode |new mode |similarity index |rename from |rename to )/.test(lines[i])) i++;
+    if (lines[i]?.startsWith("--- ")) {
+      if (!lines[i + 1]?.startsWith("+++ ")) return fail();
+      path = lines[i + 1].slice(4).split("\t")[0]; i += 2;
+    }
+    const selected = [];
+    while (i < lines.length) {
+      const match = lines[i++].match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)?$/);
+      if (!match) return fail();
+      const [oldStart, oldCount, newStart, newCount] = [Number(match[1]), Number(match[2] ?? 1), Number(match[3]), Number(match[4] ?? 1)];
+      if (![oldStart, oldCount, newStart, newCount, oldStart + oldCount, newStart + newCount].every(Number.isSafeInteger)
+          || (oldCount && !oldStart) || (newCount && !newStart)) return fail();
+      let oldLine = oldStart + (oldCount ? 0 : 1), newLine = newStart + (newCount ? 0 : 1), oldUsed = 0, newUsed = 0;
+      if (oldLine < previousEnd[0] || newLine < previousEnd[1]) return fail();
+      const rows = [];
+      while (oldUsed < oldCount || newUsed < newCount || lines[i] === "\\ No newline at end of file") {
+        const line = lines[i++];
+        if (line === "\\ No newline at end of file") {
+          if (!rows.length || rows.at(-1).noNewline) return fail();
+          rows.at(-1).noNewline = true; continue;
+        }
+        if (typeof line !== "string" || !/^[ +\-]/.test(line)) return fail();
+        const kind = line[0] === "+" ? "add" : line[0] === "-" ? "remove" : "context";
+        const row = {kind, text: line.slice(1), before: [oldLine, newLine], oldLine: kind === "add" ? null : oldLine, newLine: kind === "remove" ? null : newLine};
+        if (kind !== "add") { oldLine++; oldUsed++; }
+        if (kind !== "remove") { newLine++; newUsed++; }
+        if (oldUsed > oldCount || newUsed > newCount) return fail();
+        row.after = [oldLine, newLine]; rows.push(row);
+      }
+      const keep = new Set();
+      rows.forEach((row, index) => {
+        if (row.kind !== "context") for (let j = Math.max(0, index - 1); j <= Math.min(rows.length - 1, index + 1); j++) keep.add(j);
+      });
+      rows.forEach((row, index) => { if (keep.has(index)) selected.push(row); });
+      previousEnd = [oldLine, newLine];
+    }
+    const rows = [], gap = (before, after) => {
+      const oldGap = after[0] - before[0], newGap = after[1] - before[1];
+      if (oldGap || newGap) rows.push({kind: "gap", count: oldGap === newGap && oldGap >= 0 ? oldGap : null});
+    };
+    let cursor = [1, 1];
+    for (const row of selected) { gap(cursor, row.before); rows.push(row); cursor = row.after; }
+    if (selected.length) gap(cursor, previousEnd);
+    return {ok: true, rows, path, source};
+  }
+
   function isEditSuggestionMessage(msg) {
     if (!msg || msg.role !== "tool-result") return false;
     const meta = msg.meta || {};
@@ -112,6 +169,25 @@
     const isEditDiffFullyExpanded = options.isEditDiffFullyExpanded || (() => false);
 
     function renderDiff(text, renderOptions = {}) {
+      if (renderOptions.compact) {
+        const parsed = compactUnifiedDiff(text);
+        let html, count;
+        if (!parsed.ok) {
+          count = parsed.source.split("\n").length;
+          html = `<p class="compact-diff-warning">${escapeHtml(t("compactDiffFallback"))}</p><pre class="compact-diff-raw">${escapeHtml(parsed.source)}</pre>`;
+        } else {
+          count = parsed.rows.length;
+          const lang = parsed.path.split(".").pop().toLowerCase();
+          html = parsed.rows.map(row => {
+            if (row.kind === "gap") return `<div class="compact-diff-gap" data-omitted-lines="${row.count ?? 'unknown'}">${escapeHtml(row.count === null ? t("compactDiffGapUnknown") : t("compactDiffGap", {count: row.count}))}</div>`;
+            const marker = row.kind === "add" ? "+" : row.kind === "remove" ? "−" : " ";
+            return `<span class="diff-line diff-${row.kind}" data-old-line="${row.oldLine ?? ''}" data-new-line="${row.newLine ?? ''}"><span class="diff-gutter">${marker}</span><span class="diff-num">${row.newLine ?? row.oldLine}</span><span class="diff-code">${lang ? highlightSyntax(row.text, lang) : escapeHtml(row.text)}</span>${row.noNewline ? `<span class="compact-diff-no-newline" title="${escapeHtml(t("compactDiffNoNewline"))}" aria-label="${escapeHtml(t("compactDiffNoNewline"))}">↵</span>` : ''}</span>`;
+          }).join("") || `<p class="compact-diff-empty">${escapeHtml(t("reviewNoLineDiff"))}</p>`;
+        }
+        const isLong = count > 40, expanded = isLong && renderOptions.expanded === true;
+        const label = expanded ? t("collapseDiff") : t("expandDiff", {count});
+        return `<div class="diff-block compact-diff${isLong ? (expanded ? ' is-expanded' : ' is-collapsed') : ''}" data-diff-line-count="${count}"><div class="diff-lines">${html}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="${expanded}">${escapeHtml(label)}</button>` : ''}</div>`;
+      }
       const lines = normalizeDiffText(text).split("\n");
       let lang = null;
       for (const line of lines) {
@@ -206,15 +282,14 @@
       const diffFullyExpanded = hasDiffBody && isEditDiffFullyExpanded(editInstanceId);
       let body;
       if (isDiff) {
-        body = renderDiff(diffText, { expanded: diffFullyExpanded });
+        body = renderDiff(content, { expanded: diffFullyExpanded, compact: true });
       } else if (isWriteFile) {
-        const ext = (target || "").split(".").pop().toLowerCase() || "";
         const lines = content.split("\n");
         const lineCount = lines.length;
         const isLong = lineCount > 40;
-        const lineHtml = lines.map((line, i) => `<span class="diff-line diff-add"><span class="diff-gutter">+</span><span class="diff-num">${i + 1}</span><span class="diff-code">${highlightSyntax(line, ext)}</span></span>`).join("");
+        const lineHtml = `<pre class="compact-diff-raw">${escapeHtml(content)}</pre>`;
         const expandLabel = diffFullyExpanded ? t("collapseDiff") : t("expandDiff", { count: lineCount });
-        body = `<div class="code-block write-file-preview${isLong ? (diffFullyExpanded ? " is-expanded" : " is-collapsed") : ""}"><div class="diff-lines">${lineHtml}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="${diffFullyExpanded}">${escapeHtml(expandLabel)}</button>` : ""}</div>`;
+        body = `<div class="code-block write-file-preview${isLong ? (diffFullyExpanded ? " is-expanded" : " is-collapsed") : ""}" data-diff-line-count="${lineCount}"><div class="diff-lines">${lineHtml}</div>${isLong ? `<button class="diff-expand-btn" type="button" aria-expanded="${diffFullyExpanded}">${escapeHtml(expandLabel)}</button>` : ""}</div>`;
       } else {
         body = `<div class="tool-edit-markdown">${renderMarkdown(content)}</div>`;
       }
@@ -271,6 +346,7 @@
   }
 
   Code.ui.diff = Object.freeze({
+    compactUnifiedDiff,
     createEditDiffDisclosureState,
     createDiffFeature,
     getDiffStats,

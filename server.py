@@ -33,6 +33,7 @@ import webbrowser
 
 from code_runtime import (
     preview_identity,
+    preview_picker,
     run_file_changes,
     managed_memory,
     agent_protocol,
@@ -28925,6 +28926,19 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route.startswith("/api/sessions/"):
                 self.get_session(route.rsplit("/", 1)[-1])
                 return
+            if route == "/api/preview/files":
+                binding = {key: values[0] for key, values in query.items()}
+                try:
+                    context = _validate_preview_context(binding)
+                    payload = preview_picker.list_entries(context["root"], binding.get("path", ""),
+                                                          binding.get("q", ""), skip_names=SKIP_DIRS)
+                    _validate_preview_context(binding)
+                    self.send_json({**payload, "root": context["root"], "dataSourceId": context["dataSourceId"],
+                                    "sessionId": context["sessionId"], "sessionInstanceId": context["sessionInstanceId"],
+                                    "contextRevision": context["contextRevision"]})
+                except preview_identity.PreviewConflict as exc:
+                    self.send_json({"error": str(exc), "errorCode": exc.code}, 409)
+                return
             if route == "/api/preview/file":
                 binding = {key: values[0] for key, values in query.items()}
                 try:
@@ -32557,6 +32571,12 @@ class CodeHandler(BaseHTTPRequestHandler):
                 "quotaDisplay": quota_display,
             },
         })
+
+    def log_request(self, code="-", size="-"):
+        if parse.urlparse(self.path).path == "/api/preview/files":
+            self.log_message('"%s" %s %s', f"{self.command} /api/preview/files {self.request_version}", str(code), str(size))
+        else:
+            super().log_request(code, size)
 
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args))

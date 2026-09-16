@@ -8,7 +8,7 @@ module.exports = async function reviewCases(browser, baseUrl) {
     await page.route("**/__preview_review_fixture", (route) => route.fulfill({contentType:"text/html",body:`<!doctype html>
       <div id="workbench"><div id="previewTabs"></div><div id="filePreview"></div></div>
       <div id="previewTitle"></div><div id="previewMeta"></div><div id="previewLanguage"></div><div id="previewModeActions"></div>
-      <button id="refreshPreview"></button><button id="copyPreview"></button><button id="togglePreview"></button><button id="closePreview"></button><div id="previewResizer"></div>`}));
+      <button id="refreshPreview"></button><button id="copyPreview"></button><button id="togglePreview"></button><div id="previewResizer"></div>`}));
     await page.goto(baseUrl + "/__preview_review_fixture");
     await page.evaluate(() => { window.Code = {features:{}}; });
     await page.addScriptTag({path:path.resolve(__dirname,"../../..","src/features/preview.js")});
@@ -21,7 +21,7 @@ module.exports = async function reviewCases(browser, baseUrl) {
       const state={sessionId:"retry",previewWidth:420};
       let failContexts=1,contextGate=null,delay=false,large=false;
       const storage={getItem:key=>store.get(key)??null,setItem:(key,value)=>store.set(key,value)};
-      const elements=Object.fromEntries(["workbench","filePreview","previewTitle","previewMeta","previewLanguage","previewModeActions","refreshPreview","copyPreview","togglePreview","closePreview","previewResizer"].map(id=>[id,document.getElementById(id)]));
+      const elements=Object.fromEntries(["workbench","filePreview","previewTitle","previewMeta","previewLanguage","previewModeActions","refreshPreview","copyPreview","togglePreview","previewResizer"].map(id=>[id,document.getElementById(id)]));
       const key=()=>`${source}:${state.sessionId}:${incarnation}`;
       const hash=async(value)=>[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))].map(n=>n.toString(16).padStart(2,"0")).join("");
       const apiJson=async(url,options={})=>{

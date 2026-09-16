@@ -171,7 +171,7 @@ async function main() {
       try {
         await file("parallel-visual-a.png").click({ modifiers: ["Control"] });
         await page.locator("#filePreview img").waitFor({state:"attached"});
-        await expect(page.locator("#previewMeta")).toContainText("Loading preview");
+        await expect(page.locator("#previewStatus")).toContainText("Loading preview");
         await page.waitForTimeout(3200); // A real refresh interval elapses while raw bytes remain held.
         assert.equal(rawRequests,1);
         assert.equal(await page.locator("#filePreview img").evaluate(image=>image.naturalWidth),0);
@@ -179,7 +179,7 @@ async function main() {
       }finally{routingState.previewGate=null;releaseMedia();await Promise.all([...pendingRoutes]);}
       assert.deepEqual(routeErrors,[]);
       await expect.poll(()=>page.locator("#filePreview img").evaluate(image=>image.complete&&image.naturalWidth>0)).toBe(true);
-      await expect(page.locator("#previewMeta")).not.toContainText("Loading preview");
+      await expect(page.locator("#previewStatus")).not.toContainText("Loading preview");
       checks.push(`${runtime}: media loading survives metadata refresh without duplicate raw requests`);
       assert.match(await page.locator("#filePreview img").getAttribute("src"), /api\/preview\/file/);
       checks.push(`${runtime}: bound raw image`);
@@ -200,15 +200,17 @@ async function main() {
       for (const [width, language, dark] of [[1280, "en", false], [1280, "zh", true], [390, "en", true], [390, "zh", false]]) {
         await page.setViewportSize({ width, height: 900 });
         await page.evaluate(({ language, dark }) => {
-          document.body.classList.toggle("theme-dark", dark);
+          document.querySelector(`.theme-opt[data-theme="${dark ? "dark" : "light"}"]`)?.click();
           document.querySelector(`[data-settings-lang="${language}"]`)?.click();
         }, { language, dark });
-        await expect(page.locator("#previewTitle")).toHaveText("long-same-filename-for-narrow-preview-tab-01.txt");
+        await expect(page.locator("#previewTabs [aria-selected=true]")).toHaveText("long-same-filename-for-narrow-preview-tab-01.txt");
+        // Resize/redraw preserves manual strip position; explicit activation reveals the tab.
+        await page.locator("#previewTabs [aria-selected=true]").click();
         await page.screenshot({ path: path.join(evidence, `${runtime}-${width}-${language}-${dark ? "dark" : "light"}.png`) });
         const layout = await page.evaluate(() => {
           const bar = document.querySelector("#previewTabs").getBoundingClientRect();
           const active = document.querySelector(".preview-tab.active").getBoundingClientRect();
-          const close = document.querySelector("#closePreview").getBoundingClientRect();
+          const close = document.querySelector(".preview-tab.active .preview-tab-close").getBoundingClientRect();
           return {activeVisible:active.left>=bar.left-1 && active.right<=bar.right+1,
             closeVisible:close.left>=0 && close.right<=innerWidth && close.width>0};
         });
@@ -236,7 +238,7 @@ async function main() {
           const released=await page.evaluate(({action,target})=>{
             const resizer=document.querySelector("#previewResizer"),width=document.documentElement.style.getPropertyValue("--preview-width");
             const owned=resizer.hasPointerCapture(1);
-            if(action==="close")document.querySelector("#closePreview").click();
+            if(action==="close")document.querySelector("#togglePreview").click();
             else document.querySelector(`.session-main[data-session-id="${target}"]`).click();
             window.__pendingPreviewRaf.forEach(cb=>cb());
             return {owned,released:!resizer.hasPointerCapture(1),classCleared:!document.body.classList.contains("resizing-preview"),
