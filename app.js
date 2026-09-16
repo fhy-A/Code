@@ -72,7 +72,7 @@ const {
 } = window.Code.features.skillsMemory;
 const { createGoalFeature } = window.Code.features.goal;
 const { createPreviewFeature } = window.Code.features.preview;
-const { createFilesFeature, shortPath } = window.Code.features.files;
+const { createFilesFeature, shortPath, isAbsoluteFilePath } = window.Code.features.files;
 const {
   canDeferImageConversion,
   createDerivedBrowserPreviewCache,
@@ -2177,6 +2177,28 @@ els.messageList.addEventListener("click", event => {
   }
   const button = event.target.closest?.("[data-recorded-review]");
   if (button) { event.preventDefault(); void previewFeature.openReview(button.dataset.recordedReview, {fileKey: button.dataset.reviewFile}); }
+});
+
+els.messageList.addEventListener("contextmenu", event => {
+  const row = event.target.closest?.(".recorded-change-file[data-recorded-review][data-review-file]");
+  if (!row || !els.messageList.contains(row)) return;
+  event.preventDefault();
+  filesFeature.closeFileContextMenu();
+  const sessionId = state.sessionId, navigation = state._foregroundNavigationSeq;
+  const rootId = row.dataset.recordedReview, fileKey = row.dataset.reviewFile;
+  const owner = getSessionMessages(sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId);
+  const ref = owner?.meta?.recordedChangeReview;
+  const summary = ref && recordedChangeSummaries.get(ref)?.summary;
+  const operation = summary?.operations?.findLast(op => op.entityKind === "file" && op.fileKey === fileKey);
+  const path = operation?.path, revision = summary?.revision;
+  if (!sessionId || summary?.sessionId !== sessionId || summary?.rootRunId !== rootId || !isAbsoluteFilePath(path)) return;
+  const isCurrent = () => state.sessionId === sessionId && state._foregroundNavigationSeq === navigation
+    && getSessionMessages(sessionId).findLast(message => message?.meta?.recordedChangeReview?.rootRunId === rootId) === owner
+    && owner.meta?.recordedChangeReview === ref && recordedChangeSummaries.get(ref)?.summary === summary
+    && summary.sessionId === sessionId && summary.rootRunId === rootId
+    && summary.revision === revision && operation.path === path
+    && summary.operations?.findLast(op => op.entityKind === "file" && op.fileKey === fileKey) === operation;
+  filesFeature.showFileContextMenu(event.clientX, event.clientY, path, "file", {isCurrent, returnFocus: row});
 });
 
 async function loadTaskReview(rootId) {
@@ -7946,6 +7968,7 @@ async function loadConfig() {
 
 
 async function saveProjectRoot(newPath, options = {}) {
+  filesFeature.closeFileContextMenu();
   const previewContextToken = previewFeature.contextWillChange();
 
   // Use newPath explicitly (empty string = user home), fallback to current value if undefined

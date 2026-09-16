@@ -182,6 +182,10 @@
     return { compact, full };
   }
 
+  function isAbsoluteFilePath(path) {
+    return typeof path === "string" && /^(?:[a-z]:[\\/]|[\\/]{2}|\/)/i.test(path) && !path.includes("\0");
+  }
+
   async function requestOpenFile(apiJson, showToast, t, body) {
     try {
       const data = await apiJson("/api/open-file", {
@@ -216,7 +220,7 @@
       throw new Error("Files feature requires state, elements, t, escapeHtml, and apiJson");
     }
 
-    let fileContextMenu = null;
+    let dismissFileContextMenu = null;
     let bound = false;
     let newFolderReturnFocus = null;
 
@@ -274,15 +278,22 @@
       }
     }
 
-    function showFileContextMenu(x, y, path, type) {
-      if (fileContextMenu) fileContextMenu.remove();
+    function closeFileContextMenu(restoreFocus = false) {
+      dismissFileContextMenu?.(restoreFocus);
+    }
+
+    function showFileContextMenu(x, y, path, type, options = {}) {
+      closeFileContextMenu();
+      const isCurrent = options.isCurrent || (() => true);
+      if (!isCurrent()) return;
+      const returnFocus = options.returnFocus || documentRoot.activeElement;
       const menu = documentRoot.createElement("div");
       menu.className = "file-ctx-menu";
-      const menuWidth = 180;
-      const menuHeight = 130;
-      menu.style.left = Math.min(x, global.innerWidth - menuWidth) + "px";
-      menu.style.top = Math.min(y, global.innerHeight - menuHeight) + "px";
-      const filename = (path || "").split("/").pop() || "";
+      menu.style.left = "0px";
+      menu.style.top = "0px";
+      const filename = (path || "").split(/[\\/]/).pop() || "";
+      const root = (elements.projectRoot?.value || "").replace(/[\\/]+$/, "");
+      const fullPath = isAbsoluteFilePath(path) ? path : root ? `${root}/${path}`.replace(/\\/g, "/") : path;
       if (type === "file") {
         menu.innerHTML = `<div class="file-ctx-name">${escapeHtml(filename)}</div>
           <button data-action="preview-new">${t("previewOpenNewTab")}</button>
@@ -298,12 +309,13 @@
 
       menu.querySelectorAll("button").forEach((button) => {
         button.addEventListener("click", () => {
+          const valid = menu.isConnected && isCurrent();
+          closeFileContextMenu(valid);
+          if (!valid) return;
           const action = button.dataset.action;
           if (action === "preview-new") {
             openFile?.(path, undefined, { newTab: true });
           } else if (action === "copy-path") {
-            const root = (elements.projectRoot?.value || "").replace(/[\\/]+$/, "");
-            const fullPath = root ? `${root}/${path}`.replace(/\\/g, "/") : path;
             global.navigator.clipboard.writeText(fullPath)
               .then(() => showToast?.(t("pathCopied"), "warning"))
               .catch(() => showToast?.(t("copyFailed"), "error"));
@@ -314,20 +326,37 @@
             if (action === "terminal") body.terminal = true;
             void requestOpenFile(apiJson, showToast, t, body);
           }
-          menu.remove();
         });
       });
 
       documentRoot.body.appendChild(menu);
-      fileContextMenu = menu;
-      const close = (event) => {
-        if (!menu.contains(event.target)) {
-          menu.remove();
-          fileContextMenu = null;
-          documentRoot.removeEventListener("click", close);
+      const rect = menu.getBoundingClientRect();
+      menu.style.left = Math.max(4, Math.min(x, global.innerWidth - rect.width - 4)) + "px";
+      menu.style.top = Math.max(4, Math.min(y, global.innerHeight - rect.height - 4)) + "px";
+      const closeOutside = event => { if (!menu.contains(event.target)) closeFileContextMenu(); };
+      const onKey = event => {
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeFileContextMenu(true); }
+        else if (event.key === "Tab") closeFileContextMenu(true);
+        else if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+          event.preventDefault();
+          const buttons = [...menu.querySelectorAll("button")], index = buttons.indexOf(documentRoot.activeElement);
+          const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+            : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+          buttons[next]?.focus();
         }
       };
-      global.setTimeout(() => documentRoot.addEventListener("click", close), 0);
+      dismissFileContextMenu = restoreFocus => {
+        menu.remove();
+        dismissFileContextMenu = null;
+        documentRoot.removeEventListener("pointerdown", closeOutside, true);
+        documentRoot.removeEventListener("keydown", onKey, true);
+        global.removeEventListener("resize", closeFileContextMenu);
+        if (restoreFocus && isCurrent() && returnFocus?.isConnected) returnFocus.focus({preventScroll: true});
+      };
+      documentRoot.addEventListener("pointerdown", closeOutside, true);
+      documentRoot.addEventListener("keydown", onKey, true);
+      global.addEventListener("resize", closeFileContextMenu);
+      menu.querySelector("button")?.focus({preventScroll: true});
     }
 
     function renderFileTree() {
@@ -1017,6 +1046,8 @@
       flushSilentRefresh: silentRefresh.flush,
       snapshotSilentRefresh: silentRefresh.snapshot,
       renderFileTree,
+      showFileContextMenu,
+      closeFileContextMenu,
       setFileTimeDensity,
       addRecentFolder,
       removeRecentFolder,
@@ -1035,6 +1066,7 @@
     normalizeFileTreeIdentity,
     createSilentFileTreeRefreshController,
     requestOpenFile,
+    isAbsoluteFilePath,
     createFilesFeature,
   });
 })(window);

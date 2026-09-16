@@ -9,7 +9,7 @@ const helperStart=source.indexOf('function recordTaskReview(');
 const helper=source.slice(helperStart,source.indexOf('\n}',helperStart)+2);
 const loop=source.slice(source.indexOf('async function runServerAgentLoop('),source.indexOf('async function executeRunContext('));
 let cardClick;
-const state={sessionId:'session-A',skills:[],disabledSkills:new Set()},els={baseUrl:{value:''},messageList:{addEventListener:(_,handler)=>cardClick=handler}};
+const state={sessionId:'session-A',skills:[],disabledSkills:new Set()},els={baseUrl:{value:''},messageList:{addEventListener:(type,handler)=>{if(type==='click')cardClick=handler;}}};
 const _skillActivationCanonicalEnabled=false,MAX_TOOL_ROUNDS=4,ACTIVE_SESSION_PROJECTION_RECOVERY_LIMIT=3;
 const t=key=>key,getSelectedModel=()=> 'fixture',getAllowedToolNamesForProfile=()=>[],applySkillTaskPolicy=x=>x;
 const getSkillToolBudgets=()=>[],getNativeTools=()=>[],getEffectiveMaxTokens=()=>128;
