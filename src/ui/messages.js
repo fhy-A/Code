@@ -1176,6 +1176,15 @@
         ...readToolScroll(node),
       });
     };
+    // A successful image can split an existing segment. Match moved items
+    // within the same session/projection boundary and Run, never by call alone.
+    const itemIdentity = (item) => {
+      const stage = item.closest?.("details.tool-process-stage");
+      const scope = stage?.dataset?.toolProcessScope;
+      const call = item.dataset?.toolCallId;
+      return scope && call ? JSON.stringify([scope, item.dataset?.agentRunId || "", call]) : "";
+    };
+    const currentItemsByIdentity = new Map();
     const currentStages = new Map();
     Array.from(currentRoot.querySelectorAll(
       "details.tool-process-stage[data-tool-process-id]",
@@ -1184,6 +1193,11 @@
       if (processId && !currentStages.has(processId)) currentStages.set(processId, stage);
       captureScroll(stage, ":scope > .tool-process-stage-body", stage);
       Array.from(stage.querySelectorAll("details.tool-process-item[data-tool-process-item-key]")).forEach(item => {
+        const identity = itemIdentity(item);
+        if (identity) currentItemsByIdentity.set(identity,
+          currentItemsByIdentity.has(identity) ? null : {
+            item, open: stage.open, image: stage.classList.contains("tool-image-stage"),
+          });
         captureScroll(item, ":scope > .tool-process-body", stage);
         for (const detail of ["arguments", "result"]) {
           captureScroll(item, `:scope > .tool-process-body > [data-tool-detail="${detail}"] > pre`, stage);
@@ -1200,12 +1214,12 @@
       const processId = String(projectedStage?.dataset?.toolProcessId || "");
       const currentStage = processId ? currentStages.get(processId) : null;
       const currentArticle = currentStage?.closest?.("article.tool-process") || null;
-      if (!currentArticle || !projectedStage) return;
+      if (!projectedStage) return;
 
       const currentItems = new Map();
-      Array.from(currentStage.querySelectorAll(
+      Array.from(currentStage?.querySelectorAll(
         "details.tool-process-item[data-tool-process-item-key]",
-      )).forEach((item) => {
+      ) || []).forEach((item) => {
         const itemKey = String(item.dataset?.toolProcessItemKey || "");
         if (itemKey && !currentItems.has(itemKey)) currentItems.set(itemKey, item);
       });
@@ -1213,12 +1227,21 @@
         "details.tool-process-item[data-tool-process-item-key]",
       )).forEach((projectedItem) => {
         const itemKey = String(projectedItem.dataset?.toolProcessItemKey || "");
-        const currentItem = itemKey ? currentItems.get(itemKey) : null;
+        const identity = itemIdentity(projectedItem);
+        const moved = identity ? currentItemsByIdentity.get(identity) : null;
+        const currentItem = (itemKey ? currentItems.get(itemKey) : null) || moved?.item;
         if (!currentItem) return;
+        if (currentItem.dataset?.toolProcessItemKey !== itemKey) {
+          projectedItem.open = currentItem.open;
+          if (moved?.open && !moved.image
+            && !projectedStage.classList.contains("tool-image-stage")) projectedStage.open = true;
+        }
+        if (identity) currentItemsByIdentity.delete(identity);
         reconcileToolProcessItem(currentItem, projectedItem);
         projectedItem.replaceWith?.(currentItem);
         items += 1;
       });
+      if (!currentArticle) return;
 
       const currentSummary = currentStage.querySelector?.(
         ":scope > summary.tool-process-stage-summary",
@@ -1280,9 +1303,11 @@
         focusedSummary.focus?.({ preventScroll: true });
       }
       scrollPositions.forEach(({ owner, selector, stage, processId, image, top, left }) => {
-        if (!owner.isConnected || !currentRoot.contains?.(owner)
-          || String(stage.dataset?.toolProcessId || "") !== processId
-          || stage.classList?.contains("tool-image-stage") !== image) return;
+        if (!owner.isConnected || !currentRoot.contains?.(owner)) return;
+        // Item nodes retain their scoped identity while their segment changes.
+        // Group scroll belongs only to that same group and category.
+        if (owner === stage && (String(stage.dataset?.toolProcessId || "") !== processId
+          || stage.classList?.contains("tool-image-stage") !== image)) return;
         const node = owner.querySelector?.(selector);
         if (!node) return;
         restoreToolScroll(node, { top, left });
@@ -2281,15 +2306,14 @@
       const visibleCalls = calls.map((call) => getProcessCallView(call, ownership));
       if (!visibleCalls.length) return "";
       const groups = [];
-      const groupsByKind = new Map();
       visibleCalls.forEach(call => {
         const image = isSuccessfulImageRead(call);
-        if (!groupsByKind.has(image)) {
-          const group = {image, calls: []};
-          groupsByKind.set(image, group);
+        let group = groups[groups.length - 1];
+        if (!group || group.image !== image) {
+          group = {image, calls: []};
           groups.push(group);
         }
-        groupsByKind.get(image).calls.push(call);
+        group.calls.push(call);
       });
       return groups.map(group => renderToolProcessGroup(group.calls, serial, options, group.image)).join("");
     }
@@ -2341,7 +2365,7 @@
 
       return `
         <article class="msg assistant tool-process" data-tool-process-block="${serial}">
-          <details class="tool-process-stage ${escapeHtml(stageClasses)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}" data-tool-process-id="${escapeHtml(processId)}"${open}>
+          <details class="tool-process-stage ${escapeHtml(stageClasses)}" data-current-action="${escapeHtml(currentCall.action)}" data-tool-process-key="${escapeHtml(processKey)}" data-tool-process-scope="${escapeHtml(JSON.stringify([String(getSessionId() || ""), processKey]))}" data-tool-process-id="${escapeHtml(processId)}"${open}>
             <summary class="tool-process-stage-summary">
               ${imageGroup ? '<svg class="tool-image-icon" width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="3" width="13" height="12" rx="2"/><path d="m3 12 4-4 3 3 2-2 3 3"/><circle cx="11.5" cy="6.5" r="1"/></svg>' : ""}
               <span class="tool-process-stage-heading"><strong>${escapeHtml(headingText)}</strong>${headingTarget ? `<code>${escapeHtml(headingTarget)}</code>` : ""}</span>

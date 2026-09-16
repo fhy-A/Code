@@ -22879,32 +22879,66 @@ function render(messages) { return feature.renderToolProcessProjection(messages.
 const messages=[...record('a',visual),...record('b',visual),...record('text',{ok:true,path:'notes.txt',content:'text'}),...record('c',visual)];
 const before=JSON.stringify(messages), html=render(messages);
 assert.equal(JSON.stringify(messages),before);
-assert.equal((html.match(/tool-image-stage/g)||[]).length,1);
+assert.equal((html.match(/tool-image-stage/g)||[]).length,2);
 assert.equal((html.match(/data-tool-image-preview /g)||[]).length,3);
-assert(html.includes('已查看 3 张图像'));
-assert(html.indexOf('已查看 3 张图像')<html.indexOf('notes.txt'));
+assert(html.includes('已查看 2 张图像'));
+assert(html.indexOf('已查看 2 张图像')<html.indexOf('notes.txt'));
+assert(html.indexOf('notes.txt')<html.indexOf('已查看 1 张图像'));
 assert.equal(render(JSON.parse(before)),html);
 const interleaved=render([...record('lead',{ok:true},'succeeded','run_command'),...record('left',visual),...record('middle',{ok:true},'succeeded','run_command'),...record('right',visual),...record('failed-image',{...visual,ok:false},'failed')]);
-assert.equal((interleaved.match(/tool-image-stage/g)||[]).length,1);assert(interleaved.includes('已查看 2 张图像'));
+assert.equal((interleaved.match(/tool-image-stage/g)||[]).length,2);assert(interleaved.includes('已查看 1 张图像'));
 for(const id of ['lead','left','middle','right','failed-image'])assert.equal((interleaved.match(new RegExp(`data-tool-call-id="${id}"`,'g'))||[]).length,1);
-assert(interleaved.indexOf('data-tool-call-id="lead"')<interleaved.indexOf('已查看 2 张图像'));
+assert(interleaved.indexOf('data-tool-call-id="lead"')<interleaved.indexOf('已查看 1 张图像'));
 assert(interleaved.indexOf('data-tool-call-id="middle"')<interleaved.indexOf('data-tool-call-id="failed-image"'));
 assert.equal((render([...record('one',visual),...record('two',visual),...record('three',visual)]).match(/tool-image-stage/g)||[]).length,1);
-for(const [sequence, kinds] of [['IT',[true,false]],['TI',[false,true]],['ITI',[true,false]],['TIT',[false,true]],['II',[true]],['TT',[false]]]){
+for(const [sequence, kinds] of [['IT',[true,false]],['TI',[false,true]],['ITI',[true,false,true]],['TIT',[false,true,false]],['TIITI',[false,true,false,true]],['II',[true]],['TT',[false]]]){
   const records=[...sequence].flatMap((kind,index)=>record(`${kind}-${index}`,kind==='I'?visual:{ok:true},'succeeded',kind==='I'?'read_file':'run_command'));
   const output=render(records),actual=[...output.matchAll(/<details class="tool-process-stage ([^"]+)"/g)].map(match=>match[1].includes('tool-image-stage'));
   assert.deepEqual(actual,kinds);
   const identities=[...output.matchAll(/data-tool-call-id="([^"]+)"/g)].map(match=>match[1]);
   assert.equal(identities.length,sequence.length);assert.equal(new Set(identities).size,sequence.length);
-  for(const kind of ['I','T'])assert.deepEqual(identities.filter(id=>id.startsWith(kind)),[...sequence].flatMap((value,index)=>value===kind?[`${kind}-${index}`]:[]));
+  assert.deepEqual(identities,[...sequence].map((kind,index)=>`${kind}-${index}`));
+  assert.equal(render(JSON.parse(JSON.stringify(records))),output);
 }
+// Exercise the production projection as well as the direct group renderer.
+const ids = output => [...output.matchAll(/data-tool-call-id="([^"]+)"/g)].map(match=>match[1]);
+const kinds = output => [...output.matchAll(/<details class="tool-process-stage ([^"]+)"/g)].map(match=>match[1].includes('tool-image-stage'));
+for(let length=1;length<=6;length++)for(let mask=0;mask<2**length;mask++){
+  const sequence=Array.from({length},(_,index)=>Boolean(mask&(1<<index)));
+  const records=sequence.flatMap((image,index)=>record(`ordered-${index}`,image?visual:{ok:true},'succeeded',image?'read_file':'run_command'));
+  const expected=sequence.map((_,index)=>`ordered-${index}`),segments=sequence.filter((image,index)=>index===0||image!==sequence[index-1]);
+  for(const active of [true,false]){
+    const snapshot=[{role:'user',content:'ordered images'},...records];
+    const output=feature.projectMessages(snapshot,{hasActiveRun:active});
+    assert.deepEqual(ids(output),expected);assert.deepEqual(kinds(output),segments);
+    assert.equal(feature.projectMessages(JSON.parse(JSON.stringify(snapshot)),{hasActiveRun:active}),output);
+  }
+}
+let live=[{role:'user',content:'dynamic'},...record('head',{ok:true},'succeeded','run_command'),record('pending',visual)[0],...record('tail',{ok:true},'succeeded','run_command')];
+const project=()=>feature.projectMessages(live,{hasActiveRun:true});
+assert.deepEqual(ids(project()),['head','pending','tail']);assert.deepEqual(kinds(project()),[false]);
+live.splice(4,0,record('pending',visual)[1]);
+assert.deepEqual(ids(project()),['head','pending','tail']);assert.deepEqual(kinds(project()),[false,true,false]);
+live.push(...record('append',{ok:true},'succeeded','run_command'),...record('image-end',visual));
+assert.deepEqual(ids(project()),['head','pending','tail','append','image-end']);assert.deepEqual(kinds(project()),[false,true,false,true]);
+// An edit-card boundary must remain in place between image segments.
+const editFeature=window.Code.ui.messages.createMessagesFeature({escapeHtml,getSessionId:()=> 'snapshot-test',
+  isEditSuggestionMessage:msg=>msg.meta?.fixtureEdit===true,renderEditSuggestion:()=>'<div>EDIT-BOUNDARY</div>'});
+const editOutput=editFeature.projectMessages([{role:'user',content:'edit'},...record('before-edit',visual),{role:'assistant',meta:{fixtureEdit:true}},...record('after-edit',visual)],{hasActiveRun:false});
+assert.deepEqual(ids(editOutput),['before-edit','after-edit']);assert.deepEqual(kinds(editOutput),[true,true]);
+assert(editOutput.indexOf('data-tool-call-id="before-edit"')<editOutput.indexOf('EDIT-BOUNDARY'));
+assert(editOutput.indexOf('EDIT-BOUNDARY')<editOutput.indexOf('data-tool-call-id="after-edit"'));
 const negative = [
   [{...visual,ok:false},'failed','read_file'], [{...visual,visual:false},'succeeded','read_file'],
   [{...visual,binary:false},'succeeded','read_file'], [{...visual,mime:'text/plain'},'succeeded','read_file'],
   [{ok:true,path:'photo.png',base64:png},'succeeded','read_file'],[visual,'cancelled','read_file'],
   [visual,'running','read_file'],[visual,'succeeded','run_command'],[{...visual,action:'write_file'},'succeeded','read_file'],
 ];
-for(const [result,outcome,action] of negative)assert(!render(record('negative',result,outcome,action)).includes('tool-image-stage'));
+for(const [result,outcome,action] of negative){
+  assert(!render(record('negative',result,outcome,action)).includes('tool-image-stage'));
+  const output=render([...record('image-before',visual),...record('negative',result,outcome,action),...record('image-after',visual)]);
+  assert.deepEqual(ids(output),['image-before','negative','image-after']);assert.deepEqual(kinds(output),[true,false,true]);
+}
 const markup='<svg onload="alert(1)"><image href="https://example.test/private"/></svg>';
 const unavailable=[{...visual,base64:undefined},{...visual,mime:'image/svg+xml',base64:undefined,svgText:markup},
   {...visual,base64:Buffer.from(markup).toString('base64')},{...visual,base64:'https://example.test/image.png'},

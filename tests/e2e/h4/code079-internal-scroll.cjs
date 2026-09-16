@@ -6,6 +6,8 @@ const baseline=process.argv.includes('--baseline');
 const baselineRoot=path.join(os.tmpdir(),'code079-r044-baseline');
 async function scenario(browser,host,runtime,width,language,dir){
  const audit=createAudit(),errors=[],context=await createContext(browser,host,runtime,audit,{width,language,theme:language==='en'?'dark':'light'});
+ // This fixture renders synthetic sessions; preview startup must stay local.
+ await context.route('**/api/preview/context',route=>{const body=route.request().postDataJSON();return route.fulfill({json:{dataSourceId:'scroll-fixture',sessionId:body.sessionId,sessionInstanceId:'scroll-fixture',draftId:body.draftId,contextRevision:'fixture',serverInstanceId:'fixture'}});});
  await context.route(/\/(?:app\.js|code\.bundle\.js|styles\.css|src\/ui\/messages\.js)$/,async route=>{
   const response=await route.fetch(),url=new URL(route.request().url());
   let source=baseline?await fs.readFile(path.join(baselineRoot,url.pathname.endsWith('/code.bundle.js')?'code.bundle.js':url.pathname.slice(1)),'utf8'):await response.text();
