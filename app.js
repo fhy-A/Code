@@ -578,6 +578,7 @@ const { t, setLang, applyI18n } = createI18nRuntime({
     if (!state.sessionId) els.sessionTitle.value = t("sessionTitleDefault");
     if (typeof renderSessions === "function") renderSessions();
     sessionSearchFeature?.refreshLanguage();
+    previewFeature.refreshLanguage();
     if (typeof renderMessages === "function") renderMessages();
     if (typeof renderProjectEditFolders === "function" && editingProjectId) {
       renderProjectEditFolders();
@@ -1671,6 +1672,9 @@ const sessionNavigation = createSessionNavigation({
     restoreSkillEvidenceRequest,
   },
   view: {
+    previewNavigationStart: () => previewFeature.beginNavigation(),
+    previewNavigationEnd: (creationToken) => previewFeature.restore(creationToken),
+    previewNewDraft: () => previewFeature.newDraft(),
     beginSessionTransition: (sessionId) => goalFeature?.beginSessionTransition(sessionId) ?? null,
     cacheActiveSessionState,
     cancelSessionTransition: (sessionId, token) => (
@@ -1948,7 +1952,10 @@ function applySessionProjectLocation(sessionId, location = {}) {
     cwd,
     revision,
   });
-  if (normalizedId === state.sessionId) state.pendingProjectId = projectId;
+  if (normalizedId === state.sessionId) {
+    state.pendingProjectId = projectId;
+    previewFeature.beginNavigation();
+  }
   renderSessions();
   updateGroupBadge(summary || { id: normalizedId, projectId });
   return { projectId, cwd, revision, summary };
@@ -2108,6 +2115,7 @@ async function moveSessionToProject(sessionId, projectId, options = {}) {
   if (normalizedId === state.sessionId) {
     try {
       await saveProjectRoot(applied.cwd, { syncSession: false });
+      await previewFeature.restore();
     } catch (error) {
       error._sessionProjectLocationApplied = applied;
       throw error;
@@ -3617,13 +3625,22 @@ function bindClickablePaths() {
     }
     el.setAttribute("data-tooltip", p);
     if (isAnswerLocalPath) maybeRenderFileCard(el, p, projectRoot);
-    el.addEventListener("click", (e) => {
+    const openPath = (e) => {
+      if (e.type === "auxclick" && e.button !== 1) return;
       e.preventDefault();
       e.stopPropagation();
+      const explicit = e.ctrlKey || e.metaKey || e.type === "auxclick";
+      if (e.type === "click" && e.detail > 1 && !explicit) return;
       const line = el.dataset.line ? Number(el.dataset.line) : undefined;
-      if (isAnswerLocalPath) openReferencedPath(p, projectRoot, line);
-      else openToolReferencedPath(p, projectRoot, line);
-    });
+      const previewOptions = { newTab: explicit,
+        gesture: explicit ? undefined : e.type === "dblclick" ? "double" : "single" };
+      if (isAnswerLocalPath) openReferencedPath(p, projectRoot, line, previewOptions);
+      else openToolReferencedPath(p, projectRoot, line, previewOptions);
+    };
+    el.addEventListener("click", openPath);
+    el.addEventListener("dblclick", openPath);
+    el.addEventListener("auxclick", openPath);
+    el.addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
   });
 }
 
@@ -3631,7 +3648,8 @@ function bindClickablePaths() {
 // directory → read-only /api/files confirmation, then the existing Explorer route;
 // image/derived/text → internal preview (with line jump); binary → existing
 // external system open. Out-of-root or unreachable targets never open.
-async function openReferencedPath(p, projectRoot, line) {
+async function openReferencedPath(p, projectRoot, line, previewOptions = {}) {
+  const previewNavigation = state._foregroundNavigationSeq;
   const markdownApi = window.Code?.ui?.markdown;
   const fp = markdownApi?.normalizeAbsolutePath?.(p) || "";
   if (!fp) return;
@@ -3640,6 +3658,7 @@ async function openReferencedPath(p, projectRoot, line) {
   if (kind === "binary") {
     return apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
   }
+  const previewIntent = previewFeature.captureOpenIntent();
   try {
     const directory = await apiJson(`/api/files?path=${encodeURIComponent(fp)}`);
     if (!Array.isArray(directory?.items)) return;
@@ -3650,11 +3669,15 @@ async function openReferencedPath(p, projectRoot, line) {
   } catch (error) {
     const serverError = String(error?.data?.error || error?.message || "");
     if (Number(error?.status) !== 400 || !serverError.includes("当前路径不是文件夹")) return;
+  } finally {
+    previewFeature.finishOpenProbe(previewIntent);
   }
-  return loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
+  if (previewNavigation !== state._foregroundNavigationSeq) return;
+  if (!previewFeature.isOpenIntentCurrent(previewIntent, previewOptions.newTab || previewOptions.gesture === "double")) return;
+  return loadFile(fp, undefined, { ...previewOptions, intent: previewIntent, ...(line && line > 0 ? { line } : {}) }).catch(() => {});
 }
 
-function openToolReferencedPath(p, projectRoot, line) {
+function openToolReferencedPath(p, projectRoot, line, previewOptions = {}) {
   const markdownApi = window.Code?.ui?.markdown;
   const fp = markdownApi?.normalizeAbsolutePath?.(p)
     || markdownApi?.normalizeAbsolutePath?.(projectRoot + "/" + String(p || ""))
@@ -3665,7 +3688,7 @@ function openToolReferencedPath(p, projectRoot, line) {
   if (kind === "binary") {
     return apiJson("/api/open-file", { method: "POST", body: JSON.stringify({ path: fp }) }).catch(() => {});
   }
-  return loadFile(fp, undefined, line && line > 0 ? { line } : {}).catch(() => {});
+  return loadFile(fp, undefined, { ...previewOptions, ...(line && line > 0 ? { line } : {}) }).catch(() => {});
 }
 
 // B: inline thumbnail preview card for image paths inside the project root.
@@ -7842,6 +7865,7 @@ async function loadConfig() {
 
 
 async function saveProjectRoot(newPath, options = {}) {
+  const previewContextToken = previewFeature.contextWillChange();
 
   // Use newPath explicitly (empty string = user home), fallback to current value if undefined
   const path = (newPath !== undefined ? newPath : (els.projectRoot ? els.projectRoot.value : "")).trim();
@@ -7868,6 +7892,8 @@ async function saveProjectRoot(newPath, options = {}) {
 
   await loadProjectContext();
   await loadMemoryContext();
+
+  await previewFeature.contextDidChange(previewContextToken);
 
   if (!state.sessionId) {
     state.pendingProjectId = projectForCurrentRoot()?.id || null;
@@ -17239,6 +17265,7 @@ function clearCurrentSession() {
   if (state._pendingThoughtRender) { cancelAnimationFrame(state._pendingThoughtRender); state._pendingThoughtRender = null; }
   if (state._revealMessageFrame)   { cancelAnimationFrame(state._revealMessageFrame);   state._revealMessageFrame = null; }
   state.sessionId = null;
+  void previewFeature.newDraft();
   state.messages = [];
   state.lastUsage = null;
   state.stats = { input: 0, output: 0, cache: 0 };
@@ -19214,7 +19241,7 @@ async function init() {
   }
 
   // Restore preview pane state after config/session load.
-  await previewFeature.restore();
+  await previewFeature.ensureRestored();
 
   updateSendButtonState();
 

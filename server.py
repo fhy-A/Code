@@ -32,6 +32,7 @@ import time
 import webbrowser
 
 from code_runtime import (
+    preview_identity,
     managed_memory,
     agent_protocol,
     context_calibration,
@@ -24629,6 +24630,8 @@ def _persist_import_snapshot_unlocked(
         "source": source,
         "importState": state_for(root_session_id, target_previous_state),
     }
+    if not target_existing:
+        meta["previewIdentity"] = preview_identity.new_identity()
     if action == "snapshot-created":
         meta["importState"]["previousSessionId"] = root_session_id
     write_jsonl(target_meta_path.with_suffix(".jsonl"), messages)
@@ -25675,6 +25678,58 @@ def import_claude_session(source_path, target_session_id=None, project_id=None):
         resolved_project_id=resolved_project_id,
         resolved_cwd=resolved_cwd,
     )
+
+
+_preview_identity_lock = threading.RLock()
+
+
+def _preview_context(body, *, initialize=False):
+    with _preview_identity_lock:
+        source_id = preview_identity.source_identity(DATA_DIR, write_json, initialize=initialize)
+    sid = str(body.get("sessionId") or "")
+    initialized = False
+    if sid:
+        sid = safe_session_id(sid)
+        with _session_lifecycle_lock(sid), _json_write_lock:
+            if _session_archive_stop_fence_active(sid):
+                raise preview_identity.PreviewConflict("preview_session_unavailable")
+            # Preview reads never forward-recover an archive/delete transaction.
+            # Its existing lifecycle endpoint owns recovery and authorization.
+            if (_session_archive_journal_path(sid).exists()
+                    or _session_archive_bundle_path(sid).exists()):
+                raise preview_identity.PreviewConflict("preview_session_unavailable")
+            path = session_path(sid)
+            if not path.is_file():
+                raise preview_identity.PreviewConflict("preview_session_unavailable")
+            meta = _read_session_meta_strict(path)
+            if not meta:
+                raise preview_identity.PreviewConflict("preview_session_unavailable")
+            if "previewIdentity" not in meta and initialize:
+                meta["previewIdentity"] = preview_identity.new_identity()
+                write_json(path, meta)
+                initialized = True
+            instance = preview_identity.identity_id(meta.get("previewIdentity"))
+            project_id, cwd = meta.get("projectId"), meta.get("cwd")
+    else:
+        instance = str(body.get("draftId") or "")
+        if not re.fullmatch(r"[a-f0-9]{32}", instance):
+            raise preview_identity.PreviewConflict("preview_draft_invalid")
+        project_id, cwd = None, None
+    root = preview_identity.path_identity(_effective_agent_project_root())
+    return {"schema": "code-preview-context/v1", "dataSourceId": source_id,
+            "serverInstanceId": _server_instance_id, "sessionId": sid,
+            "sessionInstanceId": instance, "draftId": instance if not sid else "",
+            "projectId": project_id, "cwd": cwd, "root": root,
+            "identityInitialized": initialized,
+            "contextRevision": preview_identity.digest([source_id, sid, instance, project_id, cwd, root])}
+
+
+def _validate_preview_context(body):
+    context = _preview_context(body)
+    for key in ("dataSourceId", "serverInstanceId", "sessionInstanceId", "contextRevision"):
+        if not body.get(key) or body[key] != context[key]:
+            raise preview_identity.PreviewConflict()
+    return context
 
 
 def resolve_project_path(relative_path=""):
@@ -28741,6 +28796,14 @@ class CodeHandler(BaseHTTPRequestHandler):
             if route.startswith("/api/sessions/"):
                 self.get_session(route.rsplit("/", 1)[-1])
                 return
+            if route == "/api/preview/file":
+                binding = {key: values[0] for key, values in query.items()}
+                try:
+                    binding["_validatedRoot"] = _validate_preview_context(binding)["root"]
+                    self.get_file(binding.get("path", ""), raw=binding.get("raw") == "1", preview_binding=binding)
+                except preview_identity.PreviewConflict as exc:
+                    self.send_json({"error": str(exc), "errorCode": exc.code}, 409)
+                return
             if route == "/api/files":
                 self.get_files(query.get("path", [""])[0])
                 return
@@ -28797,6 +28860,12 @@ class CodeHandler(BaseHTTPRequestHandler):
 
         try:
             route = parse.urlparse(self.path).path
+            if route == "/api/preview/context":
+                try:
+                    self.send_json(_preview_context(self.read_body_json(), initialize=True))
+                except preview_identity.PreviewConflict as exc:
+                    self.send_json({"error": str(exc), "errorCode": exc.code}, 409)
+                return
             if self._handle_skill_management("POST", route, {}) or self._guard_legacy_skill_http(route):
                 return
             if route.rstrip("/") == "/api/image-routes/refresh":
@@ -30867,6 +30936,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         session_now = _session_now_iso()
         meta = {
             "id": session_id,
+            "previewIdentity": preview_identity.new_identity(),
             "title": body.get("title") or "新会话",
             "createdAt": session_now,
             "updatedAt": session_now,
@@ -30943,6 +31013,7 @@ class CodeHandler(BaseHTTPRequestHandler):
                     session["createdAt"] = session.get("createdAt") or _session_now_iso()
             else:
                 session = {"id": safe_session_id(session_id), "createdAt": _session_now_iso()}
+                session["previewIdentity"] = preview_identity.new_identity()
             messages = body.get("messages")
             message_bearing = messages is not None
             current_revision = _session_revision(session)
@@ -31258,6 +31329,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         session_now = _session_now_iso()
         child_meta = {
             "id": child_id,
+            "previewIdentity": preview_identity.new_identity(),
             "title": child_title,
             "createdAt": session_now,
             "updatedAt": session_now,
@@ -31435,16 +31507,33 @@ class CodeHandler(BaseHTTPRequestHandler):
         items.sort(key=lambda item: (item["type"] != "dir", item["name"].lower()))
         self.send_json({"root": str(root), "path": relative_path or "", "items": items[:500]})
 
-    def get_file(self, relative_path, raw=False):
+    def get_file(self, relative_path, raw=False, *, preview_binding=None):
         root, target = resolve_attachment_path(relative_path)
         is_attachment = target is not None
         if not target:
-            root, target = resolve_project_path(relative_path)
+            if preview_binding:
+                root, target = preview_identity.resolve_read_path(
+                    relative_path, preview_binding["_validatedRoot"], Path.home())
+            else:
+                root, target = resolve_project_path(relative_path)
+        facts = {}
+        if preview_binding:
+            identity = preview_identity.path_identity(target)
+            facts = {"canonicalAbsolutePath": str(target.resolve()),
+                     "fileKey": preview_identity.digest(identity),
+                     "locator": display_attachment_path(root, target) if is_attachment else str(target.resolve())}
+            if preview_binding.get("fileKey") and preview_binding["fileKey"] != facts["fileKey"]:
+                raise preview_identity.PreviewConflict("preview_file_changed")
         if not target.exists() or not target.is_file():
             raise ValueError("文件不存在")
         display_path = display_attachment_path(root, target) if is_attachment else to_project_relative(root, target)
         data = target.read_bytes()
         stat = target.stat()
+        if preview_binding:
+            if preview_identity.path_identity(target) != identity:
+                raise preview_identity.PreviewConflict("preview_file_changed")
+            _validate_preview_context(preview_binding)
+            facts["contentRevision"] = hashlib.sha256(data).hexdigest()
         truncated = len(data) > MAX_PREVIEW_BYTES
         preview = data[:MAX_PREVIEW_BYTES]
         # Raw mode is a stable byte-stream endpoint used by browser-native image
@@ -31465,6 +31554,7 @@ class CodeHandler(BaseHTTPRequestHandler):
         browser_binary = mime.startswith("image/") or mime == "application/pdf"
         if browser_binary or not is_probably_text(preview):
             self.send_json({
+                **facts,
                 "path": display_path,
                 "name": target.name,
                 "binary": True,
@@ -31477,6 +31567,7 @@ class CodeHandler(BaseHTTPRequestHandler):
             return
         content, encoding = decode_preview_text(preview, truncated=truncated)
         self.send_json({
+            **facts,
             "path": display_path,
             "name": target.name,
             "binary": False,

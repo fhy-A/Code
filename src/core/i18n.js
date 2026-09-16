@@ -7,6 +7,16 @@
   const LANG = {
 
     zh: {
+      previewSourceUnavailable: "预览数据源身份损坏或不兼容，已保留原数据并停止恢复标签。",
+      previewLoading: "正在加载预览…",
+      previewTabs: "文件标签",
+      previewCloseTab: "关闭 {name}",
+      previewStateUnsaved: "预览状态无法保存，当前更改仅在本页保留。",
+      previewTabsUnavailable: "此会话之前打开的标签无法恢复，请重新打开文件。",
+      previewUnavailable: "文件或会话上下文已失效，请重新打开。",
+      previewTabLimit: "最多打开 20 个文件，请先关闭一个标签。",
+      previewOpenNewTab: "在新标签中打开",
+
       archivePreviewList: "查看会话列表（{count}）",
       archivePreviewOtherList: "查看其余会话（{count}）",
       archivePreviewListTitle: "涉及会话",
@@ -118,6 +128,16 @@
     },
 
     en: {
+      previewSourceUnavailable: "Preview source identity is damaged or incompatible. Original data is preserved; tab restoration is disabled.",
+      previewLoading: "Loading preview…",
+      previewTabs: "File tabs",
+      previewCloseTab: "Close {name}",
+      previewStateUnsaved: "Preview state could not be saved. Changes remain in this page only.",
+      previewTabsUnavailable: "Previously opened tabs for this conversation could not be restored. Please reopen the files.",
+      previewUnavailable: "File or session context is unavailable. Open it again.",
+      previewTabLimit: "Up to 20 files can be open. Close a tab first.",
+      previewOpenNewTab: "Open in new tab",
+
       archivePreviewList: "View session list ({count})",
       archivePreviewOtherList: "View other sessions ({count})",
       archivePreviewListTitle: "Affected sessions",
@@ -1463,6 +1483,8 @@
     },
   };
   const MANAGED_ELEMENT_IDS = new Set([
+    "previewTitle",
+    "previewMeta",
     "modelPillLabel",
     "thinkingPillLabel",
     "permPillLabel",

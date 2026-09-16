@@ -285,6 +285,7 @@
       const filename = (path || "").split("/").pop() || "";
       if (type === "file") {
         menu.innerHTML = `<div class="file-ctx-name">${escapeHtml(filename)}</div>
+          <button data-action="preview-new">${t("previewOpenNewTab")}</button>
           <button data-action="open">${t("openDefaultApp")}</button>
           <button data-action="copy-path">${t("copyPath")}</button>
           <button data-action="reveal">${t("revealInFolder")}</button>`;
@@ -298,7 +299,9 @@
       menu.querySelectorAll("button").forEach((button) => {
         button.addEventListener("click", () => {
           const action = button.dataset.action;
-          if (action === "copy-path") {
+          if (action === "preview-new") {
+            openFile?.(path, undefined, { newTab: true });
+          } else if (action === "copy-path") {
             const root = (elements.projectRoot?.value || "").replace(/[\\/]+$/, "");
             const fullPath = root ? `${root}/${path}`.replace(/\\/g, "/") : path;
             global.navigator.clipboard.writeText(fullPath)
@@ -369,7 +372,7 @@
             const timestampHtml = timestamp.full
               ? `<small class="file-time" title="${escapeHtml(timestamp.full)}" aria-label="${escapeHtml(timestamp.full)}"><span class="file-time-compact" aria-hidden="true">${escapeHtml(timestamp.compact)}</span><span class="file-time-full" aria-hidden="true">${escapeHtml(timestamp.full)}</span></small>`
               : "";
-            return `<div class="file-item-row ${item.path === state.previewPath ? "active" : ""}">
+            return `<div class="file-item-row ${item.path === (state.previewTreePath || state.previewPath) ? "active" : ""}">
               <button class="file-item ${item.type}${extensionClass}" type="button" data-path="${escapeHtml(item.path)}" data-type="${item.type}" tabindex="${index === 0 ? 0 : -1}" role="option" aria-selected="false">
                 <span class="file-name" title="${escapeHtml(item.name)}">${item.type === "dir" ? "📁 " : ""}${escapeHtml(item.name)}</span>
                 ${timestampHtml}
@@ -380,10 +383,22 @@
         : `<div class="muted-line" style="padding:8px;">${query ? t("noMatchingFiles") : t("emptyDirectory")}</div>`;
 
       elements.fileTree.querySelectorAll(".file-item").forEach((button) => {
-        button.addEventListener("click", () => {
-          if (button.dataset.type === "dir") loadFiles(button.dataset.path);
-          else openFile?.(button.dataset.path);
-        });
+        const openPreview = (event) => {
+          if (button.dataset.type === "dir") {
+            if (event.type === "click") loadFiles(button.dataset.path);
+            return;
+          }
+          if (event.type === "auxclick" && event.button !== 1) return;
+          event.preventDefault();
+          const explicit = event.ctrlKey || event.metaKey || event.type === "auxclick";
+          if (event.type === "click" && event.detail > 1 && !explicit) return;
+          openFile?.(button.dataset.path, undefined, { newTab: explicit,
+            gesture: explicit ? undefined : event.type === "dblclick" ? "double" : "single" });
+        };
+        button.addEventListener("click", openPreview);
+        button.addEventListener("dblclick", openPreview);
+        button.addEventListener("auxclick", openPreview);
+        button.addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
         button.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           showFileContextMenu(
@@ -632,10 +647,22 @@
 
     function bindFileItemActions() {
       elements.fileTree.querySelectorAll(".file-item").forEach((button) => {
-        button.addEventListener("click", () => {
-          if (button.dataset.type === "dir") loadFiles(button.dataset.path);
-          else openFile?.(button.dataset.path);
-        });
+        const openPreview = (event) => {
+          if (button.dataset.type === "dir") {
+            if (event.type === "click") loadFiles(button.dataset.path);
+            return;
+          }
+          if (event.type === "auxclick" && event.button !== 1) return;
+          event.preventDefault();
+          const explicit = event.ctrlKey || event.metaKey || event.type === "auxclick";
+          if (event.type === "click" && event.detail > 1 && !explicit) return;
+          openFile?.(button.dataset.path, undefined, { newTab: explicit,
+            gesture: explicit ? undefined : event.type === "dblclick" ? "double" : "single" });
+        };
+        button.addEventListener("click", openPreview);
+        button.addEventListener("dblclick", openPreview);
+        button.addEventListener("auxclick", openPreview);
+        button.addEventListener("mousedown", (event) => { if (event.button === 1) event.preventDefault(); });
         button.addEventListener("contextmenu", (event) => {
           event.preventDefault();
           showFileContextMenu(

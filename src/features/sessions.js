@@ -642,6 +642,7 @@
 
     function invalidateForegroundSessionNavigation() {
       state._foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
+      view.previewNavigationStart?.();
     }
 
     function rememberWelcomeForeground() {
@@ -671,6 +672,7 @@
       invalidateForegroundSessionNavigation();
       state.pendingProjectId = projectId || null;
       state.sessionId = null;
+      view.previewNewDraft?.();
       state.messages = [];
       state.lastUsage = null;
       state._lastRenderedHtml = null;
@@ -706,8 +708,10 @@
       const loadSeq = (state._sessionLoadSeq || 0) + 1;
       state._sessionLoadSeq = loadSeq;
 
+      const previewCreation = view.previewNavigationStart?.();
+      const createNavigationSeq = state._foregroundNavigationSeq;
       const session = await data.createSession(body);
-      if (loadSeq !== state._sessionLoadSeq) return session;
+      if (loadSeq !== state._sessionLoadSeq || createNavigationSeq !== state._foregroundNavigationSeq) return session;
 
       state.sessionId = session.id;
       state.pendingProjectId = session.projectId || null;
@@ -734,6 +738,8 @@
       view.renderMessages();
 
       if (session.cwd) await project.saveRoot(session.cwd, { syncSession: false });
+      if (loadSeq !== state._sessionLoadSeq || createNavigationSeq !== state._foregroundNavigationSeq) return session;
+      await view.previewNavigationEnd?.(previewCreation);
       if (options.deferSidebarRefresh !== true) {
         await view.refreshSessions();
       }
@@ -755,6 +761,7 @@
 
       const foregroundNavigationSeq = (state._foregroundNavigationSeq || 0) + 1;
       state._foregroundNavigationSeq = foregroundNavigationSeq;
+      view.previewNavigationStart?.();
 
       if (!state._keepBranchOpen) closeNavigationPanels();
       state._keepBranchOpen = false;
@@ -766,6 +773,7 @@
           await project.saveRoot(current.cwd, { syncSession: false });
         }
         rememberSessionForeground(sessionId);
+        if (foregroundNavigationSeq === state._foregroundNavigationSeq) await view.previewNavigationEnd?.();
         view.syncActiveStreamingState();
         view.resetRenderCache();
         view.renderMessages();
@@ -840,6 +848,8 @@
       rememberSessionForeground(session.id);
 
       if (session.cwd) await project.saveRoot(session.cwd, { syncSession: false });
+      if (loadSeq !== state._sessionLoadSeq || foregroundNavigationSeq !== state._foregroundNavigationSeq) return;
+      await view.previewNavigationEnd?.();
       view.renderSessions();
       view.syncActiveStreamingState();
       view.renderMessages();

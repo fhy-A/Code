@@ -6215,7 +6215,7 @@ process.stdout.write(JSON.stringify({{
         self.assertIn("el.replaceWith(card);", card_source)
         self.assertLess(card_source.index('card.setAttribute("data-path", p);'), card_source.index("el.replaceWith(card);"))
         self.assertIn("if (isAnswerLocalPath) maybeRenderFileCard(el, p, projectRoot);", APP_SOURCE)
-        self.assertIn("else openToolReferencedPath(p, projectRoot, line);", APP_SOURCE)
+        self.assertIn("else openToolReferencedPath(p, projectRoot, line, previewOptions);", APP_SOURCE)
 
         self.assertIn(
             'const EDIT_AUTHORIZATION_PATH_IDENTITY = Object.freeze({',
@@ -12627,7 +12627,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn('options.line', PREVIEW_SOURCE)
         self.assertIn('parseLineRef', MARKDOWN_SOURCE)
         self.assertIn('normalizeAbsolutePath', MARKDOWN_SOURCE)
-        self.assertIn('loadFile(fp, undefined, line && line > 0 ? { line } : {})', APP_SOURCE)
+        self.assertIn('loadFile(fp, undefined, { ...previewOptions, ...(line && line > 0 ? { line } : {}) })', APP_SOURCE)
         self.assertIn('sb-path-tooltip', STYLE_SOURCE)
 
         self.assertTrue(data["isImg"])
@@ -12766,7 +12766,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertIn("openToolReferencedPath", answer_source)
         self.assertIn("openReferencedPath", answer_source)
         self.assertIn("if (!fp) return;", answer_source)
-        self.assertIn('loadFile(fp, undefined, line && line > 0 ? { line } : {})', answer_source)
+        self.assertIn('loadFile(fp, undefined, { ...previewOptions, ...(line && line > 0 ? { line } : {}) })', answer_source)
         self.assertIn('apiJson("/api/open-file"', answer_source)
 
     def test_final_answer_path_router_confirms_directories_and_fails_closed(self):
@@ -12779,6 +12779,8 @@ process.stdout.write(JSON.stringify(out));
 global.window = {{Code: {{ui: {{}}}}}};
 require("./src/core/namespace.js");
 require("./src/ui/markdown.js");
+const state = {{_foregroundNavigationSeq: 0}};
+const previewFeature = {{captureOpenIntent: () => ({{}}), finishOpenProbe: () => {{}}, isOpenIntentCurrent: () => true}};
 const loads = [];
 const opens = [];
 const probes = [];
@@ -12791,7 +12793,8 @@ const missing = () => Object.assign(new Error("路径不存在"), {{
   data: {{error: "路径不存在"}},
 }});
 const loadFile = (path, encoding, options) => {{
-  loads.push({{path, options: options || null}});
+  const {{intent, ...publicOptions}} = options || {{}};
+  loads.push({{path, options: publicOptions}});
   return path.endsWith("preview-fails.txt") ? Promise.reject(new Error("preview failed")) : Promise.resolve();
 }};
 const apiJson = (path, options = {{}}) => {{
@@ -21901,8 +21904,10 @@ const feature = createPreviewFeature({
     copyPreview: eventElement("copy"),
     togglePreview: eventElement("toggle"),
     previewResizer,
+    filePreview: {innerHTML: "", querySelector: () => null},
+    previewTitle: {}, previewMeta: {}, previewLanguage: {},
   },
-  apiJson: async () => ({}),
+  apiJson: async () => ({dataSourceId:"source",sessionId:"",sessionInstanceId:"draft"}),
   renderMarkdown: (value) => value,
   document: {
     documentElement: {style: {setProperty: (...args) => styles.push(args), removeProperty: () => {}}},
@@ -21911,13 +21916,15 @@ const feature = createPreviewFeature({
   storage: {setItem: (...args) => storage.push(args), removeItem: () => {}},
 });
 feature.bind();
-handlers["toggle:click"]();
-const opened = {width: state.previewWidth, style: styles.at(-1), stored: storage.at(-1)};
+(async () => {
+await feature.toggle();
+const opened = {width: state.previewWidth, style: styles.at(-1), stored: storage.filter(item => item[0] === "code-preview-width").at(-1)};
 workbenchWidth = 900;
 state.previewWidth = 2000;
 resizeCallback();
-const resized = {width: state.previewWidth, style: styles.at(-1), stored: storage.at(-1)};
+const resized = {width: state.previewWidth, style: styles.at(-1), stored: storage.filter(item => item[0] === "code-preview-width").at(-1)};
 process.stdout.write(JSON.stringify({opened, resized, open: classes.has("preview-open")}));
+})().catch(error => {console.error(error);process.exitCode=1;});
 """
         completed = subprocess.run(
             ["node", "-e", script],
@@ -21962,8 +21969,8 @@ process.stdout.write(JSON.stringify({opened, resized, open: classes.has("preview
 global.window = {
   Code: {features: {}},
   innerWidth: 1280,
-  setInterval,
-  clearInterval,
+  setTimeout,
+  clearTimeout,
   addEventListener: () => {},
 };
 require("./src/features/preview.js");
@@ -22001,6 +22008,7 @@ const filePreview = {
 const elements = {
   workbench: {classList: {
     add: (name) => classes.add(name),
+    remove: (name) => classes.delete(name),
     contains: (name) => classes.has(name),
   }},
   previewTitle: {textContent: ""},
@@ -22013,12 +22021,16 @@ const elements = {
 };
 const storage = [];
 const feature = createPreviewFeature({
-  state: {previewWidth: 420},
+  state: {sessionId:"fixture",previewWidth: 420},
   elements,
   apiJson: async (url, options = {}) => {
-    requests.push({url, method: options.method || "GET"});
-    if (!url.startsWith("/api/file?path=")) throw new Error(`unexpected request: ${url}`);
-    return responses.shift();
+    if (url === "/api/preview/context") return {dataSourceId:"source",sessionId:"fixture",sessionInstanceId:"instance"};
+    const name = new URL(url, "http://localhost").searchParams.get("path");
+    requests.push({url: "/api/preview/file?path="+name, method: options.method || "GET"});
+    if (!url.startsWith("/api/preview/file?")) throw new Error(`unexpected request: ${url}`);
+    const data = responses.shift();
+    return {...data, canonicalAbsolutePath: "C:/fixture/"+data.path, locator: "C:/fixture/"+data.path,
+      fileKey: (data.path.includes("characters") ? "a" : "b").repeat(64), contentRevision: data.updatedAt};
   },
   renderMarkdown: (value) => value,
   resolveSyntaxPatterns: () => null,
@@ -22028,6 +22040,7 @@ const feature = createPreviewFeature({
   },
   storage: {
     setItem: (...args) => storage.push(args),
+    getItem: () => null,
     removeItem: () => {},
   },
   t: (key) => key === "fmtTruncatedContent" ? "TRUNCATED" : key,
@@ -22079,12 +22092,13 @@ const feature = createPreviewFeature({
         self.assertEqual(
             data["requests"],
             [
-                {"url": "/api/file?path=large-characters.txt", "method": "GET"},
-                {"url": "/api/file?path=large-lines.txt", "method": "GET"},
+                {"url": "/api/preview/file?path=large-characters.txt", "method": "GET"},
+                {"url": "/api/preview/file?path=large-lines.txt", "method": "GET"},
             ],
         )
-        self.assertIn(["code-preview-open", "1"], data["storage"])
-        self.assertIn(["code-preview-path", "large-lines.txt"], data["storage"])
+        workspace = json.loads([value for key, value in data["storage"] if key == "code-preview-workspaces-v1"][-1])
+        self.assertEqual(list(workspace["records"].values())[0]["tabs"][0]["name"], "large-lines.txt")
+        self.assertNotIn("code-preview-open", [key for key, _ in data["storage"]])
 
     def test_sidebar_resizers_coalesce_layout_updates_and_defer_persistence(self):
         script = """
@@ -22207,7 +22221,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn(".resizing-sidebar-main :where(.message-list)", STYLE_SOURCE)
         self.assertIn(".resizing-preview .file-preview", STYLE_SOURCE)
         self.assertIn("contain: layout paint", STYLE_SOURCE)
-        self.assertIn(".workbench.preview-open {\n    grid-template-columns: minmax(0, 1fr) 0;", STYLE_SOURCE)
+        self.assertIn(".workbench.preview-open { grid-template-columns: minmax(0, 1fr); }", STYLE_SOURCE)
 
     def test_app_uses_extracted_modules_without_duplicate_definitions(self):
         self.assertIn("const { uiIcon } = window.Code.core.icons", APP_SOURCE)
@@ -29567,6 +29581,7 @@ const state = {{
 }};
 const revisions = {{current: 2, other: 4, failed: 6}};
 const authoritativeSessionSnapshots = new Map();
+const previewFeature = {{beginNavigation: () => null, restore: async () => true}};
 const calls = [];
 function normalizeSessionRevision(value) {{ return Number.isInteger(value) && value >= 0 ? value : 0; }}
 function getSessionRevision(id) {{ return revisions[id] || 0; }}
@@ -29670,6 +29685,7 @@ const state = {{
 }};
 const revisions = {{direct: 1, confirm: 2, cancel: 3, blocked: 4, conflict: 5}};
 const authoritativeSessionSnapshots = new Map();
+const previewFeature = {{beginNavigation: () => null, restore: async () => true}};
 const calls = [];
 function normalizeSessionRevision(value) {{ return Number.isInteger(value) && value >= 0 ? value : 0; }}
 function getSessionRevision(id) {{ return revisions[id] || 0; }}

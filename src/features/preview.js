@@ -85,6 +85,388 @@
     let resizeFrame = 0;
     let pendingWidth = null;
     let bound = false;
+    const STORE_KEY = "code-preview-workspaces-v1";
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const uid = () => (global.crypto || globalThis.crypto).randomUUID().replaceAll("-", "");
+    let scope = null;
+    let workspace = null;
+    let epoch = 0;
+    let requestSeq = 0;
+    let openIntentSeq = 0;
+    let orderBase = 0;
+    let gesture = null;
+    let draftId;
+    let restoring = null;
+    let restoreTarget = null;
+    let lastData = null;
+    let rendererSeq = 0;
+    const contentCache = new Map();
+    const CACHE_ENTRIES = 8;
+    const CACHE_BYTES = 8 * 1024 * 1024;
+    let cacheBytes = 0;
+    function dropCached(key) {
+      const item = contentCache.get(key);
+      if (item) { cacheBytes -= item.bytes; contentCache.delete(key); }
+    }
+    function clearCached() { contentCache.clear(); cacheBytes = 0; }
+    function cachePreview(data) {
+      dropCached(data.fileKey);
+      const serialized = JSON.stringify(data);
+      const bytes = Math.max(serialized.length * 2, new TextEncoder().encode(serialized).length);
+      if (bytes > CACHE_BYTES) return;
+      contentCache.set(data.fileKey, { data: Object.freeze({ ...data }), bytes });
+      cacheBytes += bytes;
+      while (contentCache.size > CACHE_ENTRIES || cacheBytes > CACHE_BYTES) dropCached(contentCache.keys().next().value);
+    }
+    function cachedPreview(key) {
+      const item = contentCache.get(key);
+      if (!item) return null;
+      contentCache.delete(key); contentCache.set(key, item);
+      return item.data;
+    }
+    let warned = new Set();
+    const memory = new Map();
+    const invalidRecords = new Set();
+    const closedFiles = new Map();
+    try { draftId = global.sessionStorage.getItem("code-preview-draft") || uid(); }
+    catch (_) { draftId = uid(); }
+    const tabsElement = documentRef.getElementById?.("previewTabs");
+    const keyOf = (ctx) => `${ctx.dataSourceId}:${ctx.sessionId || "draft"}:${ctx.sessionInstanceId}`;
+    const activeTab = () => workspace?.tabs.find((tab) => tab.id === workspace.active);
+    const emptyWorkspace = () => ({ tabs: [], active: null, mru: [], reuse: null, paneOpen: false });
+    function warn(key, onceKey = key) {
+      if (!warned.has(onceKey)) { warned.add(onceKey); showToast(t(key), "warning"); }
+    }
+    function readStore() {
+      const raw = storage?.getItem(STORE_KEY);
+      if (raw == null) return { version: 1, records: {}, migrated: false };
+      const value = JSON.parse(raw);
+      if (value?.version !== 1 || !value.records || typeof value.records !== "object"
+        || Array.isArray(value.records) || Object.keys(value.records).length > 50
+        || new TextEncoder().encode(raw).length > 1048576) throw new Error("store");
+      return value;
+    }
+    function validWorkspace(value) {
+      const object = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
+      const text = (item, max) => typeof item === "string" && item.length > 0 && item.length <= max && !item.includes("\0");
+      const number = (item, min = 0, max = 1e9) => typeof item === "number" && Number.isFinite(item) && item >= min && item <= max;
+      const integer = (item) => number(item) && Number.isSafeInteger(item);
+      if (!object(value) || !Array.isArray(value.tabs) || value.tabs.length > 20
+        || typeof value.paneOpen !== "boolean" || !Array.isArray(value.mru) || value.mru.length > 20) return false;
+      if (!value.tabs.every((tab) => object(tab) && typeof tab.id === "string" && /^[a-f0-9]{32}$/.test(tab.id)
+        && typeof tab.fileKey === "string" && /^[a-f0-9]{64}$/.test(tab.fileKey)
+        && text(tab.path, 32768) && text(tab.locator, 32768)
+        && (tab.name === undefined || text(tab.name, 4096))
+        && (tab.mode == null || ["source", "rendered", "table"].includes(tab.mode))
+        && (tab.scroll === undefined || number(tab.scroll))
+        && (tab.scale == null || number(tab.scale, 0.1, 5))
+        && (tab.page === undefined || integer(tab.page))
+        && (tab.order === undefined || integer(tab.order))
+        && (tab.innerScroll === undefined || (object(tab.innerScroll) && number(tab.innerScroll.top) && number(tab.innerScroll.left))))) return false;
+      const ids = new Set(value.tabs.map((tab) => tab.id));
+      const orders = value.tabs.map((tab, index) => tab.order ?? index + 1);
+      return ids.size === value.tabs.length && new Set(value.tabs.map((tab) => tab.fileKey)).size === value.tabs.length
+        && new Set(orders).size === orders.length
+        && (value.orderCounter === undefined || (integer(value.orderCounter) && value.orderCounter >= Math.max(0, ...orders)))
+        && (value.tabs.length ? ids.has(value.active) : value.active === null)
+        && (value.reuse === null || ids.has(value.reuse))
+        && value.mru.every((id) => ids.has(id)) && new Set(value.mru).size === value.mru.length;
+    }
+    function saveView() {
+      const tab = activeTab();
+      if (!tab || !state.previewPath) return;
+      tab.scroll = Math.max(0, els.filePreview.scrollTop || 0);
+      tab.mode = state.previewMode;
+      tab.scale = state.previewImageScale;
+      tab.page = state.previewTable?.page || 0;
+      const inner = els.filePreview.querySelector(".preview-table-scroll, .image-preview-viewport");
+      if (inner) tab.innerScroll = { top: inner.scrollTop, left: inner.scrollLeft };
+    }
+    function restoreView(tab, line) {
+      if (!line) els.filePreview.scrollTop = tab.scroll || 0;
+      if (state.previewKind === "delimited" && state.previewMode === "table" && state.previewTable) {
+        state.previewTable.page = Math.max(0, Number(tab.page) || 0);
+        renderDelimitedTablePage();
+      }
+      const inner = els.filePreview.querySelector(".preview-table-scroll, .image-preview-viewport");
+      if (inner && tab.innerScroll) {
+        inner.scrollTop = tab.innerScroll.top || 0;
+        inner.scrollLeft = tab.innerScroll.left || 0;
+      }
+    }
+    function persist({ migrated = false } = {}) {
+      if (!scope || !workspace) return false;
+      memory.set(keyOf(scope), clone(workspace));
+      try {
+        if (invalidRecords.has(keyOf(scope))) throw new Error("invalid existing record");
+        if (!scope.sessionId) {
+          const raw = global.sessionStorage.getItem(`code-preview-draft:${keyOf(scope)}`);
+          if (raw !== null) {
+            try { if (new TextEncoder().encode(raw).length > 1048576 || !validWorkspace(JSON.parse(raw))) throw new Error("invalid draft"); }
+            catch (error) { invalidRecords.add(keyOf(scope)); memory.delete(keyOf(scope)); throw error; }
+          }
+          const encodedDraft = JSON.stringify(workspace);
+          if (new TextEncoder().encode(encodedDraft).length > 1048576) throw new Error("draft capacity");
+          global.sessionStorage.setItem("code-preview-draft", draftId);
+          global.sessionStorage.setItem(`code-preview-draft:${keyOf(scope)}`, encodedDraft);
+          if (!migrated) return true;
+        }
+        const store = readStore();
+        const key = keyOf(scope);
+        if (invalidRecords.has(key)) throw new Error("invalid existing record");
+        if (Object.hasOwn(store.records, key) && !validWorkspace(store.records[key])) {
+          invalidRecords.add(key); memory.delete(key); throw new Error("invalid existing record");
+        }
+        if (scope.sessionId) {
+          if (!Object.hasOwn(store.records, key) && Object.keys(store.records).length >= 50) throw new Error("capacity");
+          store.records[key] = clone(workspace);
+        }
+        if (migrated) store.migrated = true;
+        const encoded = JSON.stringify(store);
+        if (new TextEncoder().encode(encoded).length > 1048576) throw new Error("capacity");
+        storage.setItem(STORE_KEY, encoded);
+        return true;
+      } catch (_) { warn("previewStateUnsaved"); return false; }
+    }
+    function clearRenderer(empty = true) {
+      releaseDrag(false);
+      stopAutoRefresh();
+      rendererSeq += 1;
+      requestSeq += 1;
+      state.previewPath = "";
+      state.previewTreePath = "";
+      state.previewContent = "";
+      state.previewTable = null;
+      state.previewKind = "";
+      lastData = null;
+      state._previewMtime = "";
+      markActiveFile();
+      els.filePreview.onclick = null;
+      if (empty) renderNotice(t("noFileOpen"), t("selectFileToPreview"));
+      else { els.filePreview.innerHTML = ""; renderModeActions([]); }
+    }
+    function renderLoading(tab) {
+      els.previewTitle.textContent = tab.name || tab.path.split(/[\\/]/).pop();
+      els.previewMeta.textContent = t("previewLoading");
+      els.previewLanguage.textContent = "";
+      els.filePreview.className = "file-preview loading";
+      els.filePreview.innerHTML = `<div class="preview-notice" role="status"><span>${escapeHtml(t("previewLoading"))}</span></div>`;
+      els.refreshPreview.disabled = true;
+      els.copyPreview.disabled = true;
+    }
+    function beginNavigation() {
+      saveView();
+      persist();
+      const token = { epoch: ++epoch, draft: scope && !scope.sessionId ? clone(workspace) : null,
+        sourceId: scope?.dataSourceId };
+      gesture = null;
+      closedFiles.clear();
+      clearCached();
+      scope = null;
+      workspace = null;
+      restoring = null;
+      restoreTarget = null;
+      clearRenderer();
+      els.workbench.classList.remove("preview-open");
+      if (els.fileTree) { els.fileTree.inert = true; els.fileTree.setAttribute("aria-busy", "true"); }
+      renderTabs();
+      return token;
+    }
+    function renderTabs() {
+      if (!tabsElement) return;
+      const focusedTab = tabsElement.contains(documentRef.activeElement) ? documentRef.activeElement?.dataset?.previewTab : null;
+      tabsElement.replaceChildren();
+      for (const tab of workspace?.tabs || []) {
+        const item = documentRef.createElement("div");
+        item.className = `preview-tab${tab.id === workspace.active ? " active" : ""}`;
+        const button = documentRef.createElement("button");
+        button.type = "button";
+        button.dataset.previewTab = tab.id;
+        button.textContent = tab.name || tab.path.split(/[\\/]/).pop();
+        button.title = tab.path;
+        button.setAttribute("role", "tab");
+        button.setAttribute("aria-selected", String(tab.id === workspace.active));
+        button.tabIndex = tab.id === workspace.active ? 0 : -1;
+        button.addEventListener("click", () => { gesture = null; activate(tab.id); });
+        button.addEventListener("keydown", (event) => {
+          if (event.key === "Delete") { event.preventDefault(); closeTab(tab.id); return; }
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          event.preventDefault();
+          const list = workspace.tabs;
+          let index = list.indexOf(tab);
+          index = event.key === "Home" ? 0 : event.key === "End" ? list.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + list.length) % list.length;
+          activate(list[index].id);
+          tabsElement.querySelector('[aria-selected="true"]')?.focus();
+        });
+        const closeButton = documentRef.createElement("button");
+        closeButton.type = "button";
+        closeButton.className = "preview-tab-close";
+        closeButton.textContent = "×";
+        closeButton.setAttribute("aria-label", t("previewCloseTab", { name: tab.name || tab.path }));
+        closeButton.addEventListener("click", () => closeTab(tab.id));
+        item.append(button, closeButton);
+        tabsElement.appendChild(item);
+      }
+      if (focusedTab) [...tabsElement.querySelectorAll("[data-preview-tab]")].find((button) => button.dataset.previewTab === focusedTab)?.focus({ preventScroll: true });
+      tabsElement.querySelector('[aria-selected="true"]')?.closest(".preview-tab")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+    function fileUrl(path, tab = null, raw = false) {
+      const query = new URLSearchParams({ ...scope, path });
+      if (tab) query.set("fileKey", tab.fileKey);
+      if (raw) { query.set("raw", "1"); query.set("v", state._previewMtime || ""); }
+      return `/api/preview/file?${query}`;
+    }
+    function current(token, tab) {
+      return token.epoch === epoch && token.seq === requestSeq && scope
+        && token.scopeKey === keyOf(scope) && activeTab() === tab && workspace.paneOpen;
+    }
+    async function readActive({ line, refresh = false } = {}) {
+      const tab = activeTab();
+      if (!scope || !tab || !workspace.paneOpen) return;
+      stopAutoRefresh();
+      const token = { epoch, seq: ++requestSeq, scopeKey: keyOf(scope) };
+      try {
+        const data = await apiJson(fileUrl(tab.locator, tab));
+        if (!current(token, tab)) return;
+        if (data.fileKey !== tab.fileKey || data.canonicalAbsolutePath !== tab.path) throw new Error("preview_file_changed");
+        cachePreview(data);
+        if (!refresh || data.contentRevision !== state._previewMtime) {
+          saveView();
+          state.previewMode = tab.mode;
+          renderData(data, { line, scheduleRefresh: false });
+          restoreView(tab, line);
+          if (state.previewKind === "image") applyImageScale(tab.scale ?? null);
+        }
+        startAutoRefresh();
+      } catch (_) {
+        if (!current(token, tab)) return;
+        clearCached();
+        clearRenderer(false);
+        renderNotice(t("previewUnavailable"), tab.path);
+        els.refreshPreview.disabled = false;
+      }
+    }
+    function activate(id, options = {}) {
+      if (!workspace) return;
+      saveView();
+      clearRenderer(false);
+      workspace.active = id;
+      workspace.mru = [id, ...workspace.mru.filter((value) => value !== id)];
+      workspace.paneOpen = true;
+      els.workbench.classList.add("preview-open");
+      renderTabs();
+      persist();
+      const tab = activeTab();
+      const cached = cachedPreview(tab.fileKey);
+      if (cached) { state.previewMode = tab.mode; renderData(cached, { ...options, scheduleRefresh: false }); restoreView(tab, options.line); }
+      else renderLoading(tab);
+      return readActive({ ...options, refresh: Boolean(cached) });
+    }
+    function closeTab(id) {
+      if (!workspace) return;
+      gesture = null;
+      saveView();
+      const wasActive = workspace.active === id;
+      const closing = workspace.tabs.find((tab) => tab.id === id);
+      if (closing) { closedFiles.set(closing.fileKey, ++openIntentSeq); dropCached(closing.fileKey); }
+      workspace.tabs = workspace.tabs.filter((tab) => tab.id !== id);
+      workspace.mru = workspace.mru.filter((value) => value !== id);
+      if (workspace.reuse === id) workspace.reuse = null;
+      if (wasActive) {
+        const next = workspace.mru.find((value) => workspace.tabs.some((tab) => tab.id === value)) || workspace.tabs[0]?.id;
+        if (next) activate(next);
+        else { workspace.active = null; close(); }
+      }
+      renderTabs();
+      persist();
+      if (wasActive && workspace.active) tabsElement?.querySelector('[aria-selected="true"]')?.focus({ preventScroll: true });
+    }
+    async function restore(creationToken = null) {
+      const target = state.sessionId || `draft:${draftId}`;
+      if (!creationToken && restoring && restoreTarget === target) return restoring;
+      const token = beginNavigation();
+      const sessionId = state.sessionId || "";
+      const promise = (async () => {
+        try {
+          const ctx = await apiJson("/api/preview/context", { method: "POST",
+            body: JSON.stringify({ sessionId, draftId: sessionId ? "" : draftId }) });
+          if (token.epoch !== epoch || (state.sessionId || "") !== sessionId) return false;
+          scope = ctx;
+          if (els.fileTree) { els.fileTree.inert = false; els.fileTree.removeAttribute("aria-busy"); }
+          let saved = memory.get(keyOf(ctx));
+          let hasSaved = memory.has(keyOf(ctx));
+          try {
+            const store = readStore();
+            if (!hasSaved && sessionId && Object.hasOwn(store.records, keyOf(ctx))) {
+              saved = store.records[keyOf(ctx)]; hasSaved = true;
+            } else if (!hasSaved && !sessionId) {
+              const raw = global.sessionStorage.getItem(`code-preview-draft:${keyOf(ctx)}`);
+              if (raw !== null) {
+                if (new TextEncoder().encode(raw).length > 1048576) throw new Error("draft capacity");
+                hasSaved = true; saved = JSON.parse(raw);
+              }
+            }
+            const previousPrefix = `${ctx.dataSourceId}:${sessionId}:`;
+            if (sessionId && !hasSaved && Object.entries(store.records).some(([key, record]) => key.startsWith(previousPrefix)
+                && key !== keyOf(ctx) && /^[a-f0-9]{32}$/.test(key.slice(previousPrefix.length))
+                && validWorkspace(record) && record.tabs.length)) {
+              warn("previewTabsUnavailable", `previewTabsUnavailable:${keyOf(ctx)}`);
+            }
+          } catch (_) {
+            if (!sessionId) invalidRecords.add(keyOf(ctx));
+            warn("previewStateUnsaved");
+          }
+          if (hasSaved && !validWorkspace(saved)) { invalidRecords.add(keyOf(ctx)); warn("previewStateUnsaved"); saved = null; }
+          workspace = saved ? clone(saved) : emptyWorkspace();
+          workspace.tabs.forEach((tab, index) => { if (!Number.isFinite(tab.order)) tab.order = index + 1; });
+          workspace.orderCounter = Math.max(0, ...workspace.tabs.map((tab) => tab.order));
+          if (creationToken?.draft && creationToken.epoch === token.epoch - 1
+              && creationToken.sourceId === ctx.dataSourceId && !workspace.tabs.length) {
+            workspace = clone(creationToken.draft);
+          }
+          orderBase = workspace.orderCounter || 0;
+          renderTabs();
+          if (workspace.paneOpen && activeTab()) await activate(workspace.active);
+          if (token.epoch !== epoch) return false;
+          try {
+            if (global.navigator?.locks) await global.navigator.locks.request("code-preview-legacy-migration", async () => {
+              if (token.epoch !== epoch || invalidRecords.has(keyOf(scope))) return;
+              const store = readStore();
+              if (store.migrated || workspace.tabs.length || (store.migrationOwner && store.migrationOwner !== keyOf(scope))) return;
+              if (storage.getItem("code-preview-open") !== "1") return;
+              const path = storage.getItem("code-preview-path");
+              if (!path) return;
+              store.migrationOwner = keyOf(scope);
+              storage.setItem(STORE_KEY, JSON.stringify(store));
+              if (await loadFile(path, undefined, { ready: true }) && token.epoch === epoch) persist({ migrated: true });
+            });
+          } catch (_) { warn("previewStateUnsaved"); }
+          return true;
+        } catch (error) {
+          if (token.epoch === epoch) {
+            scope = null;
+            workspace = null;
+            clearRenderer();
+            renderTabs();
+            if (els.fileTree) { els.fileTree.inert = false; els.fileTree.removeAttribute("aria-busy"); }
+            warn(error?.data?.errorCode === "preview_source_unavailable" ? "previewSourceUnavailable" : "previewUnavailable");
+          }
+          return false;
+        }
+      })();
+      restoring = promise;
+      restoreTarget = target;
+      const settled = () => { if (restoring === promise) { restoring = null; restoreTarget = null; } };
+      void promise.then(settled, settled);
+      return promise;
+    }
+    function newDraft() {
+      draftId = uid();
+      return restore();
+    }
+    function contextWillChange() { return scope ? beginNavigation() : null; }
+    function contextDidChange(token) { if (token?.epoch === epoch) return restore(); }
 
     function applyPreviewWidth(width = state.previewWidth, persist = true) {
       const measuredWorkbenchWidth = Number(els.workbench?.getBoundingClientRect?.().width);
@@ -100,7 +482,7 @@
       const next = Math.min(Math.max(requestedWidth, MIN_PREVIEW_WIDTH), previewLimit);
       state.previewWidth = next;
       documentRef?.documentElement?.style?.setProperty("--preview-width", `${next}px`);
-      if (persist) storage?.setItem("code-preview-width", String(next));
+      if (persist) { try { storage?.setItem("code-preview-width", String(next)); } catch (_) { warn("previewStateUnsaved"); } }
       return next;
     }
 
@@ -115,7 +497,7 @@
         button.title = action.title || action.label;
         button.setAttribute("aria-label", action.title || action.label);
         if (action.disabled) button.disabled = true;
-        button.addEventListener("click", action.onClick);
+        button.addEventListener("click", () => { action.onClick(); saveView(); persist(); });
         els.previewModeActions.appendChild(button);
       });
     }
@@ -232,10 +614,12 @@
       els.filePreview.querySelector('[data-table-page="previous"]')?.addEventListener("click", () => {
         tableState.page -= 1;
         renderDelimitedTablePage();
+        saveView(); persist();
       });
       els.filePreview.querySelector('[data-table-page="next"]')?.addEventListener("click", () => {
         tableState.page += 1;
         renderDelimitedTablePage();
+        saveView(); persist();
       });
     }
 
@@ -292,14 +676,21 @@
     }
 
     function renderImagePreview(path = state.previewPath) {
-      state.previewImageScale = null;
+      state.previewImageScale = activeTab()?.scale ?? null;
       els.filePreview.onclick = null;
       els.filePreview.className = "file-preview image-preview";
-      els.filePreview.innerHTML = `<div class="image-preview-viewport fit"><img src="${previewRawUrl(path, state._previewMtime || "")}" alt="${escapeHtml(path.split(/[\\/]/).pop() || "preview")}" draggable="false" /></div>`;
+      els.filePreview.innerHTML = `<div class="image-preview-viewport fit"><img src="${escapeHtml(fileUrl(activeTab()?.locator || path, activeTab(), true))}" alt="${escapeHtml(path.split(/[\\/]/).pop() || "preview")}" draggable="false" /></div>`;
       const viewport = els.filePreview.querySelector(".image-preview-viewport");
       const image = viewport.querySelector("img");
-      image.addEventListener("load", renderImageActions, { once: true });
-      image.addEventListener("error", () => renderNotice(t("loadFailed"), t("imageReadFailed")), { once: true });
+      const imageEpoch = epoch, imageSeq = rendererSeq;
+      const imageCurrent = () => imageEpoch === epoch && imageSeq === rendererSeq && image.isConnected;
+      els.previewMeta.textContent = formatMeta(lastData || {}, t("previewLoading"));
+      image.addEventListener("load", () => {
+        if (imageCurrent()) { applyImageScale(state.previewImageScale); els.previewMeta.textContent = formatMeta(lastData || {}); }
+      }, { once: true });
+      image.addEventListener("error", () => {
+        if (imageCurrent()) { clearCached(); renderNotice(t("loadFailed"), t("imageReadFailed")); }
+      }, { once: true });
       let imageDrag = null;
       viewport.addEventListener("pointerdown", (event) => {
         if (event.button !== 0 || state.previewImageScale === null) return;
@@ -322,12 +713,20 @@
       els.filePreview.onclick = null;
       els.filePreview.className = "file-preview pdf-preview";
       renderModeActions([]);
-      els.filePreview.innerHTML = `<iframe class="preview-pdf-frame" src="${previewRawUrl(path, state._previewMtime || "")}#view=FitH&toolbar=1&navpanes=0" title="${escapeHtml(path.split(/[\\/]/).pop() || t("previewPdf"))}"></iframe>`;
+      els.filePreview.innerHTML = `<iframe class="preview-pdf-frame" src="${escapeHtml(fileUrl(activeTab()?.locator || path, activeTab(), true))}#view=FitH&toolbar=1&navpanes=0" title="${escapeHtml(path.split(/[\\/]/).pop() || t("previewPdf"))}"></iframe>`;
+      const frame = els.filePreview.querySelector("iframe");
+      const frameEpoch = epoch, frameSeq = rendererSeq;
+      els.previewMeta.textContent = formatMeta(lastData || {}, t("previewLoading"));
+      frame.addEventListener("load", () => {
+        if (frameEpoch === epoch && frameSeq === rendererSeq && frame.isConnected) els.previewMeta.textContent = formatMeta(lastData || {});
+      }, { once: true });
     }
 
     function markActiveFile() {
-      documentRef.querySelectorAll(".file-item").forEach((button) => {
-        button.classList.toggle("active", button.dataset.path === state.previewPath);
+      (documentRef.querySelectorAll?.(".file-item") || []).forEach((button) => {
+        const selected = button.dataset.path === state.previewPath || button.dataset.path === lastData?.path;
+        button.classList.toggle("active", selected);
+        button.closest?.(".file-item-row")?.classList.toggle("active", selected);
       });
     }
 
@@ -341,37 +740,15 @@
     }
 
     function stopAutoRefresh() {
-      if (pollTimer !== null) global.clearInterval(pollTimer);
+      if (pollTimer !== null) global.clearTimeout(pollTimer);
       pollTimer = null;
     }
 
     function startAutoRefresh() {
       stopAutoRefresh();
-      pollTimer = global.setInterval(async () => {
-        if (!state.previewPath || !els.workbench.classList.contains("preview-open")) return;
-        try {
-          const data = await apiJson(`/api/file?path=${encodeURIComponent(state.previewPath)}`);
-          if (!data.updatedAt || data.updatedAt === state._previewMtime) return;
-          state._previewMtime = data.updatedAt;
-          els.previewMeta.textContent = formatMeta(data, t("autoUpdated"));
-          if (state.previewKind === "image") {
-            renderImagePreview(state.previewPath);
-          } else if (state.previewKind === "pdf") {
-            renderPdfPreview(state.previewPath);
-          } else if (!data.binary) {
-            state.previewContent = data.content || "";
-            if (state.previewKind === "markdown") {
-              renderMarkdownPreview(state.previewContent, state.previewMode);
-            } else if (state.previewKind === "delimited") {
-              const ext = state.previewPath.split(".").pop()?.toLowerCase();
-              state.previewTable = null;
-              renderDelimitedPreview(state.previewContent, ext === "tsv" ? "\t" : ",", state.previewMode);
-            } else {
-              renderCodePreview(state.previewContent);
-            }
-          }
-        } catch (_) { /* file may have been deleted or renamed */ }
-      }, 3000);
+      if (scope && workspace?.paneOpen && activeTab()) {
+        pollTimer = global.setTimeout(() => readActive({ refresh: true }), 3000);
+      }
     }
 
     function scrollPreviewToLine(line) {
@@ -384,18 +761,103 @@
 
     async function loadFile(path, mtime, options = {}) {
       void mtime;
-      const data = await apiJson(`/api/file?path=${encodeURIComponent(path)}`);
+      const suppliedIntent = options.intent;
+      const intentSeq = suppliedIntent?.seq ?? (options.ready ? openIntentSeq : ++openIntentSeq);
+      if (!scope && !options.ready) {
+        const expectedEpoch = epoch + (restoring ? 0 : 1);
+        if (restoring) await restoring;
+        else await restore();
+        if (epoch !== expectedEpoch) return false;
+      }
+      if (!scope || !workspace) return false;
+      if (!options.newTab && options.gesture !== "double" && intentSeq !== openIntentSeq) return false;
+      if (suppliedIntent && (suppliedIntent.epoch !== epoch || suppliedIntent.scopeKey !== keyOf(scope))) return false;
+      const ownEpoch = epoch;
+      const context = scope;
+      let ownSeq = suppliedIntent?.requestSeq ?? ++requestSeq;
+      const requestedOrder = suppliedIntent?.order ?? orderBase + intentSeq;
+      workspace.orderCounter = Math.max(workspace.orderCounter || 0, requestedOrder);
+      saveView();
+      if (options.gesture === "double") {
+        if (gesture?.path === path && gesture.epoch === epoch) workspace = clone(gesture.before);
+        gesture = null;
+        options = { ...options, newTab: true };
+      } else if (options.gesture === "single") {
+        gesture = { path, epoch, before: clone(workspace) };
+      } else gesture = null;
+      workspace.orderCounter = Math.max(workspace.orderCounter || 0, requestedOrder);
+      const beforeGesture = gesture;
+      stopAutoRefresh();
+      if (ownSeq === requestSeq) {
+        clearRenderer(false);
+        ownSeq = requestSeq;
+        workspace.paneOpen = true;
+        els.workbench.classList.add("preview-open");
+        renderLoading({ path });
+      }
+      try {
+        const data = await apiJson(fileUrl(path));
+        if (ownEpoch !== epoch || context !== scope || (!options.newTab && ownSeq !== requestSeq)) return false;
+        if (!data.fileKey || !data.canonicalAbsolutePath) throw new Error("identity");
+        if ((closedFiles.get(data.fileKey) || 0) > intentSeq) return false;
+        const foreground = ownSeq === requestSeq;
+        let tab = workspace.tabs.find((item) => item.fileKey === data.fileKey);
+        if (!tab) {
+          const slot = !options.newTab && workspace.tabs.find((item) => item.id === workspace.reuse);
+          if (!slot && workspace.tabs.length >= 20) {
+            warn("previewTabLimit");
+            if (foreground && activeTab()) await activate(workspace.active);
+            return false;
+          }
+          tab = { id: slot?.id || uid(), path: data.canonicalAbsolutePath,
+            locator: data.locator, fileKey: data.fileKey, name: data.name,
+            scroll: 0, mode: null, scale: null, order: slot?.order ?? requestedOrder };
+          if (slot) workspace.tabs.splice(workspace.tabs.indexOf(slot), 1, tab);
+          else workspace.tabs.push(tab);
+          if (!options.newTab) workspace.reuse = tab.id;
+        }
+        if (options.newTab) tab.order = Math.min(tab.order, requestedOrder);
+        workspace.tabs.sort((left, right) => left.order - right.order);
+        cachePreview(data);
+        if (!foreground) {
+          if (!workspace.active) workspace.active = tab.id;
+          renderTabs(); persist(); return true;
+        }
+        if (beforeGesture && gesture === beforeGesture) gesture.committed = true;
+        clearRenderer(false);
+        workspace.active = tab.id;
+        workspace.mru = [tab.id, ...workspace.mru.filter((id) => id !== tab.id)];
+        workspace.paneOpen = true;
+        els.workbench.classList.add("preview-open");
+        state.previewMode = tab.mode;
+        renderData(data, options);
+        restoreView(tab, options.line);
+        renderTabs();
+        persist();
+        return true;
+      } catch (_) {
+        if (ownEpoch === epoch && ownSeq === requestSeq) {
+          clearCached();
+          clearRenderer(false);
+          renderNotice(t("previewUnavailable"), path);
+          showToast(t("previewUnavailable"), "warning");
+        }
+        return false;
+      }
+    }
+
+    function renderData(data, options = {}) {
+      rendererSeq += 1;
+      lastData = data;
       const previousPath = state.previewPath;
-      els.workbench.classList.add("preview-open");
-      applyPreviewWidth(state.previewWidth, true);
-      storage?.setItem("code-preview-open", "1");
-      storage?.setItem("code-preview-path", path);
-      state.previewPath = data.path || path;
+      applyPreviewWidth(state.previewWidth, false);
+      state.previewPath = data.canonicalAbsolutePath;
+      state.previewTreePath = data.path;
       if (previousPath !== state.previewPath) {
         state.previewTable = null;
         state.previewImageScale = null;
       }
-      state._previewMtime = data.updatedAt || "";
+      state._previewMtime = data.contentRevision || "";
       const language = languageFromPath(state.previewPath);
       markActiveFile();
       els.previewTitle.textContent = data.name || "File";
@@ -410,7 +872,7 @@
         els.previewLanguage.textContent = ext;
         renderImagePreview(state.previewPath);
         els.copyPreview.disabled = true;
-        startAutoRefresh();
+        if (options.scheduleRefresh !== false) startAutoRefresh();
         return;
       }
       if (ext === "pdf") {
@@ -419,7 +881,7 @@
         els.previewLanguage.textContent = "pdf";
         renderPdfPreview(state.previewPath);
         els.copyPreview.disabled = true;
-        startAutoRefresh();
+        if (options.scheduleRefresh !== false) startAutoRefresh();
         return;
       }
       if (data.binary) {
@@ -433,11 +895,11 @@
       if (state.previewContent) {
         if (ext === "md" || ext === "markdown" || ext === "mdown") {
           state.previewKind = "markdown";
-          if (previousPath !== state.previewPath) state.previewMode = "rendered";
+          if (!state.previewMode) state.previewMode = "rendered";
           renderMarkdownPreview(state.previewContent, state.previewMode);
         } else if (ext === "csv" || ext === "tsv") {
           state.previewKind = "delimited";
-          if (previousPath !== state.previewPath) state.previewMode = "table";
+          if (!state.previewMode) state.previewMode = "table";
           renderDelimitedPreview(state.previewContent, ext === "tsv" ? "\t" : ",", state.previewMode);
         } else {
           state.previewKind = "text";
@@ -452,51 +914,59 @@
       if (options.line && Number.isInteger(options.line) && options.line > 0) {
         scrollPreviewToLine(options.line);
       }
-      startAutoRefresh();
+      if (options.scheduleRefresh !== false) startAutoRefresh();
     }
 
     function close() {
-      stopAutoRefresh();
+      gesture = null;
+      saveView();
+      if (workspace) workspace.paneOpen = false;
+      persist();
+      clearRenderer();
       els.workbench.classList.remove("preview-open");
-      state.previewPath = "";
-      state.previewContent = "";
-      storage?.removeItem("code-preview-open");
-      storage?.removeItem("code-preview-path");
+      els.togglePreview?.focus?.({ preventScroll: true });
     }
 
-    function toggle() {
-      const opening = !els.workbench.classList.contains("preview-open");
-      if (opening) {
-        els.workbench.classList.add("preview-open");
-        applyPreviewWidth(state.previewWidth, true);
-      } else {
-        close();
-      }
+    async function toggle() {
+      if (workspace?.paneOpen) { close(); return; }
+      if (!scope) await restore();
+      if (!workspace) return;
+      workspace.paneOpen = true;
+      els.workbench.classList.add("preview-open");
+      applyPreviewWidth(state.previewWidth, true);
+      if (activeTab()) await activate(workspace.active);
+      persist();
     }
 
-    function finishDrag(event) {
-      if (!dragState) return;
-      if (event?.pointerId !== undefined && els.previewResizer.hasPointerCapture(event.pointerId)) {
-        els.previewResizer.releasePointerCapture(event.pointerId);
-      }
+    function releaseDrag(commit = false) {
+      const previous = dragState;
+      const width = pendingWidth;
+      if (!previous && !resizeFrame && width === null) return;
+      dragState = null;
+      pendingWidth = null;
       if (resizeFrame) {
         global.cancelAnimationFrame(resizeFrame);
         resizeFrame = 0;
       }
-      applyPreviewWidth(pendingWidth ?? state.previewWidth, true);
-      pendingWidth = null;
-      dragState = null;
-      documentRef.body.classList.remove("resizing-preview");
+      if (previous && els.previewResizer.hasPointerCapture?.(previous.pointerId)) {
+        try { els.previewResizer.releasePointerCapture(previous.pointerId); } catch (_) { /* Already released by the browser. */ }
+      }
+      documentRef.body?.classList.remove("resizing-preview");
       documentRef?.documentElement?.style?.removeProperty?.("--drag-message-list-width");
       documentRef?.documentElement?.style?.removeProperty?.("--drag-preview-content-width");
+      if (commit && previous) applyPreviewWidth(width ?? state.previewWidth, true);
+    }
+    function finishDrag(event) {
+      if (!dragState || (event?.pointerId !== undefined && event.pointerId !== dragState.pointerId)) return;
+      releaseDrag(true);
     }
 
     function bind() {
       if (bound) return;
       bound = true;
       els.refreshPreview.addEventListener("click", () => {
-        if (!state.previewPath) return;
-        loadFile(state.previewPath).catch((error) => showToast(error.message, "error"));
+        gesture = null;
+        readActive();
       });
       els.copyPreview.addEventListener("click", async (event) => {
         event.preventDefault();
@@ -509,7 +979,8 @@
       els.previewResizer.addEventListener("pointerdown", (event) => {
         if (!els.workbench.classList.contains("preview-open")) return;
         event.preventDefault();
-        dragState = { startX: event.clientX, startWidth: state.previewWidth };
+        releaseDrag(false);
+        dragState = { startX: event.clientX, startWidth: state.previewWidth, pointerId: event.pointerId };
         const messageListWidth = els.messageList?.getBoundingClientRect?.().width || 0;
         const previewContentWidth = els.filePreview?.getBoundingClientRect?.().width || 0;
         if (messageListWidth) {
@@ -528,35 +999,30 @@
         documentRef.body.classList.add("resizing-preview");
       });
       els.previewResizer.addEventListener("pointermove", (event) => {
-        if (!dragState) return;
+        if (!dragState || (event.pointerId !== undefined && event.pointerId !== dragState.pointerId)) return;
         pendingWidth = dragState.startWidth - (event.clientX - dragState.startX);
         if (resizeFrame) return;
+        const scheduledDrag = dragState;
         resizeFrame = global.requestAnimationFrame(() => {
+          if (dragState !== scheduledDrag) return;
           applyPreviewWidth(pendingWidth, false);
           resizeFrame = 0;
         });
       });
       els.previewResizer.addEventListener("pointerup", finishDrag);
-      els.previewResizer.addEventListener("pointercancel", finishDrag);
+      els.previewResizer.addEventListener("pointercancel", () => releaseDrag(false));
       global.addEventListener("resize", () => applyPreviewWidth(state.previewWidth));
-    }
-
-    async function restore() {
-      if (storage?.getItem("code-preview-open") !== "1") return false;
-      const savedPath = storage.getItem("code-preview-path");
-      if (!savedPath) return false;
-      try {
-        await loadFile(savedPath);
-        return true;
-      } catch (_) {
-        storage.removeItem("code-preview-open");
-        storage.removeItem("code-preview-path");
-        return false;
-      }
+      global.addEventListener("pagehide", () => { saveView(); persist(); stopAutoRefresh(); releaseDrag(false); clearCached(); });
+      els.filePreview?.addEventListener?.("scroll", () => { saveView(); persist(); }, { passive: true });
     }
 
     return Object.freeze({
       applyPreviewWidth,
+      beginNavigation,
+      newDraft,
+      contextWillChange,
+      contextDidChange,
+      closeTab,
       bind,
       close,
       loadFile,
@@ -566,6 +1032,19 @@
       renderMarkdownPreview,
       renderPdfPreview,
       restore,
+      ensureRestored: () => scope ? Promise.resolve(true) : restoring || restore(),
+      captureOpenIntent: () => { stopAutoRefresh(); const seq = ++openIntentSeq; return { epoch, seq, requestSeq: ++requestSeq,
+        scopeKey: scope ? keyOf(scope) : null,
+        order: workspace ? orderBase + seq : null }; },
+      finishOpenProbe: (token) => { if (token.epoch === epoch && token.seq === openIntentSeq) startAutoRefresh(); },
+      isOpenIntentCurrent: (token, explicit = false) => token.epoch === epoch && Boolean(scope)
+        && token.scopeKey === keyOf(scope) && (explicit || token.seq === openIntentSeq),
+      refreshLanguage: () => {
+        saveView();
+        renderTabs();
+        if (lastData && state.previewPath) { renderData(lastData, { scheduleRefresh: false }); restoreView(activeTab()); }
+        else renderNotice(t("noFileOpen"), t("selectFileToPreview"));
+      },
       stopAutoRefresh,
       toggle,
     });
