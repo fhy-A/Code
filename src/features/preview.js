@@ -101,6 +101,9 @@
     let lastData = null;
     let rendererSeq = 0;
     let review = null;
+    let reviewOrder = null, tabOrderVersion = 0;
+    const manualTabOrder = new Set();
+    let tabDrag = null, tabDragFrame = null, tabLanding = null, blockedTabPointer = null, ignoreTabClick = false;
     let reviewMode = false;
     let reviewRequestsPaused = true;
     const blankSessions = new Map();
@@ -268,6 +271,10 @@
       leaveBlank();
       reviewMode = true;
       reviewRequestsPaused = false;
+      if (!review) {
+        reviewOrder = Math.max((workspace.orderCounter || 0) + 1, orderBase + ++openIntentSeq);
+        workspace.orderCounter = reviewOrder;
+      }
       if (review?.id !== id) review = {id, summary: null, entries: new Map(), scroll: 0};
       const current = review, ownEpoch = epoch;
       workspace.paneOpen = true;
@@ -325,7 +332,7 @@
     }
     function closeReview() {
       const wasActive = reviewMode;
-      stopReviewRequests(); review = null; viewMru = viewMru.filter(id => id !== REVIEW_TAB);
+      stopReviewRequests(); review = null; reviewOrder = null; manualTabOrder.delete(REVIEW_TAB); viewMru = viewMru.filter(id => id !== REVIEW_TAB);
       if (wasActive) {
         reviewMode = false;
         const nextView = viewMru.find(id => blankState?.tabs.some(tab => tab.id === id) || workspace?.tabs.some(tab => tab.id === id));
@@ -533,6 +540,7 @@
       const tab = blankState?.tabs.find(item => item.id === id);
       if (!tab) return;
       const wasActive = activeBlankId === id;
+      manualTabOrder.delete(id);
       stopBlankSearch(tab); blankState.tabs = blankState.tabs.filter(item => item !== tab);
       viewMru = viewMru.filter(value => value !== id);
       if (wasActive) { activeBlankId = null; blankState.active = null; }
@@ -808,6 +816,7 @@
       els.copyPreview.disabled = true;
     }
     function beginNavigation() {
+      cancelTabDrag(); manualTabOrder.clear(); tabOrderVersion = 0; reviewOrder = null;
       closeTabMenu(false); revealTabId = null;
       saveView();
       if (blankState) blankState.mru = [...viewMru];
@@ -834,7 +843,8 @@
       const files = workspace?.tabs || [], blanks = blankState?.tabs || [];
       const list = [...files, ...blanks.map((tab, index) => ({id: tab.id, order: tab.order, isBlank: true,
         name: blanks.length > 1 ? t("previewNewTabNumber", {number: index + 1}) : t("previewNewTab")}))].sort((a, b) => a.order - b.order);
-      if (review) list.push({id: REVIEW_TAB, name: t("reviewInspect")});
+      if (review) list.push({id: REVIEW_TAB, name: t("reviewInspect"), order: reviewOrder});
+      list.sort((a, b) => a.order - b.order);
       const nameOf = tab => tab.name || tab.path.split(/[\\/]/).pop();
       return list.map(tab => {
         const isReview = tab.id === REVIEW_TAB;
@@ -936,8 +946,147 @@
       if (box.left < bounds.left) tabsElement.scrollLeft += box.left - bounds.left;
       else if (box.right > bounds.right) tabsElement.scrollLeft += box.right - bounds.right;
     }
+    function tabSnapshot() {
+      return JSON.stringify([activeViewId(), tabDescriptions().map(tab => [tab.id, Boolean(tab.isBlank), Boolean(tab.isReview), tab.path || '', tab.name, tab.order])]);
+    }
+    function cancelTabDrag() {
+      if (tabLanding) { const landing = tabLanding; tabLanding = null; landing.animation.cancel(); landing.float.remove(); }
+      const drag = tabDrag;
+      if (!drag) return;
+      tabDrag = null;
+      if (tabDragFrame !== null) { global.cancelAnimationFrame(tabDragFrame); tabDragFrame = null; }
+      drag.item.classList.remove('is-tab-dragging'); drag.marker?.remove(); drag.float?.remove();
+      for (const item of drag.geometry || []) { item.node.style.width = ''; item.node.style.flex = ''; item.node.style.transform = ''; item.node.classList.remove('is-tab-shifting'); }
+      documentRef.body?.classList.remove('dragging-preview-tab');
+      try { if (drag.button.hasPointerCapture?.(drag.pointerId)) drag.button.releasePointerCapture(drag.pointerId); } catch (_) { /* Capture may already be lost. */ }
+    }
+    function validTabDrag(drag) {
+      return tabDrag === drag && scope === drag.scope && epoch === drag.epoch && review === drag.review
+        && workspace?.paneOpen && (state.sessionId || '') === (scope?.sessionId || '') && tabSnapshot() === drag.snapshot;
+    }
+    function updateTabDrop(drag, refreshHit = false) {
+      if (!validTabDrag(drag)) { cancelTabDrag(); return; }
+      drag.float.style.transform = `translate3d(${drag.x - drag.grabX}px, ${drag.y - drag.grabY}px, 0)`;
+      const bounds = tabsElement.getBoundingClientRect();
+      // Animated neighbours must not toggle the target under a stationary pointer.
+      if (refreshHit) drag.overClose = Boolean(documentRef.elementFromPoint(drag.x, drag.y)?.closest?.('.preview-tab-close'));
+      drag.valid = drag.x >= bounds.left && drag.x <= bounds.right && drag.y >= bounds.top && drag.y <= bounds.bottom
+        && !drag.overClose;
+      drag.marker.hidden = !drag.valid;
+      const others = drag.geometry.filter(item => item.node !== drag.item);
+      const pointer = drag.x - bounds.left + tabsElement.scrollLeft;
+      let index = others.findIndex(item => pointer < item.left + item.width / 2);
+      if (index < 0) index = others.length;
+      drag.index = index;
+      const edge = index < others.length ? others[index].packedLeft : drag.origin + others.reduce((sum, item) => sum + item.width + drag.gap, 0);
+      drag.marker.style.transform = `translate3d(${edge}px, 0, 0)`;
+      others.forEach((item, i) => { item.node.style.transform = drag.valid ? `translate3d(${item.packedLeft + (i >= index ? drag.width + drag.gap : 0) - item.left}px, 0, 0)` : ''; });
+    }
+    function scrollTabDrag(time) {
+      tabDragFrame = null;
+      const drag = tabDrag;
+      if (!drag?.started || !validTabDrag(drag)) { cancelTabDrag(); return; }
+      const bounds = tabsElement.getBoundingClientRect(), elapsed = Math.min(32, time - (drag.frameTime ?? time));
+      drag.frameTime = time;
+      if (drag.y >= bounds.top && drag.y <= bounds.bottom && drag.x >= bounds.left && drag.x <= bounds.right) {
+        const edge = 32;
+        const speed = drag.x < bounds.left + edge ? -Math.min(1, (bounds.left + edge - drag.x) / edge)
+          : drag.x > bounds.right - edge ? Math.min(1, (drag.x - bounds.right + edge) / edge) : 0;
+        tabsElement.scrollLeft += speed * elapsed;
+      }
+      updateTabDrop(drag);
+      if (tabDrag === drag) tabDragFrame = global.requestAnimationFrame(scrollTabDrag);
+    }
+    function beginTabDrag(event) {
+      if (event.button !== 0 || event.pointerType !== 'mouse' || !scope || !workspace?.paneOpen) return;
+      const button = event.target.closest?.('[data-preview-tab]');
+      if (!button || !tabsElement.contains(button)) return;
+      cancelTabDrag();
+      tabDrag = {button, item: button.closest('.preview-tab'), id: button.dataset.previewTab, pointerId: event.pointerId,
+        x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY,
+        grabX: event.clientX - button.closest('.preview-tab').getBoundingClientRect().left,
+        grabY: event.clientY - button.closest('.preview-tab').getBoundingClientRect().top,
+        scope, epoch, review, snapshot: tabSnapshot(), started: false, valid: false};
+    }
+    function moveTabDrag(event) {
+      const drag = tabDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!validTabDrag(drag) || event.buttons !== 1) { cancelTabDrag(); return; }
+      drag.x = event.clientX; drag.y = event.clientY;
+      if (!drag.started && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) < 6) return;
+      event.preventDefault();
+      if (!drag.started) {
+        drag.started = true; blockedTabPointer = drag.pointerId; closeTabMenu(false);
+        const bounds = tabsElement.getBoundingClientRect(), box = drag.item.getBoundingClientRect();
+        drag.width = box.width; drag.gap = parseFloat(global.getComputedStyle(tabsElement).columnGap) || 0;
+        drag.geometry = [...tabsElement.querySelectorAll('.preview-tab')].map(node => { const rect = node.getBoundingClientRect(); return {node, width: rect.width, left: rect.left - bounds.left + tabsElement.scrollLeft}; });
+        drag.origin = drag.geometry[0].left;
+        let packed = drag.origin;
+        for (const item of drag.geometry) {
+          item.node.style.width = `${item.width}px`; item.node.style.flex = `0 0 ${item.width}px`;
+          if (item.node !== drag.item) { item.packedLeft = packed; packed += item.width + drag.gap; item.node.classList.add('is-tab-shifting'); }
+        }
+        drag.float = drag.item.cloneNode(true);
+        for (const node of [drag.float, ...drag.float.querySelectorAll('*')]) {
+          for (const attribute of [...node.attributes]) if (attribute.name === 'id' || attribute.name === 'role' || attribute.name === 'tabindex' || attribute.name.startsWith('aria-') || attribute.name.startsWith('data-')) node.removeAttribute(attribute.name);
+        }
+        drag.float.classList.add('preview-tab-drag-float'); drag.float.setAttribute('aria-hidden', 'true'); drag.float.inert = true;
+        drag.float.firstElementChild?.classList.add('preview-tab-float-body');
+        Object.assign(drag.float.style, {width: `${box.width}px`, height: `${box.height}px`, flex: 'none'});
+        documentRef.body.appendChild(drag.float);
+        drag.item.classList.add('is-tab-dragging'); documentRef.body?.classList.add('dragging-preview-tab');
+        drag.marker = documentRef.createElement('span'); drag.marker.className = 'preview-tab-drop-marker'; drag.marker.setAttribute('aria-hidden', 'true');
+        Object.assign(drag.marker.style, {width: `${box.width}px`, height: `${box.height}px`, top: `${box.top - bounds.top}px`});
+        tabsElement.appendChild(drag.marker); drag.button.setPointerCapture?.(drag.pointerId);
+        tabDragFrame = global.requestAnimationFrame(scrollTabDrag);
+      }
+      updateTabDrop(drag, true);
+    }
+    function endTabDrag(event, cancelled = false) {
+      const drag = tabDrag;
+      if (blockedTabPointer === event.pointerId) {
+        if (!cancelled) blockedTabPointer = null;
+        ignoreTabClick = true;
+        global.setTimeout(() => { ignoreTabClick = false; }, 0);
+        event.preventDefault();
+      }
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (drag.started && !cancelled) { drag.x = event.clientX; drag.y = event.clientY; updateTabDrop(drag, true); }
+      const commit = drag.started && !cancelled && drag.valid && validTabDrag(drag);
+      const list = commit ? tabDescriptions() : [];
+      const landingFloat = commit ? drag.float : null;
+      if (landingFloat) drag.float = null;
+      cancelTabDrag();
+      if (!commit) return;
+      const next = list.filter(tab => tab.id !== drag.id), moving = list.find(tab => tab.id === drag.id);
+      next.splice(drag.index, 0, moving);
+      if (next.every((tab, index) => tab.id === list[index].id)) { settleTabFloat(landingFloat, drag.item); return; }
+      manualTabOrder.clear();
+      next.forEach((tab, index) => {
+        const order = index + 1; manualTabOrder.add(tab.id);
+        if (tab.id === REVIEW_TAB) reviewOrder = order;
+        else if (tab.isBlank) blankState.tabs.find(item => item.id === tab.id).order = order;
+        else workspace.tabs.find(item => item.id === tab.id).order = order;
+      });
+      workspace.tabs.sort((a, b) => a.order - b.order);
+      workspace.orderCounter = Math.max(workspace.orderCounter || 0, next.length);
+      orderBase = workspace.orderCounter; tabOrderVersion += 1;
+      renderTabs(); persist();
+      const target = [...tabsElement.querySelectorAll('[data-preview-tab]')].find(button => button.dataset.previewTab === drag.id)?.closest('.preview-tab');
+      settleTabFloat(landingFloat, target);
+    }
+    function settleTabFloat(landingFloat, target) {
+      if (landingFloat && target && !global.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+        const box = target.getBoundingClientRect();
+        const animation = landingFloat.animate([{transform: landingFloat.style.transform, opacity: 1}, {transform: `translate3d(${box.left}px, ${box.top}px, 0)`, opacity: 0}], {duration: 140, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'forwards'});
+        const landing = tabLanding = {float: landingFloat, animation};
+        animation.finished.then(() => { if (tabLanding === landing) { tabLanding = null; landingFloat.remove(); } }, () => {});
+      } else landingFloat?.remove();
+    }
     function renderTabs() {
       if (!tabsElement) return;
+      if (tabDrag && validTabDrag(tabDrag)) return;
+      cancelTabDrag();
       const focusedItem = tabsElement.contains(documentRef.activeElement) ? documentRef.activeElement.closest('.preview-tab') : null;
       const focusedTab = focusedItem?.querySelector('[data-preview-tab]')?.dataset.previewTab;
       const focusedClose = documentRef.activeElement?.classList?.contains('preview-tab-close');
@@ -1045,6 +1194,7 @@
     }
     function closeTab(id) {
       if (!workspace) return;
+      manualTabOrder.delete(id);
       gesture = null;
       saveView();
       const wasActive = !reviewMode && !activeBlankId && workspace.active === id;
@@ -1484,6 +1634,7 @@
       const context = scope;
       let ownSeq = suppliedIntent?.requestSeq ?? ++requestSeq;
       const requestedOrder = blankTarget?.order ?? suppliedIntent?.order ?? orderBase + intentSeq;
+      const ownOrderVersion = suppliedIntent?.orderVersion ?? tabOrderVersion;
       workspace.orderCounter = Math.max(workspace.orderCounter || 0, requestedOrder);
       saveView();
       if (options.gesture === "double") {
@@ -1512,6 +1663,8 @@
         if (options.expectedFileKey && data.fileKey !== options.expectedFileKey) throw new Error("identity");
         if ((closedFiles.get(data.fileKey) || 0) > intentSeq) return false;
         const foreground = ownSeq === requestSeq;
+        const finalOrder = blankTarget?.order ?? (ownOrderVersion === tabOrderVersion ? requestedOrder : orderBase + intentSeq);
+        workspace.orderCounter = Math.max(workspace.orderCounter || 0, finalOrder);
         let tab = workspace.tabs.find((item) => item.fileKey === data.fileKey);
         if (!tab) {
           const slot = !options.newTab && workspace.tabs.find((item) => item.id === workspace.reuse);
@@ -1523,12 +1676,12 @@
           }
           tab = { id: blankTarget?.id || slot?.id || uid(), path: data.canonicalAbsolutePath,
             locator: data.locator, fileKey: data.fileKey, name: data.name,
-            scroll: 0, mode: null, scale: null, order: slot?.order ?? requestedOrder };
+            scroll: 0, mode: null, scale: null, order: slot?.order ?? finalOrder };
           if (slot) workspace.tabs.splice(workspace.tabs.indexOf(slot), 1, tab);
           else workspace.tabs.push(tab);
           if (!options.newTab) workspace.reuse = tab.id;
         }
-        if (options.newTab) tab.order = Math.min(tab.order, requestedOrder);
+        if (options.newTab && !blankTarget && !manualTabOrder.has(tab.id)) tab.order = Math.min(tab.order, finalOrder);
         if (blankTarget) {
           blankState.tabs = blankState.tabs.filter(item => item !== blankTarget);
           blankState.active = null; activeBlankId = null;
@@ -1720,8 +1873,23 @@
         buttons[index]?.focus({preventScroll: true}); revealMenuItem(buttons[index]);
       });
       documentRef.addEventListener?.("pointerdown", event => {
+        if (tabLanding) cancelTabDrag();
+        if (!tabDrag) { blockedTabPointer = null; ignoreTabClick = false; }
         if (tabMenuState && !tabListMenu.contains(event.target) && !tabListToggle.contains(event.target)) closeTabMenu(false);
+      }, true);
+      tabsElement?.addEventListener('pointerdown', beginTabDrag);
+      tabsElement?.addEventListener('dragstart', event => event.preventDefault());
+      tabsElement?.addEventListener('click', event => { if (ignoreTabClick && event.detail !== 0) { event.preventDefault(); event.stopImmediatePropagation(); } }, true);
+      documentRef.addEventListener?.('pointermove', moveTabDrag, {passive: false});
+      documentRef.addEventListener?.('pointerup', event => endTabDrag(event), true);
+      documentRef.addEventListener?.('pointercancel', event => endTabDrag(event, true), true);
+      tabsElement?.addEventListener('lostpointercapture', event => {
+        if (tabDrag && event.pointerId === tabDrag.pointerId && event.target === tabDrag.button) cancelTabDrag();
       });
+      documentRef.addEventListener?.('keydown', event => { if (event.key === 'Escape' && tabDrag) { event.preventDefault(); event.stopImmediatePropagation(); cancelTabDrag(); } }, true);
+      global.addEventListener('blur', () => cancelTabDrag());
+      global.addEventListener('pagehide', () => cancelTabDrag());
+      global.addEventListener('resize', () => cancelTabDrag());
       tabsElement?.addEventListener("wheel", event => {
         if (event.ctrlKey || tabsElement.scrollWidth <= tabsElement.clientWidth + 1) return;
         event.preventDefault(); tabsElement.scrollLeft += event.deltaX || event.deltaY;
@@ -1789,7 +1957,7 @@
       ensureRestored: () => scope ? Promise.resolve(true) : restoring || restore(),
       captureOpenIntent: () => { stopAutoRefresh(); const seq = ++openIntentSeq; return { epoch, seq, requestSeq: ++requestSeq,
         scopeKey: scope ? keyOf(scope) : null,
-        order: workspace ? orderBase + seq : null }; },
+        order: workspace ? orderBase + seq : null, orderVersion: tabOrderVersion }; },
       finishOpenProbe: (token) => { if (token.epoch === epoch && token.seq === openIntentSeq) startAutoRefresh(); },
       isOpenIntentCurrent: (token, explicit = false) => token.epoch === epoch && Boolean(scope)
         && token.scopeKey === keyOf(scope) && (explicit || token.seq === openIntentSeq),

@@ -15172,6 +15172,16 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 /* Session preview tabs: one scrollable row, one shared detail renderer. */
 .preview-tabs { display:flex; flex:0 1 auto; min-width:0; overflow-x:auto; overflow-y:hidden; gap:6px; padding:4px; scrollbar-width:thin; overscroll-behavior-inline:contain; }
 .preview-tabs:empty { display: none; }
+.preview-tabs { position:relative; }
+.preview-tab { user-select:none; }
+.preview-tab.is-tab-dragging { visibility:hidden; }
+.preview-tab.is-tab-shifting { transition:transform 140ms cubic-bezier(.2,.8,.2,1); will-change:transform; }
+.preview-tab.preview-tab-drag-float { position:fixed; left:0; top:0; margin:0; z-index:1000; pointer-events:none; box-shadow:0 6px 18px #0004; will-change:transform; }
+.preview-tab.preview-tab-drag-float * { pointer-events:none; }
+.dragging-preview-tab .preview-tab button { cursor:grabbing; }
+.preview-tabs .preview-tab-drop-marker { position:absolute; left:0; margin:0; border:1px dashed var(--accent); border-radius:6px; background:color-mix(in srgb, var(--accent) 10%, transparent); pointer-events:none; z-index:2; }
+.preview-tab-drop-marker[hidden] { display:none; }
+@media (prefers-reduced-motion:reduce) { .preview-tab.is-tab-shifting { transition:none !important; } }
 .preview-tab-strip { display:flex; position:relative; align-items:stretch; min-width:0; gap:4px; border-bottom:1px solid var(--line); }
 .preview-tab-add { flex:0 0 30px; width:30px; margin:4px 4px 4px 0; padding:0; border:1px solid var(--line); border-radius:6px; color:var(--text); background:var(--panel-2); font-size:20px; cursor:pointer; }
 .preview-tab-strip:has(.preview-tabs:empty) .preview-tab-add { margin-left:4px; min-height:32px; }
@@ -15226,7 +15236,7 @@ html[data-theme-mode="light"] .chat-pane.empty-chat .composer:not(:focus-within)
 .preview-head .preview-mode-actions { margin-right:auto; }
 .preview-head .preview-actions:not(:has(#refreshPreview:enabled, #copyPreview:enabled, .preview-mode-actions button, .preview-status:not([hidden]))) { display:none; }
 .preview-head #refreshPreview:disabled, .preview-head #copyPreview:disabled { display:none; }
-.preview-tab > [role="tab"] { display:flex; flex:1 1 auto; align-items:center; gap:6px; padding:5px 6px; }
+.preview-tab > [role="tab"], .preview-tab > .preview-tab-float-body { display:flex; flex:1 1 auto; align-items:center; gap:6px; padding:5px 6px; }
 .preview-tab .preview-tab-icon { flex:0 0 14px; width:14px; height:14px; margin:0; color:inherit; }
 .preview-tab .preview-tab-name { display:flex; flex:1 1 auto; align-items:baseline; min-width:0; margin:0; color:inherit; font-size:12px; overflow:hidden; }
 .preview-tab .preview-tab-name span { margin:0; color:inherit; font:inherit; }
