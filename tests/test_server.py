@@ -29,6 +29,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import server
+from code_runtime import managed_memory
 import launcher
 from code_runtime import data_dir_owner
 
@@ -3989,24 +3990,34 @@ class TestSafeMemoryName(unittest.TestCase):
         self.assertEqual(server.safe_memory_name("a" * 64), "a" * 64)
 
     def test_invalid_empty(self):
-        with self.assertRaisesRegex(ValueError, "invalid memory name"):
+        with self.assertRaises(managed_memory.MemoryError) as caught:
             server.safe_memory_name("")
+        self.assertEqual(caught.exception.code, "memory_name_invalid")
+        self.assertIsInstance(caught.exception, ValueError)
 
     def test_invalid_none(self):
-        with self.assertRaisesRegex(ValueError, "invalid memory name"):
+        with self.assertRaises(managed_memory.MemoryError) as caught:
             server.safe_memory_name(None)
+        self.assertEqual(caught.exception.code, "memory_name_invalid")
+        self.assertIsInstance(caught.exception, ValueError)
 
     def test_invalid_too_long(self):
-        with self.assertRaisesRegex(ValueError, "invalid memory name"):
+        with self.assertRaises(managed_memory.MemoryError) as caught:
             server.safe_memory_name("a" * 65)
+        self.assertEqual(caught.exception.code, "memory_name_invalid")
+        self.assertIsInstance(caught.exception, ValueError)
 
     def test_invalid_special_chars(self):
-        with self.assertRaisesRegex(ValueError, "invalid memory name"):
+        with self.assertRaises(managed_memory.MemoryError) as caught:
             server.safe_memory_name("hello world")
+        self.assertEqual(caught.exception.code, "memory_name_invalid")
+        self.assertIsInstance(caught.exception, ValueError)
 
     def test_invalid_dot(self):
-        with self.assertRaisesRegex(ValueError, "invalid memory name"):
+        with self.assertRaises(managed_memory.MemoryError) as caught:
             server.safe_memory_name("file.md")
+        self.assertEqual(caught.exception.code, "memory_name_invalid")
+        self.assertIsInstance(caught.exception, ValueError)
 
 
 class TestSafeSessionId(unittest.TestCase):

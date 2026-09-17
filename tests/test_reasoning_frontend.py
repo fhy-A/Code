@@ -32,6 +32,10 @@ const els={thinkingPillLabel:element(),modelPillBtn:element(),thinkingPillDropdo
 let model='',cap={schemaVersion:2,intents:['default','low','medium','high']};
 const sandbox={document:{getElementById:id=>ids[id]},els,getSelectedModel:()=>model,selectedModelRoute:()=>({reasoning:cap}),t:x=>x};
 const app=fs.readFileSync('app.js','utf8'),start=app.indexOf('function reasoningIntentLabel('),end=app.indexOf('function closeModelPicker(',start);
+els.maxTokens={value:''};
+const helperStart=app.indexOf('function getEffectiveMaxTokens('),helperEnd=app.indexOf('function updateOutputBudgetSummary(',helperStart);
+assert.ok(helperStart>0&&helperEnd>helperStart,'getEffectiveMaxTokens slice missing');
+vm.runInNewContext(app.slice(helperStart,helperEnd),sandbox);
 vm.runInNewContext(app.slice(start,end),sandbox);
 for(const preference of [...['auto','off','high','max','broken'].map(value=>({mode:'legacy',value})),...['default','low','medium','high'].map(intent=>({mode:'v2',intent})),{mode:'invalid'}]){
  const before=JSON.stringify(preference);sandbox.reasoningPreference=preference;model='';sandbox.updateReasoningPicker();

@@ -324,7 +324,22 @@ class ArchiveService:
 
     def note_meta_write(self, path, meta):
         path = Path(path).absolute()
-        if path.suffix != '.json' or self.r.SESSIONS_DIR.absolute() not in path.parents:
+        # Session metadata lives either flat in SESSIONS_DIR (legacy) or in the
+        # post-migration date layout; the inventory scan uses the same two depths.
+        # This is a depth screen only: the date components are not validated, so a
+        # four-part path elsewhere in the tree still reaches session_id(). The one
+        # subtree excluded by name is the compression-backup archive, which lives
+        # under SESSIONS_DIR/archive and whose own nesting can also be four deep.
+        sessions_dir = self.r.SESSIONS_DIR.absolute()
+        if path.suffix != '.json':
+            return
+        try:
+            parts = path.relative_to(sessions_dir).parts
+        except ValueError:
+            return
+        if parts[0] == 'archive':
+            return
+        if len(parts) not in (1, 4):
             return
         sid = path.stem
         if self.store.generation(sid) is None:

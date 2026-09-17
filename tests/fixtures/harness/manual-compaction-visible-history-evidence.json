@@ -10,7 +10,7 @@
     "startMarker": "async function compactConversation()",
     "endMarker": "function projectOptimisticFirstMessage(",
     "requiredFunction": "function hideCompactConfirm()",
-    "sha256": "da6ae098197df8a53c2a7cff366583d491456e8155821dd09b2a1ade509034c0"
+    "sha256": "bd6684bbae2d9bcc31a981d175058811d997e30bc2509449fbba94047d0e4de6"
   },
   "fixedInputs": {
     "sessionId": "session-h3-2d2-synthetic",
@@ -178,8 +178,8 @@
       "startMarkerCount": 1,
       "endMarkerCount": 1,
       "containsHideCompactConfirm": true,
-      "characterLength": 24179,
-      "sha256": "da6ae098197df8a53c2a7cff366583d491456e8155821dd09b2a1ade509034c0",
+      "characterLength": 23427,
+      "sha256": "bd6684bbae2d9bcc31a981d175058811d997e30bc2509449fbba94047d0e4de6",
       "compiledInVm": true
     },
     "plan": {
@@ -322,7 +322,7 @@
       "evidenceIdsAbsentFromApiPayload": true
     },
     "ui": {
-      "htmlHash": "8c7bc2113d18d78ff86eee88fd23056b5791934b3efc96109800d2866d6acef0",
+      "htmlHash": "6b1f194db2db7360904ce759184ac4af1cfadbb734a5d47516233438fa428d5e",
       "visibleTextHash": "d34fea05af8e7ee5783ddd07b8c3c24d98b15048cf29e4364f9a3c1feb8de5b2",
       "visibleSentinels": [
         "VISIBLE_USER_0",
@@ -351,6 +351,6 @@
       "toolCalls": 0,
       "workerStarts": 0
     },
-    "replayHash": "1e573283e1be160ef2cc3275672ccadefc6bd68c60f5cc29ea4dcc0824326db6"
+    "replayHash": "1ec37fbcaf7472fc7ed4c29851d495c7ce25f520159124aba7bdea6b3ff277aa"
   }
 }

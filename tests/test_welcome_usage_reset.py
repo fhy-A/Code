@@ -31,6 +31,7 @@ const context={state,els:elements,saveSessionState:(...args)=>{saved.push(args);
 vm.createContext(context);
 const install=(start,end)=>vm.runInContext(app.slice(app.indexOf(start),app.indexOf(end,app.indexOf(start))),context);
 install('function cacheActiveSessionState()', 'function isSessionStreaming(');
+context.previewFeature={newDraft:()=>{}};
 install('function clearCurrentSession()', 'function exportMarkdown(');
 const navigation=window.Code.features.sessions.createSessionNavigation({state,elements,storage,stateAccessors:access,
  data:{createSession:async body=>({id:'fresh',title:body.title,projectId:body.projectId,messages:[]}),

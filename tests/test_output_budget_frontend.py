@@ -216,7 +216,9 @@ def test_initial_html_and_classic_identity_use_instance_mode(tmp_path, mode, tit
     html=(ROOT/'index.html').read_bytes()
     for rel in ['index.html','dist/frontend/index.html','dist/frontend/index.classic.html']:
         path=tmp_path/rel; path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(html)
-    scope={'APP_DIR':tmp_path,'INSTANCE_MODE':mode,'parse':parse,'mimetypes':mimetypes}
+    import server as server_mod
+    scope=dict(vars(server_mod))
+    scope.update({'APP_DIR':tmp_path,'INSTANCE_MODE':mode})
     exec(compile(ast.Module(body=[method],type_ignores=[]),'server.py:do_GET','exec'),scope)
     class Response:
         def __init__(self,path): self.path=path; self.wfile=io.BytesIO(); self.headers={}
